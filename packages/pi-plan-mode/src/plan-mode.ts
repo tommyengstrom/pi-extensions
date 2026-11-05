@@ -8,6 +8,7 @@ import {
   renderPlanModeCompletion,
 } from "./completion-tool.js";
 import { implementationPrompt, startFreshImplementation } from "./fresh-implementation.js";
+import { type ImplementationDependencies, registerImplementation } from "./implementation.js";
 import { createPlanStore, type PlanRevision, type PlanStore } from "./plan-store.js";
 import { readPlanModeInstructions } from "./planning-instructions.js";
 import { buildPlanModePrompt } from "./prompt.js";
@@ -23,7 +24,7 @@ import { PLAN_STATE_ENTRY, type PlanState, type PlanWorkflow, restorePlanState }
 import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
 
 type InteractiveUi = typeof import("./interactive-ui.js");
-interface PlanModeDependencies {
+interface PlanModeDependencies extends ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   readInstructions?(): string;
   createStore?: typeof createPlanStore;
@@ -122,7 +123,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     return store;
   }
 
-  async function enter(ctx: ExtensionContext, options: { tools?: string[]; series?: string } = {}) {
+  async function enter(
+    ctx: ExtensionContext,
+    options: { tools?: string[]; series?: string; parent?: PlanRevision } = {},
+  ) {
     idle(ctx);
     if (state.kind !== "idle") return lifecycle(ctx);
     const current = lifecycle(ctx);
@@ -130,15 +134,25 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const store = await makeStore(ctx.cwd, settings.plansDirectory);
     if (!current.isCurrent()) return;
     idle(ctx);
-    const workflow: PlanWorkflow = {
-      projectRoot: store.projectRoot,
-      plansDirectory: settings.plansDirectory,
-      instructions: (dependencies.readInstructions ?? readPlanModeInstructions)(),
-      previousTools: pi.getActiveTools(),
-      ...((options.tools ?? settings.tools) ? { tools: options.tools ?? settings.tools } : {}),
-      ...(options.series ? { series: options.series } : {}),
-    };
-    transition({ kind: "planning", workflow }, ctx);
+    const instructions = (dependencies.readInstructions ?? readPlanModeInstructions)();
+    const previousImplementation = implementation.state;
+    let workflow: PlanWorkflow;
+    try {
+      if (previousImplementation?.phase === "implementing") implementation.detach(ctx);
+      workflow = {
+        projectRoot: store.projectRoot,
+        plansDirectory: settings.plansDirectory,
+        instructions,
+        previousTools: pi.getActiveTools(),
+        ...((options.tools ?? settings.tools) ? { tools: options.tools ?? settings.tools } : {}),
+        ...(options.series ? { series: options.series } : {}),
+        ...(options.parent ? { parent: options.parent } : {}),
+      };
+      transition({ kind: "planning", workflow }, ctx);
+    } catch (error) {
+      if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
+      throw error;
+    }
     const unavailable = planTools(workflow).unavailable;
     if (unavailable.length)
       notify(ctx, `Selected tools are not currently available: ${unavailable.join(", ")}`, "warning");
@@ -196,7 +210,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       event.systemPromptOptions.sections.pi_plan_mode = buildPlanModePrompt(state.workflow.instructions);
       event.systemPromptOptions.selectedTools = planTools(state.workflow).active;
       if (state.kind === "ready" && event.messageType !== "custom") {
-        commit({ kind: "planning", workflow: state.workflow });
+        commit({ kind: "planning", workflow: { ...state.workflow, parent: state.revision } });
         updateStatus(ctx);
       }
     } else {
@@ -264,13 +278,19 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       if (!current.isCurrent()) throw new Error("Plan completion cancelled because the session changed.");
       const revision = await store.save(parsed.plan, {
         series: source.workflow.series,
+        parent: source.kind === "ready" ? source.revision : source.workflow.parent,
+        reason: parsed.reason,
         signal,
         isCurrent: current.isCurrent,
       });
       if (!current.isCurrent())
         throw new Error(`Plan saved at ${revision.path}, but the workflow changed before it could become ready.`);
       try {
-        commit({ kind: "ready", workflow: { ...source.workflow, series: revision.series }, revision });
+        commit({
+          kind: "ready",
+          workflow: { ...source.workflow, series: revision.series, parent: revision },
+          revision,
+        });
       } catch (error) {
         // Retain the published series for a retry, without claiming that readiness was persisted.
         state = { ...source, workflow: { ...source.workflow, series: revision.series } };
@@ -283,6 +303,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       return planModeCompleted(parsed.plan, revision.path);
     },
   });
+
+  const implementation = registerImplementation(pi, dependencies);
 
   async function review(ctx: ExtensionCommandContext, revision?: PlanRevision, store?: PlanStore) {
     if (!ctx.hasUI) throw new Error("Plan review and implementation require TUI or RPC mode.");
@@ -303,9 +325,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       notify(ctx, `Saved for later: ${selected.path}`);
     } else if (action === "continue") {
       let continued: ReturnType<typeof lifecycle> | undefined;
-      if (state.kind === "idle") continued = await enter(ctx, { series: selected.series });
+      if (state.kind === "idle") continued = await enter(ctx, { series: selected.series, parent: selected });
       else {
-        transition({ kind: "planning", workflow: { ...state.workflow, series: selected.series } }, ctx);
+        transition(
+          { kind: "planning", workflow: { ...state.workflow, series: selected.series, parent: selected } },
+          ctx,
+        );
         continued = lifecycle(ctx);
       }
       if (!continued?.isCurrent()) return;
@@ -313,26 +338,57 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         `Continue planning from this saved revision. Do not implement it; ask what should change if the user has not specified revisions.\n\n${plan}`,
       );
     } else if (action === "fresh") {
+      const configuration = source.kind !== "idle" ? source.workflow : await readSettings();
+      if (!current.isCurrent()) return;
+      const tracked = implementation.prepare(
+        ctx,
+        selected,
+        plan,
+        storage,
+        configuration.tools,
+        source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
+      );
+      tracked.plansDirectory = configuration.plansDirectory;
       const before = state;
+      const previousImplementation = implementation.state;
       leave(ctx);
       // Persist the end of ownership before replacement; never write through a disposed source context.
       const handoff = lifecycle(ctx);
       try {
-        const result = await startFreshImplementation(ctx, plan);
+        implementation.detach(ctx);
+        const result = await startFreshImplementation(ctx, plan, tracked);
         if (result.cancelled && handoff.isCurrent()) {
+          implementation.rollback(previousImplementation, ctx);
           if (before.kind !== "idle") transition(before, ctx);
           notify(ctx, "Fresh implementation cancelled. The saved plan is unchanged.");
         }
       } catch (error) {
-        if (handoff.isCurrent() && before.kind !== "idle") transition(before, ctx);
+        if (handoff.isCurrent()) {
+          implementation.rollback(previousImplementation, ctx);
+          if (before.kind !== "idle") transition(before, ctx);
+        }
         throw error;
       }
     } else {
+      const configuration = source.kind !== "idle" ? source.workflow : await readSettings();
+      if (!current.isCurrent()) return;
+      const tracked = implementation.prepare(
+        ctx,
+        selected,
+        plan,
+        storage,
+        configuration.tools,
+        source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
+      );
+      tracked.plansDirectory = configuration.plansDirectory;
       const before = state;
+      const previousImplementation = implementation.state;
       leave(ctx);
       try {
+        implementation.begin(tracked, ctx);
         pi.sendUserMessage(implementationPrompt(plan));
       } catch (error) {
+        if (session === ctx.sessionManager) implementation.rollback(previousImplementation, ctx);
         if (session === ctx.sessionManager && before.kind !== "idle") transition(before, ctx);
         throw error;
       }
@@ -354,7 +410,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const settings = await readSettings();
     const all = pi.getAllTools();
     const selected =
-      (!persistent && state.kind !== "idle" ? state.workflow.tools : settings.tools) ?? defaultPlanTools(all);
+      (!persistent
+        ? state.kind !== "idle"
+          ? state.workflow.tools
+          : (implementation.state?.tools ?? settings.tools)
+        : settings.tools) ?? defaultPlanTools(all);
     const ui = await loadUi();
     if (!current.isCurrent()) return;
     const chosen = await ui.selectPlanTools(ctx, all, selected, current);
@@ -365,6 +425,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       if (current.isCurrent()) notify(ctx, "Tool defaults saved for future planning workflows.");
     } else if (state.kind !== "idle") {
       transition({ ...state, workflow: { ...state.workflow, tools: chosen } }, ctx);
+    } else if (implementation.state) {
+      implementation.setTools(chosen, ctx);
     } else {
       await enter(ctx, { tools: chosen });
     }
@@ -374,12 +436,20 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const current = lifecycle(ctx);
     const choice = await ctx.ui.select(
       "Plan settings",
-      ["Default planning tools", "Reset to strict inspection tools", "Plans subdirectory"],
+      [
+        "Default planning tools",
+        "Reset to strict inspection tools",
+        "Plans subdirectory",
+        "Automatic adherence checks",
+        "Adherence checker model",
+      ],
       { signal: current.signal },
     );
     if (!choice || !current.isCurrent()) return;
     idle(ctx);
     if (choice === "Default planning tools") return tools(ctx, true);
+    if (choice === "Automatic adherence checks" || choice === "Adherence checker model")
+      return implementation.settings(ctx, choice, current.signal);
     if (choice === "Reset to strict inspection tools") {
       await updatePlanModeSettings({ tools: null }, { signal: current.signal });
     } else {
@@ -400,10 +470,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   pi.registerCommand("plan", {
     description: "Plan, review numbered revisions, or implement in a fresh session",
     getArgumentCompletions: (prefix) =>
-      ["start", "saved", "tools", "settings", "finalize", "save", "exit"]
+      ["start", "saved", "tools", "settings", "finalize", "save", "exit", "verify", "resume", "cancel"]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
+      if (args.trim().toLowerCase() === "cancel") {
+        implementation.cancel();
+        return;
+      }
       if (commandOpen) {
         notify(ctx, "A Plan command is already open.", "warning");
         return;
@@ -416,8 +490,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         idle(ctx);
         const input = args.trim();
         const command = input.toLowerCase();
+        if (["verify", "resume"].includes(command)) {
+          if (state.kind !== "idle") throw new Error("Exit planning before verifying or resuming implementation.");
+          await implementation.command(command, ctx);
+          return;
+        }
         if (command === "exit") {
           leave(ctx);
+          implementation.detach(ctx);
           return;
         }
         if (command === "save") {
@@ -460,7 +540,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           const choice = await ctx.ui.select(
             "Plan mode",
             state.kind === "idle"
-              ? ["Start planning", "Saved plans", "Tools", "Settings"]
+              ? [
+                  "Start planning",
+                  "Saved plans",
+                  ...(implementation.state ? ["Verify implementation", "Resume implementation"] : []),
+                  "Tools",
+                  "Settings",
+                ]
               : ["Finalize plan", "Tools", "Save defaults", "Exit planning"],
             { signal: current.signal },
           );
@@ -468,6 +554,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           idle(ctx);
           if (choice === "Start planning") await enter(ctx);
           else if (choice === "Saved plans") await browse(ctx);
+          else if (choice === "Verify implementation") await implementation.command("verify", ctx);
+          else if (choice === "Resume implementation") await implementation.command("resume", ctx);
           else if (choice === "Tools") await tools(ctx);
           else if (choice === "Settings" || choice === "Save defaults") await settingsMenu(ctx);
           else if (choice === "Finalize plan") pi.sendUserMessage(FINALIZE_REQUEST);
@@ -475,12 +563,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           return;
         }
         const previous = state;
+        const previousImplementation = implementation.state;
         const entered = await enter(ctx);
         if (!entered?.isCurrent()) return;
         try {
           pi.sendUserMessage(input);
         } catch (error) {
-          if (previous.kind === "idle") transition(previous, ctx);
+          if (previous.kind === "idle") {
+            transition(previous, ctx);
+            if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
+          }
           throw error;
         }
       } catch (error) {

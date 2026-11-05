@@ -40,6 +40,7 @@ const {
 const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } = await import(
   "@earendil-works/pi-ai"
 );
+const { IMPLEMENTATION_HELPERS, restoreImplementation } = await import("../src/implementation-state.js");
 const { default: planMode } = await import("../src/plan-mode.js");
 const { default: entrypoint } = await import("../src/index.js");
 
@@ -95,7 +96,24 @@ async function fixture(extra?: (pi: ExtensionAPI) => void) {
       stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
       stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: message });
     } else {
-      const text = "Offline response.";
+      const checking = JSON.stringify(context.messages).includes("Assess implementation adherence.");
+      const text = checking
+        ? JSON.stringify({
+            status: "adherent",
+            summary: "Requirement accounted for.",
+            requirements: [
+              {
+                requirement: "Implement the change",
+                revision: "1",
+                status: "implemented",
+                evidence: "src/example.ts:1",
+              },
+            ],
+            changes: [],
+            deviations: [],
+            limitations: [],
+          })
+        : "Offline response.";
       message.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: message });
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
@@ -224,6 +242,9 @@ async function fixture(extra?: (pi: ExtensionAPI) => void) {
       reviewPlan,
       loadUi,
       newSessions,
+      queueTool(name: string, args: ToolCall["arguments"] = {}) {
+        replies.push({ type: "toolCall", id: `tool-${requests.length}`, name, arguments: args });
+      },
       choose(action: ReviewAction) {
         reviewPlan.mockResolvedValueOnce(action);
       },
@@ -267,6 +288,46 @@ function toolNames(messages: Message[]) {
     .map((tool) => tool.name)
     .sort();
 }
+
+test("real completion runs one isolated checker and terminates without a main-agent retry", async () => {
+  const f = await fixture();
+  try {
+    const session = f.runtime.session;
+    await session.prompt("PRIVATE PLANNING CONTENT");
+    await session.prompt("/plan start");
+    await f.complete();
+    f.choose("here");
+    await session.prompt("/plan");
+    await session.waitForIdle();
+    await session.prompt("Keep the material requirements unchanged.");
+    const prefix = f.requests.at(-1);
+    assert.ok(prefix);
+    await session.prompt("Continue following the same plan.");
+    assert.deepEqual(
+      f.requests.at(-1)?.slice(0, prefix.length),
+      prefix,
+      "ordinary implementation turns retain the request prefix",
+    );
+    const before = f.requests.length;
+    f.queueTool("plan_mode_implementation_complete");
+    await session.prompt("Implementation is ready; signal completion now.");
+    assert.equal(f.requests.length, before + 2, "one main tool call plus one fresh checker response");
+    const childRequest = f.requests.at(-1);
+    assert.ok(childRequest);
+    assert.equal(JSON.stringify(childRequest).includes("PRIVATE PLANNING CONTENT"), false);
+    assert.ok(JSON.stringify(childRequest).includes("Keep the material requirements unchanged."));
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.status, "adherent");
+    assert.deepEqual(toolNames(childRequest), ["find", "grep", "ls", "read"]);
+    assert.equal(session.getActiveToolNames().includes("plan_mode_implementation_complete"), false);
+    await session.prompt("UNRELATED AFTER COMPLETION");
+    await session.prompt("/plan resume");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck, undefined);
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "implementing");
+  } finally {
+    await f.dispose();
+  }
+});
 
 test("entrypoint registers inactive helpers and selects real core inspection tools", async () => {
   const f = await fixture();
@@ -422,7 +483,7 @@ test.each([undefined, "save", "continue", "here"] as const)(
         assert.ok(JSON.stringify(request).includes("Inspect the affected code."));
         assert.equal(stateOf(session).kind, action === "continue" ? "planning" : "idle");
         assert.equal(getCurrentSystemPrompt(request).includes(instructions), action === "continue");
-        if (action === "here") assert.deepEqual(session.getActiveToolNames(), previous);
+        if (action === "here") assert.deepEqual(session.getActiveToolNames(), [...previous, ...IMPLEMENTATION_HELPERS]);
       }
     } finally {
       await f.dispose();
@@ -579,14 +640,15 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     const options = f.newSessions[0];
     assert.ok(options);
     assert.equal(typeof options.withSession, "function");
-    assert.equal(options.setup, undefined, "fresh implementation must not copy history");
+    assert.equal(typeof options.setup, "function", "fresh implementation initializes only tracking data");
     assert.equal(options.parentSession, undefined, "in-memory sessions have no parent file");
-    assert.deepEqual(Object.keys(options), ["withSession"]);
+    assert.deepEqual(Object.keys(options), ["setup", "withSession"]);
     assert.deepEqual(f.lifecycle, ["start:startup", "shutdown:new", "start:new"]);
     assert.throws(() => oldContext.sessionManager.getSessionId());
     assert.deepEqual(stateOf(old), { kind: "idle" }, "the source branch must not resume into a completed workflow");
     assert.equal(stateOf(replacement).kind, "idle");
-    assert.deepEqual(replacement.getActiveToolNames(), defaultTools);
+    assert.deepEqual(replacement.getActiveToolNames(), [...defaultTools, ...IMPLEMENTATION_HELPERS]);
+    assert.equal(restoreImplementation(replacement.sessionManager.getBranch())?.phase, "implementing");
     const transferred = f.requests.at(-1);
     assert.ok(transferred);
     const users = transferred.filter((message) => message.role === "user");
@@ -602,7 +664,7 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     assert.equal(JSON.stringify(transferred).includes("Private planning discussion"), false);
     assert.equal(JSON.stringify(replacement.sessionManager.getEntries()).includes("not-for-implementation"), false);
     assert.equal(getCurrentSystemPrompt(transferred).includes(instructions), false);
-    assert.deepEqual(toolNames(transferred), [...defaultTools].sort());
+    assert.deepEqual(toolNames(transferred), [...defaultTools, ...IMPLEMENTATION_HELPERS].sort());
     assert.equal(await readFile(ready.revision.path, "utf8"), plan);
   } finally {
     await f.dispose();

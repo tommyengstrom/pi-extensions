@@ -8,13 +8,13 @@ Explore a codebase, resolve important questions, and review an implementation-re
 
 This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts, settings, and workflow states are not supported or migrated. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
 
-From the outer repository root, run the managed development job:
+From the repository root, run the managed development job:
 
 ```bash
 process-compose run dev
 ```
 
-To load an already-built checkout from `pi-extensions/`:
+To load an already-built checkout from the repository root:
 
 ```bash
 ./node_modules/.bin/pi --no-extensions -e ./packages/pi-plan-mode
@@ -28,6 +28,7 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 2. Let the planner inspect the repository and ask structured questions about material decisions.
 3. The planner calls `plan_mode_complete` with the complete Markdown plan. The result shows the plan and its saved path; **nothing starts automatically**.
 4. Open `/plan` to review the full saved document, then choose an action. **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative.
+5. Implementation remains tracked. The agent saves requested changes with `plan_mode_update`, including a reason, and finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
 
 Plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions.
 
@@ -40,12 +41,15 @@ Plans are decision briefs for an equally capable implementer who can inspect the
 | `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
 | `/plan saved` | Browse the current project's saved series and revisions outside an active workflow. |
 | `/plan tools` | Choose tools and start, or change the current workflow's tools while the agent is idle. |
-| `/plan settings` | Set future-workflow tool defaults, reset strict defaults, or change the storage subdirectory. |
+| `/plan settings` | Set tool/storage defaults, the checker model, or automatic adherence checking. |
+| `/plan verify` | Check the current session's tracked implementation with a fresh agent. |
+| `/plan resume` | Resume implementation tracking after completion or exit, before sending fixes. |
+| `/plan cancel` | Cancel an in-progress adherence check. |
 | `/plan finalize` | Ask the active planner to resolve a remaining material question or submit the complete plan. |
 | `/plan save` | Leave a completed workflow with its already-saved revision available for later. |
 | `/plan exit` | Leave Plan mode and restore the previous active tools; saved files remain. |
 
-Commands require an idle agent with no queued messages. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
+Commands require an idle agent with no queued messages, except `/plan cancel`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
 
 There is no direct `implement` route, and no `show`, `export`, or `off` aliases. Implementation is selected only after document review. Exact subcommand arguments choose routes; other text is a planning request, so `/plan start a migration` is a prompt. See [command workflows](./docs/command-workflows.md).
 
@@ -61,7 +65,7 @@ Default storage is outside the repository:
 
 `getAgentDir()` is normally `~/.pi/agent`, or the configured Pi agent directory. Projects are scoped by the canonical Git root, falling back to the canonical working directory outside Git. The project key combines a readable name with a path hash, so equally named repositories do not share plans.
 
-Every successful completion publishes a new numbered Markdown revision without overwriting an existing file—even when the planner resubmits an unchanged plan after clarification. A new workflow starts a new series; colliding titles are disambiguated. **Continue planning** keeps the selected series and writes its next revision, including when continuing from an older revision.
+Every successful completion publishes a new numbered Markdown revision without overwriting an existing file—even when the planner resubmits an unchanged plan after clarification. Changed revisions require a reason and store parent/hash metadata atomically with the Markdown body. Existing plain Markdown files remain usable as baselines; no historical reasons are invented. A new workflow starts a new series; colliding titles are disambiguated. **Continue planning** keeps the selected series and writes its next revision, including when continuing from an older revision.
 
 `/plan saved` groups this project's files by series and defaults to the latest revision while keeping older revisions selectable. There is no separate saved-plan index or session-local slot. Exiting or implementing does not delete saved files.
 
@@ -74,9 +78,9 @@ Document review shows the complete plan, its revision, and its path. Confirm rev
 - **Save for later** — leaves Plan mode without starting a model turn. The revision is already on disk.
 - **Continue planning** — resumes planning from the reviewed revision in the same series.
 
-The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Plan mode does not override model or thinking choices and does not reinject the plan into later requests; subsequent context is managed by Pi's normal history and compaction.
+The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan.
 
-A successful handoff ends Plan mode in the source session; the saved revision remains available through `/plan saved`. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
+A successful handoff ends restricted planning in the source session and establishes branch-aware implementation tracking in the destination; the saved revision remains available through `/plan saved`. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
 
 ## Tools and trust
 
@@ -103,11 +107,16 @@ The optional settings file is `<getAgentDir()>/pi-plan-mode.json`:
 ```json
 {
   "plansDirectory": "plans",
-  "tools": ["read", "grep", "find", "ls"]
+  "tools": ["read", "grep", "find", "ls"],
+  "verification": { "automatic": true }
 }
 ```
 
 Omit `tools` for strict defaults; `[]` means planning helpers only. `plansDirectory` is a relative subdirectory beneath `<getAgentDir()>/pi-plan-mode`. There is no settings watcher: defaults are read for future workflows, while an active workflow retains its configuration unless you explicitly change its tools.
+
+Verification settings are read for the next check. Omit `verification.model` to use the current model, or set `{ "provider": "provider-id", "id": "model-id" }`. Automatic checks incur an additional model run; set `verification.automatic` to `false` to opt out.
+
+The checker compares the exact approved baseline and its implementation revisions against repository evidence. It receives scoped implementation user messages upfront and can inspect the implementation transcript to identify user-requested changes and reasons for deviations. This content goes to the selected checker provider. It is **not a general code review**, and findings never trigger an automatic repair loop. See [adherence checks](./docs/adherence-checks.md) for transcript scope, limitations, and tool compatibility.
 
 Optional `<getAgentDir()>/pi-plan-mode.md` supplies user-wide planning guidance, snapshotted when a workflow starts. See the [settings reference](./docs/settings.md) for storage rules, safe persistence, and guidance examples.
 

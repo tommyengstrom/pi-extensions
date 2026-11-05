@@ -11,23 +11,22 @@ Both packages retain their source, tests, documentation, and licenses. TUI Kit h
 
 ## Development
 
-From the **outer repo root** (the parent of this workspace), use the [Nix development environment](../README.md):
+The **repository root is the workspace root**: `package.json`, `packages/`, and `process-compose.yaml` live together. From there, use the [Nix development environment](./flake.nix):
 
 ```sh
 nix develop
 process-compose run dev
 ```
 
-The flake supplies Bun 1.4.4, Node 26.13.0, and process-compose. `process-compose run dev` attaches Pi directly to the terminal; `process-compose up dev` is the interactive PTY/TUI alternative. The dev job waits for a successful `install` job, which runs `bun install --frozen-lockfile` in this workspace. Use `process-compose run install` from the outer root for installation only.
+The flake supplies Bun 1.4.4, Node 26.13.0, and process-compose. `process-compose run dev` attaches Pi directly to the terminal; `process-compose up dev` is the interactive PTY/TUI alternative. The dev job waits for a successful `install` job, which runs `bun install --frozen-lockfile` in this workspace. Use `process-compose run install` from the repository root for installation only.
 
 The dev job runs `bun run dev` here: it builds TUI Kit, then Plan mode, and starts Pi with only the local Plan mode extension, avoiding duplicate loading of an installed copy. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
 
 This workspace declares `packageManager: bun@1.4.4` and uses `bun.lock`, not `package-lock.json`. `bunfig.toml` configures a hoisted linker, a three-day minimum release age (excluding the local TUI Kit package), and `run.bun = false` with the system shell. Node remains the runtime; do not use `--bun`. Only `esbuild` is trusted for dependency lifecycle scripts. The root pins it and globally overrides all copies, including transitive ones, to `0.28.2`; this preserves version-specific approval despite Bun's name-only `trustedDependencies`. Review lifecycle approval when changing that version. For intentional dependency/lockfile updates, run `bun install` here and review the resulting changes; regular installs use the frozen process-compose job.
 
-For checks, return from this workspace to the **outer repo root**:
+Run checks from the **repository root**:
 
 ```sh
-cd ..
 process-compose run check           # Builds/static checks, no tests
 process-compose run test-plan-mode  # Plan mode extension tests
 process-compose run test-tui-kit    # TUI Kit library tests
@@ -35,7 +34,7 @@ process-compose run test-tui-kit    # TUI Kit library tests
 
 These jobs belong to the `tests` namespace and are disabled by default; each command explicitly enables its job without starting `dev`. Each performs a frozen install inline so installation failures propagate rather than allowing process-compose to return zero when a failed dependency prevents the job from starting. The test jobs build the workspace and filter Vitest by package directory, preserving shared and isolated execution. **Run the jobs sequentially, never concurrently with each other or `dev`**, because their builds overlap; do not start the whole namespace concurrently.
 
-Other scripts, run from **`pi-extensions/`**, the workspace root:
+Other scripts, also run from the **repository root**:
 
 ```sh
 bun run build                 # Explicit order: TUI Kit, then Plan mode

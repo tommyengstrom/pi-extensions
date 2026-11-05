@@ -4,6 +4,7 @@ import { runConfirmation } from "@narumitw/pi-tui-kit/confirmation";
 import { runDocumentReview } from "@narumitw/pi-tui-kit/document-review";
 import { runMultiSelect } from "@narumitw/pi-tui-kit/multi-select";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
+import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 import type { PlanRevision } from "./plan-store.js";
 import { defaultPlanTools, PLAN_HELPER_NAMES } from "./tool-policy.js";
 
@@ -33,7 +34,11 @@ export async function reviewPlan(
   if (!canPrompt(ctx, lifecycle)) return undefined;
   const reviewed = await runDocumentReview(ctx, {
     title: `Review plan: ${terminalText(revision.title)}`,
-    lines: [`Path: ${terminalText(revision.path)}`, `Revision: ${revision.revision}`],
+    lines: [
+      `Path: ${terminalText(revision.path)}`,
+      `Revision: ${revision.revision}`,
+      ...(revision.history?.reason ? [`Change reason: ${terminalText(revision.history.reason)}`] : []),
+    ],
     content: plan,
     format: { kind: "markdown" },
     viewportSize: "adaptive",
@@ -150,7 +155,7 @@ export async function selectSavedPlan(
   return current(lifecycle) && result.kind === "closed" ? chosen : undefined;
 }
 
-const FIXED_HELPERS = new Set<string>(PLAN_HELPER_NAMES);
+const FIXED_HELPERS = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS]);
 
 /** Return a proposed configuration; activation and persistence belong to the caller. */
 export async function selectPlanTools(

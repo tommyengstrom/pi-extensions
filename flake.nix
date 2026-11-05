@@ -24,8 +24,7 @@
           default = pkgs.mkShell {
             name = "pi-extensions-dev";
 
-            # Keep the Node major aligned with pi-extensions/.node-version.
-            # Bun manages dependencies/scripts; Pi and build/test tools use Node.
+            # Bun manages dependencies/scripts; Pi and build/test tools use Node 26.
             packages = with pkgs; [
               nodejs_26
               bun

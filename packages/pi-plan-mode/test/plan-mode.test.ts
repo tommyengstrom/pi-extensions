@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
+import { IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import planMode from "../src/plan-mode.js";
 import { createPlanStore, type PlanRevision } from "../src/plan-store.js";
 import { buildPlanModePrompt } from "../src/prompt.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
+import type { VerificationInput, VerificationResult } from "../src/verification.js";
 import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
 
 const roots: string[] = [];
@@ -18,7 +20,14 @@ const BASELINE = ["read", "bash", "edit", "write"];
 const PLAN = "# Simplify planning\n\nKeep only material decisions.";
 type Action = "fresh" | "here" | "save" | "continue" | undefined;
 
-async function fixture(config: { tools?: string[]; instructions?: string } = {}) {
+async function fixture(
+  config: {
+    tools?: string[];
+    instructions?: string;
+    automatic?: boolean;
+    verify?: (input: VerificationInput) => Promise<VerificationResult>;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "plan-lifecycle-"));
   roots.push(root);
   const cwd = join(root, "project");
@@ -52,9 +61,14 @@ async function fixture(config: { tools?: string[]; instructions?: string } = {})
   const dependencies = {
     readSettings: async () => {
       await settingsHook?.();
-      return { plansDirectory: "plans", ...(config.tools ? { tools: config.tools } : {}) };
+      return {
+        plansDirectory: "plans",
+        ...(config.tools ? { tools: config.tools } : {}),
+        ...(config.automatic !== undefined ? { verification: { automatic: config.automatic } } : {}),
+      };
     },
     readInstructions: () => instructions,
+    verify: config.verify,
     createStore: (directory: string, plansDirectory?: string) => createPlanStore(directory, plansDirectory, agentDir),
     loadUi: async () => ({
       reviewPlan: async (_ctx: unknown, text: string, _revision: PlanRevision, lifecycle: MenuLifecycle) => {
@@ -69,7 +83,11 @@ async function fixture(config: { tools?: string[]; instructions?: string } = {})
   planMode(mock.pi, dependencies);
   async function emit(event: string, input: unknown = {}, ctx = context.ctx) {
     let result: unknown;
-    for (const handler of mock.events.get(event) ?? []) result = await handler(input, ctx);
+    for (const handler of mock.events.get(event) ?? []) {
+      const next = await handler(input, ctx);
+      if (next !== undefined) result = next;
+      if (event === "tool_call" && next && typeof next === "object" && "block" in next && next.block) break;
+    }
     return result;
   }
   const registeredCommand = mock.commands.get("plan");
@@ -195,10 +213,11 @@ test("completion saves a new numbered file before ready, and revisions keep thei
   await f.emit("before_agent_start", promptEvent());
   assert.equal(f.state().kind, "planning");
   const updated = "# Changed title\n\nRevised decisions.";
-  const second = await f.execute("plan_mode_complete", { plan: updated });
+  await assert.rejects(f.execute("plan_mode_complete", { plan: updated }), /change reason/);
+  const second = await f.execute("plan_mode_complete", { plan: updated, reason: "The user changed the decisions." });
   assert.match(second.details.path, /simplify-planning-02\.md$/);
   assert.equal(await readFile(first.details.path, "utf8"), PLAN);
-  assert.equal(await readFile(second.details.path, "utf8"), updated);
+  assert.ok((await readFile(second.details.path, "utf8")).endsWith(updated));
   assert.deepEqual(await readdir(f.cwd), []);
 });
 
@@ -213,7 +232,10 @@ test("Save for later exits without deleting files and saved plans can be reviewe
   assert.equal(f.state().kind, "planning");
   assert.equal(f.reviews[0], PLAN);
   assert.ok(f.sentUserMessages.at(-1)?.text.includes(PLAN));
-  const revision = await f.execute("plan_mode_complete", { plan: "# Another title\n\nNew brief." });
+  const revision = await f.execute("plan_mode_complete", {
+    plan: "# Another title\n\nNew brief.",
+    reason: "User requested a new brief.",
+  });
   assert.match(revision.details.path, /simplify-planning-02\.md$/);
   assert.ok(await readFile(result.details.path, "utf8"));
 });
@@ -226,10 +248,11 @@ test("Implement here sends exactly the reviewed text and restores normal tools",
   assert.equal(f.reviews.at(-1), PLAN);
   assert.ok(f.sentUserMessages.at(-1)?.text.endsWith(PLAN));
   assert.equal(f.state().kind, "idle");
-  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  assert.deepEqual(f.rawPi.getActiveTools(), [...BASELINE, ...IMPLEMENTATION_HELPERS]);
+  assert.equal(restoreImplementation(f.entries.map((entry) => ({ type: "custom", ...entry })))?.phase, "implementing");
 });
 
-test("fresh handoff transfers only the plan and links the source without custom setup", async () => {
+test("fresh handoff transfers the plan and plain tracking data, not source history", async () => {
   const f = await fixture();
   await ready(f);
   f.choose("fresh");
@@ -241,7 +264,7 @@ test("fresh handoff transfers only the plan and links the source without custom 
       withSession: (ctx: unknown) => Promise<void>;
     }) => {
       assert.match(options.parentSession, /source\.jsonl$/);
-      assert.equal(options.setup, undefined);
+      assert.equal(typeof options.setup, "function");
       await f.emit("session_shutdown");
       await options.withSession({
         sendUserMessage: async (text: string) => {
@@ -438,6 +461,130 @@ test("handoff sends the reviewed snapshot even when the file changes during revi
   await f.command("");
   assert.ok(f.sentUserMessages.at(-1)?.text.endsWith(PLAN));
   assert.equal(await readFile(saved.details.path, "utf8"), "# Changed after review");
+});
+
+const adherenceResult: VerificationResult = {
+  model: { provider: "offline", id: "checker" },
+  report: {
+    status: "adherent",
+    summary: "Implemented.",
+    requirements: [
+      { requirement: "Keep material decisions", revision: "1", status: "implemented", evidence: "src/example.ts:1" },
+    ],
+    changes: [],
+    deviations: [],
+    limitations: [],
+  },
+};
+const implementationOf = (f: Awaited<ReturnType<typeof fixture>>) =>
+  restoreImplementation(f.entries.map((entry) => ({ type: "custom", ...entry })));
+
+test("implementation updates require reasons, preserve baseline, and completion checks by default", async () => {
+  const checked: VerificationInput[] = [];
+  const f = await fixture({
+    verify: async (input) => {
+      checked.push(input);
+      return structuredClone(adherenceResult);
+    },
+  });
+  await ready(f);
+  f.choose("here");
+  await f.command("");
+  const baseline = implementationOf(f);
+  assert.ok(baseline);
+  await assert.rejects(f.execute("plan_mode_update", { plan: "# Changed\n\nNew requirement" }), /reason/);
+  await f.execute("plan_mode_update", {
+    plan: "# Changed\n\nNew requirement",
+    reason: "User requested a new requirement.",
+  });
+  const revised = implementationOf(f);
+  assert.ok(revised);
+  assert.equal(revised.id, baseline.id);
+  assert.equal(revised.revisions.length, 2);
+  assert.deepEqual(revised.revisions[0], baseline.revisions[0]);
+  assert.equal(revised.revisions[1].revision.history?.parent.hash, baseline.revisions[0].hash);
+  await f.emit("session_start");
+  const recovered = await f.execute("plan_mode_implementation_status", {});
+  assert.ok(recovered.content[0].text.includes("# Changed\n\nNew requirement"));
+  const prompt = promptEvent();
+  await f.emit("before_agent_start", prompt);
+  assert.match(prompt.systemPromptOptions.sections.pi_plan_implementation, /BEFORE implementing/);
+  const completed = await f.execute("plan_mode_implementation_complete", {});
+  assert.equal(completed.terminate, true);
+  assert.equal(checked.length, 1);
+  assert.equal(checked[0].implementation.revisions.length, 2);
+  assert.equal(implementationOf(f)?.phase, "completed");
+  assert.equal(implementationOf(f)?.lastCheck?.status, "adherent");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  await assert.rejects(f.execute("plan_mode_implementation_complete", {}), /not active/);
+  await f.command("resume");
+  assert.equal(implementationOf(f)?.phase, "implementing");
+  assert.equal(implementationOf(f)?.lastCheck, undefined);
+});
+
+test("explicit automatic off avoids the checker; manual verification works after exit", async () => {
+  let calls = 0;
+  const f = await fixture({
+    automatic: false,
+    verify: async () => {
+      calls++;
+      return structuredClone(adherenceResult);
+    },
+  });
+  await ready(f);
+  f.choose("here");
+  await f.command("");
+  await f.emit("agent_end");
+  assert.equal(calls, 0);
+  const result = await f.execute("plan_mode_implementation_complete", {});
+  assert.match(result.content[0].text, /not checked/);
+  assert.equal(calls, 0);
+  await f.command("exit");
+  Object.assign(f.ctx, { hasUI: false });
+  await f.command("verify");
+  assert.equal(calls, 1);
+  assert.equal(f.sentMessages.length, 1);
+});
+
+test("tampered history prevents verification and session replacement suppresses stale results", async () => {
+  let calls = 0;
+  const finished = Promise.withResolvers<VerificationResult>();
+  const entered = Promise.withResolvers<void>();
+  const f = await fixture({
+    verify: async () => {
+      calls++;
+      entered.resolve();
+      return finished.promise;
+    },
+  });
+  await ready(f);
+  f.choose("here");
+  await f.command("");
+  const tracked = implementationOf(f);
+  assert.ok(tracked);
+  await writeFile(tracked.revisions[0].revision.path, "# Tampered");
+  const failed = await f.execute("plan_mode_implementation_complete", {});
+  assert.match(failed.content[0].text, /changed on disk/);
+  assert.equal(calls, 0);
+  await writeFile(tracked.revisions[0].revision.path, tracked.revisions[0].plan);
+  await f.command("resume");
+  const pending = f.execute("plan_mode_implementation_complete", {});
+  await entered.promise;
+  await f.emit("session_shutdown");
+  Object.defineProperty(f.ctx, "sessionManager", {
+    configurable: true,
+    get: () => {
+      throw new Error("Stale source context touched");
+    },
+  });
+  finished.resolve(structuredClone(adherenceResult));
+  const cancelled = await pending;
+  assert.match(cancelled.content[0].text, /cancelled/);
+  assert.equal(
+    f.entries.filter((entry) => entry.customType === "pi-plan-check").length,
+    1,
+    "only the earlier failed attempt was persisted",
+  );
 });
 
 test("malformed current state does not reconstruct a workflow from prose or unrelated entries", () => {

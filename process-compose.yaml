@@ -3,13 +3,13 @@ version: "0.5"
 processes:
   install:
     command: bun install --frozen-lockfile
-    working_dir: ./pi-extensions
+    working_dir: .
     availability:
       restart: "no"
 
   dev:
     command: bun run dev
-    working_dir: ./pi-extensions
+    working_dir: .
     # `process-compose run dev` gives Pi the terminal directly; `up` uses a PTY.
     is_interactive: true
     depends_on:
@@ -25,7 +25,7 @@ processes:
     namespace: tests
     disabled: true
     command: bun install --frozen-lockfile && bun run check
-    working_dir: ./pi-extensions
+    working_dir: .
     availability:
       restart: "no"
 
@@ -33,7 +33,7 @@ processes:
     namespace: tests
     disabled: true
     command: bun install --frozen-lockfile && bun run test packages/pi-plan-mode/test/
-    working_dir: ./pi-extensions
+    working_dir: .
     availability:
       restart: "no"
 
@@ -41,6 +41,6 @@ processes:
     namespace: tests
     disabled: true
     command: bun install --frozen-lockfile && bun run test packages/pi-tui-kit/test/
-    working_dir: ./pi-extensions
+    working_dir: .
     availability:
       restart: "no"

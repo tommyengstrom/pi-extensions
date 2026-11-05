@@ -19,6 +19,12 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
   additionalProperties: false,
   required: ["plan"],
   properties: {
+    reason: {
+      type: "string",
+      minLength: 1,
+      maxLength: 8000,
+      description: "What changed and why; required when revising a saved plan.",
+    },
     plan: {
       type: "string",
       minLength: 1,
@@ -29,7 +35,7 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
   },
 } as const;
 
-type NormalizePlanModeCompletionResult = { ok: true; plan: string } | { ok: false; error: string };
+type NormalizePlanModeCompletionResult = { ok: true; plan: string; reason?: string } | { ok: false; error: string };
 
 export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCompletionResult {
   if (!isRecord(input) || typeof input.plan !== "string") {
@@ -43,7 +49,12 @@ export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCo
       error: `plan must not exceed ${PLAN_MODE_MAX_CHARS} characters`,
     };
   }
-  return { ok: true, plan };
+  if (
+    input.reason !== undefined &&
+    (typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 8000)
+  )
+    return { ok: false, error: "reason must be nonempty and at most 8000 characters" };
+  return { ok: true, plan, ...(typeof input.reason === "string" ? { reason: input.reason.trim() } : {}) };
 }
 
 export function planFromCompletionDetails(value: unknown) {

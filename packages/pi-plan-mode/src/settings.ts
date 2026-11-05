@@ -5,7 +5,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { planDirectoryComponents } from "./plan-store.js";
 
+export interface VerificationSettings {
+  automatic: boolean;
+  model?: { provider: string; id: string };
+}
+
 export interface PlanModeSettings {
+  verification?: VerificationSettings;
   /** Relative paths are resolved from getAgentDir()/pi-plan-mode by plan storage. */
   plansDirectory: string;
   /** Omitted means canonical read-only built-ins; an empty list means helpers only. */
@@ -27,13 +33,18 @@ export async function readPlanModeSettings(path = planModeSettingsPath()): Promi
 }
 
 export async function updatePlanModeSettings(
-  patch: { plansDirectory?: string; tools?: readonly string[] | null },
+  patch: {
+    plansDirectory?: string;
+    tools?: readonly string[] | null;
+    verification?: { automatic?: boolean; model?: VerificationSettings["model"] | null };
+  },
   options: { settingsPath?: string; signal?: AbortSignal } = {},
 ): Promise<PlanModeSettings> {
   const settingsPath = resolve(options.settingsPath ?? planModeSettingsPath());
   const { signal } = options;
   // Capture inputs before waiting behind another editor's update.
   const plansDirectory = patch.plansDirectory;
+  const verification = patch.verification ? structuredClone(patch.verification) : undefined;
   const tools =
     patch.tools === undefined || patch.tools === null ? patch.tools : parseSettings({ tools: patch.tools }).tools;
   return enqueueMutation(settingsPath, async () => {
@@ -42,6 +53,12 @@ export async function updatePlanModeSettings(
     if (plansDirectory !== undefined) document.plansDirectory = plansDirectory;
     if (tools === null) delete document.tools;
     else if (tools !== undefined) document.tools = tools;
+    if (verification) {
+      const previous = document.verification as Record<string, unknown> | undefined;
+      const next = { ...previous, ...verification };
+      if (verification.model === null) delete next.model;
+      document.verification = next;
+    }
     const settings = parseSettings(document);
     // Persist normalized owned fields without dropping unrelated settings.
     document.plansDirectory = settings.plansDirectory;
@@ -67,6 +84,29 @@ function parseSettings(value: unknown): PlanModeSettings {
     throw new Error(`Invalid pi-plan-mode settings: plansDirectory: ${detail}`);
   }
   const settings: PlanModeSettings = { plansDirectory };
+  if (Object.hasOwn(document, "verification")) {
+    const value = document.verification;
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("Invalid verification settings: expected an object");
+    const verification = value as Record<string, unknown>;
+    if (verification.automatic !== undefined && typeof verification.automatic !== "boolean")
+      throw new Error("Invalid verification.automatic: expected a boolean");
+    settings.verification = { automatic: (verification.automatic as boolean | undefined) ?? true };
+    if (Object.hasOwn(verification, "model")) {
+      const model = verification.model;
+      if (typeof model !== "object" || model === null || Array.isArray(model))
+        throw new Error("Invalid verification.model");
+      const fields = model as Record<string, unknown>;
+      if (
+        typeof fields.provider !== "string" ||
+        !fields.provider.trim() ||
+        typeof fields.id !== "string" ||
+        !fields.id.trim()
+      )
+        throw new Error("Invalid verification.model: provider and id are required");
+      settings.verification.model = { provider: fields.provider, id: fields.id };
+    }
+  }
   if (Object.hasOwn(document, "tools")) {
     const tools = document.tools;
     if (!Array.isArray(tools) || !tools.every((name) => typeof name === "string" && name.trim().length > 0)) {

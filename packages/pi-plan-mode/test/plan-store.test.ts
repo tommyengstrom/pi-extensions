@@ -60,6 +60,32 @@ test("default storage uses getAgentDir, contains readable project and title name
   });
 });
 
+test("revision metadata is atomic, explains changes, and tracks actual parents rather than filename order", async () => {
+  await withStore(async ({ store }) => {
+    const first = await store.save(PLAN);
+    await assert.rejects(store.save("# Changed", { series: first.series, parent: first }), /change reason/);
+    const second = await store.save("# Changed", {
+      series: first.series,
+      parent: first,
+      reason: "User requested changed scope.",
+    });
+    const third = await store.save("# Alternate", {
+      series: first.series,
+      parent: first,
+      reason: "User requested an alternative from the baseline.",
+    });
+    assert.equal(third.revision, 3);
+    assert.equal(third.history?.parent.revision, 1);
+    assert.equal(await store.read(second), "# Changed");
+    assert.deepEqual(await store.list(), [third, second, first]);
+    const unchanged = await store.save("# Alternate", { series: first.series, parent: third });
+    assert.equal(unchanged.history?.reason, undefined);
+    await writeFile(third.path, "# External replacement");
+    await assert.rejects(store.read(third), /metadata has changed/);
+    assert.equal(await store.read(first), PLAN);
+  });
+});
+
 test("Git roots unify nested directories and canonical aliases; linked worktrees get their own canonical root", async () => {
   await withStore(async ({ root, project, agent }) => {
     await git(project, "init", "--quiet");

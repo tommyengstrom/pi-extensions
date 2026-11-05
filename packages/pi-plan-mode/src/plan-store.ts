@@ -7,11 +7,22 @@ import { promisify } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { normalizePlanModeCompletion, PLAN_MODE_MAX_CHARS } from "./completion-tool.js";
 
+export interface RevisionHistory {
+  version: 1;
+  parent: { series: string; revision: number; hash: string };
+  reason?: string;
+}
+
+export function planHash(plan: string): string {
+  return createHash("sha256").update(plan).digest("hex");
+}
+
 export interface PlanRevision {
   series: string;
   revision: number;
   path: string;
   title: string;
+  history?: RevisionHistory;
 }
 
 export interface PlanStore {
@@ -21,7 +32,14 @@ export interface PlanStore {
   read(revision: PlanRevision): Promise<string>;
   save(
     plan: string,
-    options?: { series?: string; isCurrent?: () => boolean; signal?: AbortSignal },
+    options?: {
+      series?: string;
+      parent?: PlanRevision;
+      parentPlan?: string;
+      reason?: string;
+      isCurrent?: () => boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<PlanRevision>;
 }
 
@@ -29,7 +47,32 @@ const execFileAsync = promisify(execFile);
 const SERIES_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_SERIES_LENGTH = 120;
 // UTF-8 needs at most three bytes per JavaScript UTF-16 code unit.
-const MAX_PLAN_BYTES = PLAN_MODE_MAX_CHARS * 3;
+const MAX_PLAN_BYTES = PLAN_MODE_MAX_CHARS * 3 + 32_768;
+const METADATA_PREFIX = "<!-- pi-plan-revision-v1:";
+
+function decodeDocument(document: string): { plan: string; history?: RevisionHistory } {
+  if (!document.startsWith(METADATA_PREFIX)) return { plan: document };
+  const end = document.indexOf(" -->\n");
+  if (end < 0 || end > 32_768) throw new InvalidPlanFile("Invalid revision metadata.");
+  let history: RevisionHistory;
+  try {
+    history = JSON.parse(Buffer.from(document.slice(METADATA_PREFIX.length, end), "base64").toString("utf8"));
+    if (
+      history.version !== 1 ||
+      !history.parent ||
+      !/^[a-f0-9]{64}$/.test(history.parent.hash) ||
+      !Number.isSafeInteger(history.parent.revision) ||
+      history.parent.revision < 1 ||
+      (history.reason !== undefined &&
+        (typeof history.reason !== "string" || !history.reason.trim() || history.reason.length > 8_000))
+    )
+      throw new Error();
+    validateSeries(history.parent.series);
+  } catch {
+    throw new InvalidPlanFile("Invalid revision metadata.");
+  }
+  return { plan: document.slice(end + 5), history };
+}
 
 class InvalidPlanFile extends Error {}
 
@@ -78,7 +121,10 @@ export async function createPlanStore(
     const expectedPath = revisionPath(revision.series, revision.revision);
     if (revision.path !== expectedPath) throw new Error("Plan revision does not belong to this store.");
     await checkDirectory();
-    return readPlanFile(expectedPath);
+    const document = await readPlanFile(expectedPath);
+    if (JSON.stringify(document.history) !== JSON.stringify(revision.history))
+      throw new Error("Plan revision metadata has changed.");
+    return document.plan;
   }
 
   async function list() {
@@ -89,8 +135,8 @@ export async function createPlanStore(
       if (!parsed || !entry.isFile()) continue;
       const path = join(directory, entry.name);
       try {
-        const plan = await readPlanFile(path);
-        revisions.push({ ...parsed, path, title: planTitle(plan) });
+        const { plan, history } = await readPlanFile(path);
+        revisions.push({ ...parsed, path, title: planTitle(plan), ...(history ? { history } : {}) });
       } catch (error: unknown) {
         // A removed, malformed, oversized, or symlinked file is not a saved plan.
         if (!(error instanceof InvalidPlanFile) && !hasCode(error, "ENOENT") && !hasCode(error, "ELOOP")) throw error;
@@ -103,7 +149,27 @@ export async function createPlanStore(
     const normalized = normalizePlanModeCompletion({ plan });
     if (!normalized.ok) throw new Error(normalized.error);
     const content = normalized.plan;
+    if (content.startsWith(METADATA_PREFIX))
+      throw new Error("Plan body must not begin with reserved revision metadata.");
     const title = planTitle(content);
+    let history: RevisionHistory | undefined;
+    if (options.parent) {
+      if (options.series !== options.parent.series) throw new Error("Revision parent must belong to the same series.");
+      const parentPlan = options.parentPlan ?? (await read(options.parent));
+      if (planHash(await read(options.parent)) !== planHash(parentPlan))
+        throw new Error("Parent plan changed on disk.");
+      const reason = options.reason?.trim();
+      if (content !== parentPlan && !reason) throw new Error("A changed plan requires a change reason.");
+      if (reason && reason.length > 8_000) throw new Error("Change reason exceeds 8000 characters.");
+      history = {
+        version: 1,
+        parent: { series: options.parent.series, revision: options.parent.revision, hash: planHash(parentPlan) },
+        ...(reason ? { reason } : {}),
+      };
+    }
+    const header = history ? `${METADATA_PREFIX}${Buffer.from(JSON.stringify(history)).toString("base64")} -->\n` : "";
+    if (header.length > 32_768) throw new Error("Revision metadata exceeds 32768 bytes.");
+    const document = header + content;
     const baseSeries = slug(title);
     if (options.series !== undefined) validateSeries(options.series);
     const checkCurrent = () => {
@@ -120,7 +186,7 @@ export async function createPlanStore(
     try {
       try {
         checkCurrent();
-        await file.writeFile(content, "utf8");
+        await file.writeFile(document, "utf8");
         await file.sync();
       } catch (error: unknown) {
         await file.close().catch(() => {});
@@ -152,7 +218,7 @@ export async function createPlanStore(
           // anything. The short synchronous syscall leaves no cancellation gap between
           // the ownership check and publication. EEXIST retries work across processes.
           linkSync(temporaryPath, path);
-          return { series, revision, path, title };
+          return { series, revision, path, title, ...(history ? { history } : {}) };
         } catch (error: unknown) {
           if (!hasCode(error, "EEXIST")) throw error;
         }
@@ -239,9 +305,10 @@ async function readPlanFile(path: string) {
     } catch {
       throw new InvalidPlanFile("Plan file is not valid UTF-8.");
     }
-    const normalized = normalizePlanModeCompletion({ plan });
+    const decoded = decodeDocument(plan);
+    const normalized = normalizePlanModeCompletion({ plan: decoded.plan });
     if (!normalized.ok) throw new InvalidPlanFile(normalized.error);
-    return normalized.plan;
+    return { ...decoded, plan: normalized.plan };
   } finally {
     await file.close();
   }

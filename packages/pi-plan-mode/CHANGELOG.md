@@ -9,7 +9,14 @@
 - Make implementation an explicit action after reviewing the complete saved document. Fresh implementation is always the first/default choice and transfers only the reviewed plan, with a parent link when the source session is persisted. Implement here remains an explicit alternative. Completion displays the saved path and waits for `/plan`; it does not automatically open actions or launch implementation.
 - Default to canonical built-in `read`, `grep`, `find`, and `ls`, plus the planning helpers. Temporarily activate the selected direct tools and restore the previous loadout afterwards. Allow idle workflow-local changes through `/plan tools`; gate every host-mediated nested call by its own allowed name.
 - Remove shell parsing and special limited-shell policies. Explicitly selected nondefault tools, including shells and built-in-name overrides, are trusted and may mutate files or external state. Plan mode is not an OS sandbox.
-- Reduce settings to `plansDirectory` and optional `tools`, with future-workflow defaults and no watcher. Remove thinking/model overrides, shortcuts, implementation-plan reinjection, shell configuration, legacy settings migration, and direct `implement`, `show`, `export`, and `off` command routes.
+- Use `plansDirectory` and optional `tools` for future-workflow defaults, plus `verification` for checker settings, with no watcher. Remove main-agent thinking/model overrides, shortcuts, repeated implementation-plan reinjection, shell configuration, legacy settings migration, and direct `implement`, `show`, `export`, and `off` command routes.
+
+### Implementation adherence
+
+- Retain branch-aware implementation tracking after fresh/here handoff, with exact baseline snapshots and explicit revision ancestry. Changed plans require reasons; legacy plain Markdown files remain usable as baselines.
+- Add `plan_mode_update`, `plan_mode_implementation_status` for compaction recovery, standalone `plan_mode_implementation_complete`, `/plan verify`, `/plan resume`, and `/plan cancel`. Completion runs a fresh adherence checker by default; `verification.automatic: false` opts out and `verification.model` selects a separate checker model.
+- Give the checker scoped implementation user messages upfront and private on-demand transcript access for user changes and deviation rationale, alongside independent repository inspection. Never copy planning history or previous checker verdicts. Findings do not trigger automatic repairs.
+- Add stable implementation guidance and durable plan references without repeatedly reinjecting the plan. Tool selection and transcript boundaries remain explicit; resume tracking before requesting post-completion changes.
 
 ### Retained
 

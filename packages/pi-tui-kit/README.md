@@ -113,7 +113,7 @@ The `/markdown` module itself does not load `grok-mermaid`; consumers await prep
 Every documented interaction, display, and testing subpath exposes a focused ESM and declaration graph.
 The package root retains every existing export for compatibility.
 
-Repository maintainers can benchmark cold root and focused-subpath imports plus first action, code-review, Mermaid, and task frames in fresh serial processes. After installing through the [workspace development flow](../../README.md), run from the `pi-extensions/` workspace root:
+Repository maintainers can benchmark cold root and focused-subpath imports plus first action, code-review, Mermaid, and task frames in fresh serial processes. After installing through the [workspace development flow](../../README.md), run from the repository root (also the workspace root):
 
 ```bash
 bun run --cwd packages/pi-tui-kit build
@@ -152,9 +152,9 @@ Kit's UI lifecycle handling does not replace those responsibilities.
 
 ## 🧪 Local showcase
 
-For workspace builds/static checks and Vitest tests, use `process-compose run check` from the outer repo root (`cd ..` from `pi-extensions/`). It opts into the check job, which performs its own frozen install inline before checking so install failures propagate; it does not start dev. Do not run it concurrently with dev or the showcase build because their builds overlap.
+From the repository root, use `process-compose run check` for workspace builds/static checks and `process-compose run test-tui-kit` for Kit's Vitest tests. Each opts into its own job and performs a frozen install inline so install failures propagate; neither starts dev. Run them sequentially, never concurrently with each other, dev, or the showcase build because their builds overlap.
 
-First run `nix develop` and `process-compose run install` from the outer repo root. Then, from the `pi-extensions/` workspace root, build Kit and start Pi with the local demo extension:
+First run `nix develop` and `process-compose run install` from the repository root. Then, from that same directory, build Kit and start Pi with the local demo extension:
 
 ```bash
 bun run showcase:tui-kit

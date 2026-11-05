@@ -11,6 +11,7 @@ export interface PlanWorkflow {
   /** Undefined means canonical inspection tools, not arbitrary tools with those names. */
   tools?: string[];
   series?: string;
+  parent?: PlanRevision;
 }
 
 export type PlanState =
@@ -35,7 +36,8 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       Buffer.byteLength(workflow.instructions, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
       !names(workflow.previousTools) ||
       (workflow.tools !== undefined && !names(workflow.tools)) ||
-      (workflow.series !== undefined && !text(workflow.series))
+      (workflow.series !== undefined && !text(workflow.series)) ||
+      (workflow.parent !== undefined && !validRevision(workflow.parent))
     )
       return { kind: "idle" };
     const restored: PlanWorkflow = {
@@ -45,11 +47,12 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       previousTools: [...workflow.previousTools],
       ...(workflow.tools !== undefined ? { tools: [...workflow.tools] } : {}),
       ...(workflow.series !== undefined ? { series: workflow.series } : {}),
+      ...(validRevision(workflow.parent) ? { parent: workflow.parent } : {}),
     };
     if (value.kind === "planning") return { kind: "planning", workflow: restored };
     const revision = value.revision;
     if (
-      !record(revision) ||
+      !validRevision(revision) ||
       !text(revision.series) ||
       !text(revision.path) ||
       typeof revision.title !== "string" ||
@@ -63,10 +66,45 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
     return {
       kind: "ready",
       workflow: restored,
-      revision: { series: revision.series, revision: revision.revision, path: revision.path, title: revision.title },
+      revision: {
+        series: revision.series,
+        revision: revision.revision,
+        path: revision.path,
+        title: revision.title,
+        ...(validRevision(revision) && revision.history ? { history: revision.history } : {}),
+      },
     };
   }
   return { kind: "idle" };
+}
+
+export function validRevision(value: unknown): value is PlanRevision {
+  if (
+    !record(value) ||
+    !text(value.series) ||
+    !text(value.path) ||
+    typeof value.title !== "string" ||
+    value.title.length > 50_000 ||
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) < 1
+  )
+    return false;
+  if (value.history !== undefined) {
+    const h = value.history;
+    if (
+      !record(h) ||
+      h.version !== 1 ||
+      !record(h.parent) ||
+      !text(h.parent.series) ||
+      !Number.isSafeInteger(h.parent.revision) ||
+      (h.parent.revision as number) < 1 ||
+      typeof h.parent.hash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(h.parent.hash) ||
+      (h.reason !== undefined && (typeof h.reason !== "string" || !h.reason.trim() || h.reason.length > 8000))
+    )
+      return false;
+  }
+  return true;
 }
 
 function record(value: unknown): value is Record<string, unknown> {

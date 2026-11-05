@@ -1,16 +1,28 @@
 import { existsSync } from "node:fs";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import { IMPLEMENTATION_ENTRY, type ImplementationState } from "./implementation-state.js";
 
 export function implementationPrompt(plan: string) {
   return `Implement the approved plan below. Planning is finished. Re-read files as needed and carry the work through implementation and verification.\n\n${plan}`;
 }
 
-/** Only plain plan text crosses the replacement boundary; no source history is copied. */
-export async function startFreshImplementation(ctx: ExtensionCommandContext, plan: string) {
+/** Only the reviewed plan and plain tracking data cross; no source history is copied. */
+export async function startFreshImplementation(
+  ctx: ExtensionCommandContext,
+  plan: string,
+  implementation?: ImplementationState,
+) {
   const prompt = implementationPrompt(plan);
   const parentSession = ctx.sessionManager.getSessionFile();
   return ctx.newSession({
     ...(parentSession && existsSync(parentSession) ? { parentSession } : {}),
+    ...(implementation
+      ? {
+          setup: async (manager: SessionManager) => {
+            manager.appendCustomEntry(IMPLEMENTATION_ENTRY, implementation);
+          },
+        }
+      : {}),
     withSession: async (replacement) => {
       try {
         await replacement.sendUserMessage(prompt);
