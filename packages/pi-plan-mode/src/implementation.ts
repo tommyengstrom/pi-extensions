@@ -13,7 +13,7 @@ import {
   VERIFICATION_MESSAGE,
 } from "./implementation-state.js";
 import { implementationTranscript } from "./implementation-transcript.js";
-import { createPlanStore, type PlanRevision, type PlanStore, planHash } from "./plan-store.js";
+import { createPlanStore, type PlanRevision, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
 import { type PlanModeSettings, readPlanModeSettings, updatePlanModeSettings } from "./settings.js";
 import { PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
 import {
@@ -158,7 +158,7 @@ export function registerImplementation(pi: ExtensionAPI, dependencies: Implement
     return state;
   }
   async function ownedStore(ctx: ExtensionContext, source: ImplementationState): Promise<PlanStore> {
-    const store = await makeStore(ctx.cwd, source.plansDirectory);
+    const store = await makeStore(ctx.cwd, storedPlanStorage(source));
     if (store.projectRoot !== source.projectRoot) throw new Error("Implementation belongs to a different project.");
     return store;
   }
@@ -442,7 +442,7 @@ export function registerImplementation(pi: ExtensionAPI, dependencies: Implement
       return createImplementation(
         {
           projectRoot: store.projectRoot,
-          plansDirectory: "plans",
+          storage: store.storage,
           previousTools,
           tools,
           toolIdentities: toolIdentities(pi.getAllTools(), names),

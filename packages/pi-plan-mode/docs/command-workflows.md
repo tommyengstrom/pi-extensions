@@ -10,15 +10,15 @@
 
 The required question/completion helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. See [tool selection and trust](./settings.md#tool-selection-and-trust).
 
-`/plan settings` edits future-workflow defaults, not the current selection. Its choices are default tools, reset to strict inspection tools, and the plans subdirectory.
+`/plan settings` edits future-workflow defaults, not the current selection. Its choices are default tools, reset to strict inspection tools, automatic adherence checks, and the checker model. New plan storage has a fixed layout.
 
 ## Complete, then review
 
 The planner explores and resolves material questions before calling `plan_mode_complete` alone with the complete Markdown plan. Every successful completion saves a new immutable numbered revision. A revision request must produce a full replacement plan, not a delta, and include a reason explaining what changed and why; it does not overwrite the previous revision. Byte-identical clarification resubmissions need no reason. Revisions retain their explicit parent even when continued from an older revision.
 
-The completion result displays the plan and saved path. The status becomes `plan ready · /plan`. It does **not** open a ready-action menu, send an implementation request, or automatically retry finalization.
+The completion result displays the plan and saved path. The status becomes `plan ready · /plan`. In TUI or RPC, review opens automatically after the agent fully settles, including when completion follows `/plan finalize`. It does **not** start implementation or automatically retry finalization.
 
-Open `/plan` to review the full saved document, including its path and revision number. The TUI review supports searching. Confirm the review before the action menu appears; closing either screen does nothing to the saved plan.
+Review shows the full saved document, including its path and revision number. The TUI review supports searching. Confirm the review before the action menu appears; closing either screen leaves the plan ready and does not authorize implementation. Open `/plan` to reopen review or if automatic presentation was interrupted. Aborted runs, superseding work, and session replacement cancel pending automatic presentation. Restoring a ready session or navigating its history does not reopen old reviews automatically.
 
 The action menu always starts with **Implement in fresh session**, followed by **Implement here**, **Save for later**, and **Continue planning**. It never remembers a previous implementation destination as the next default. Implementation uses the exact reviewed text even if the file changes afterwards.
 
@@ -48,17 +48,17 @@ Use `/plan verify` for another check of this session's recorded implementation. 
 
 `/plan save` requires a completed plan. It leaves Plan mode without starting implementation; it is not the initial disk save, since completion already wrote the revision. **Save for later** in review has the same purpose.
 
-From outside an active workflow, run `/plan saved`. The browser reads the current project's configured storage directory, groups files by plan series, and offers each series' latest or older revisions. Selecting one opens document review before any implementation action.
+From outside an active workflow, run `/plan saved`. The browser combines the shared repo-name directory with the current project's legacy default/configured directories, groups files by location and plan series, and offers each series' latest or older revisions. Selecting one opens document review before any implementation action.
 
 **Continue planning** sends the reviewed revision back to the planner and keeps its series. Continuing from revision 01 when revision 03 already exists produces revision 04 on the next completion, not a replacement for 02. New independent workflows start new series; matching titles do not overwrite or merge an existing series.
 
 There is no single saved-plan slot, export step, or separate index to maintain. Revisions live at:
 
 ```text
-<agent-dir>/pi-plan-mode/<plansDirectory>/<project-key>/<title>-01.md
+<agent-dir>/pi-plan-mode/<repo>/<YYYY-MM-DD>-<short-description>-01.md
 ```
 
-Title collisions are disambiguated; later completions use `-02.md`, `-03.md`, and so on. The [settings reference](./settings.md#storage-subdirectory) explains project scoping and storage changes.
+The first save's local date and description remain fixed; later completions use `-02.md`, `-03.md`, and so on, even on later days. Independent same-date/title plans are disambiguated rather than merged. Same-named checkouts share the new repo folder. Legacy series remain at their old locations and keep their old names when continued. The [settings reference](./settings.md#plan-storage-and-legacy-locations) explains scoping and compatibility.
 
 `/plan exit` leaves Plan mode and restores the previous active tools without deleting saved revisions. During implementation it detaches tracking and closes the transcript segment; its record remains available to `/plan verify`. To browse while planning, exit the current workflow first. Exit does not create a revision for an unfinished draft.
 
@@ -70,4 +70,4 @@ Menus, saved browsing, review, and implementation selection require TUI or RPC. 
 
 Tracked `/plan verify` and `/plan resume` also work in print/JSON mode without a selection dialog; automatic completion checks return their report as the terminating tool result. Model/authentication failures and cancellation never count as successful verification.
 
-The supported subcommands are `start`, `saved`, `tools`, `settings`, `finalize`, `save`, `exit`, `verify`, `resume`, and `cancel`. Removed `show`, `export`, `off`, and `implement` words are not aliases; other arguments are planning prompts. There are no legacy workflow or settings migrations.
+The supported subcommands are `start`, `saved`, `tools`, `settings`, `finalize`, `save`, `exit`, `verify`, `resume`, and `cancel`. Removed `show`, `export`, `off`, and `implement` words are not aliases; other arguments are planning prompts. Previous path-hashed storage and captured workflow locations remain usable without moving files. Reserved `__review` control arguments are internal one-shot dispatches, not planning prompts or public implementation shortcuts.

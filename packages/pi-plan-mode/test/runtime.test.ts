@@ -50,7 +50,10 @@ const plan = "# Runtime smoke\n\n1. Inspect the affected code.\n2. Implement the
 const helpers = ["plan_mode_question", "plan_mode_complete"];
 const planningTools = ["read", "grep", "find", "ls", ...helpers];
 
-async function fixture(extra?: (pi: ExtensionAPI) => void) {
+async function fixture(
+  extra?: (pi: ExtensionAPI) => void,
+  shortcuts?: import("../src/settings.js").PlanModeSettings["shortcuts"],
+) {
   const cwd = await mkdtemp(join(suiteRoot, "project-"));
   await mkdir(agentDir, { recursive: true });
   const requests: Message[][] = [];
@@ -158,7 +161,7 @@ async function fixture(extra?: (pi: ExtensionAPI) => void) {
       extensionFactories: [
         (pi) =>
           planMode(pi, {
-            readSettings: async () => ({ plansDirectory: "plans" }),
+            readSettings: async () => ({ plansDirectory: "plans", shortcuts }),
             readInstructions: () => instructions,
             loadUi,
           }),
@@ -289,6 +292,46 @@ function toolNames(messages: Message[]) {
     .sort();
 }
 
+test("native shortcut resolution and key matching preserve Enter and reserved host bindings", async () => {
+  const { KeybindingsManager } = await import(
+    new URL("./core/keybindings.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
+  );
+  const { matchesKey } = await import("@earendil-works/pi-tui");
+  const bindings = new KeybindingsManager().getResolvedBindings();
+  const f = await fixture();
+  try {
+    const runner = f.runtime.session.extensionRunner;
+    const shortcuts = runner.getShortcuts(bindings);
+    const toggle = shortcuts.get("ctrl+alt+p");
+    assert.ok(toggle);
+    assert.match(toggle.description ?? "", /planning and normal/);
+    assert.equal(shortcuts.size, 1);
+    for (const enter of ["\r", "\n", "\u001b[13u"]) assert.equal(matchesKey(enter, "ctrl+alt+p"), false);
+    assert.equal(matchesKey("\u001b[200~pasted\u001b[112;7u\u001b[201~", "ctrl+alt+p"), false);
+    assert.equal(matchesKey("\u001b[112;7u", "ctrl+alt+p"), true);
+    const context = { ...runner.createContext(), mode: "tui" as const };
+    const previousTools = f.runtime.session.getActiveToolNames();
+    await toggle.handler(context);
+    assert.equal(stateOf(f.runtime.session).kind, "planning");
+    await toggle.handler(context);
+    assert.equal(stateOf(f.runtime.session).kind, "idle");
+    assert.deepEqual(f.runtime.session.getActiveToolNames(), previousTools);
+    assert.equal(f.requests.length, 0);
+    // A user's reserved binding wins over the extension default.
+    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "ctrl+alt+p" }).size, 0);
+  } finally {
+    await f.dispose();
+  }
+  const custom = await fixture(undefined, { togglePlan: "shift+tab" });
+  try {
+    const runner = custom.runtime.session.extensionRunner;
+    assert.equal(runner.getShortcuts(bindings).size, 0);
+    assert.equal(runner.getShortcuts({ ...bindings, "app.thinking.cycle": [] }).has("shift+tab"), true);
+  } finally {
+    await custom.dispose();
+  }
+});
+
 test("real completion runs one isolated checker and terminates without a main-agent retry", async () => {
   const f = await fixture();
   try {
@@ -395,14 +438,14 @@ test("ordinary turns preserve the request prefix while Plan uses native section 
   }
 });
 
-test("completion saves the full Markdown, terminates, and shows ready status without opening review", async () => {
+test("completion saves the full Markdown, terminates, and automatically opens review without another model request", async () => {
   const f = await fixture();
   try {
     const session = f.runtime.session;
     await session.prompt("/plan start");
     const ready = await f.complete();
-    assert.equal(basename(ready.revision.path), "runtime-smoke-01.md");
-    assert.equal(dirname(dirname(ready.revision.path)), join(agentDir, "pi-plan-mode", "plans"));
+    assert.match(basename(ready.revision.path), /^\d{4}-\d{2}-\d{2}-runtime-smoke-01\.md$/);
+    assert.equal(dirname(dirname(ready.revision.path)), join(agentDir, "pi-plan-mode"));
     assert.equal(await readFile(ready.revision.path, "utf8"), plan);
     const result = session.messages.findLast((message) => message.role === "toolResult");
     assert.ok(result?.role === "toolResult");
@@ -411,9 +454,109 @@ test("completion saves the full Markdown, terminates, and shows ready status wit
     assert.ok(text.includes(plan));
     assert.ok(text.includes(ready.revision.path));
     assert.ok([...f.statuses.values()].some((value) => value?.includes("ready")));
-    assert.equal(f.reviewPlan.mock.calls.length, 0);
-    assert.equal(f.loadUi.mock.calls.length, 0);
+    assert.equal(f.reviewPlan.mock.calls.length, 1);
+    assert.equal(f.loadUi.mock.calls.length, 1);
+    assert.equal(f.reviewPlan.mock.calls[0]?.[1], plan);
+    assert.equal(JSON.stringify(f.requests).includes("__review"), false);
+    assert.equal(f.requests.length, 1);
     assert.equal(f.newSessions.length, 0);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test.each([undefined, "save", "continue", "here", "fresh"] as const)(
+  "automatic review action %s runs through a real idle command context",
+  async (action) => {
+    const f = await fixture();
+    try {
+      const source = f.runtime.session;
+      await source.prompt("Private planning discussion");
+      await source.prompt("/plan start");
+      f.choose(action);
+      f.queueTool("plan_mode_complete", { plan });
+      await source.prompt("Finish planning now.");
+      await f.runtime.session.waitForIdle();
+      assert.equal(f.reviewPlan.mock.calls.length, 1);
+      assert.equal(f.reviewPlan.mock.calls[0]?.[1], plan);
+      assert.equal(f.newSessions.length, action === "fresh" ? 1 : 0);
+      assert.equal(f.requests.length, action === "here" || action === "fresh" || action === "continue" ? 3 : 2);
+      assert.equal(JSON.stringify(f.requests).includes("__review"), false);
+      if (action === "fresh") {
+        assert.notEqual(f.runtime.session, source);
+        assert.equal(JSON.stringify(f.requests.at(-1)).includes("Private planning discussion"), false);
+        assert.equal(restoreImplementation(f.runtime.session.sessionManager.getBranch())?.phase, "implementing");
+      } else {
+        assert.equal(f.runtime.session, source);
+        assert.equal(
+          stateOf(source).kind,
+          action === undefined ? "ready" : action === "continue" ? "planning" : "idle",
+        );
+      }
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
+test("real-runtime TUI smoke: automatic document review, dismissal, reopening, then explicit implementation", async () => {
+  const { createTuiHarness } = await import("@narumitw/pi-tui-kit/testing");
+  const { reviewPlan } = await import("../src/interactive-ui.js");
+  const f = await fixture();
+  try {
+    const session = f.runtime.session;
+    const tui = createTuiHarness({ rows: 32 });
+    session.extensionRunner.setUIContext({ ...session.extensionRunner.getUIContext(), custom: tui.custom }, "tui");
+    f.reviewPlan.mockImplementation(reviewPlan);
+    await session.prompt("/plan start");
+    f.queueTool("plan_mode_complete", { plan });
+    const completion = session.prompt("Finish the plan.");
+    await tui.waitForOpen();
+    assert.match(tui.render().join("\n"), /Runtime smoke/);
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.newSessions.length, 0);
+    tui.press("tui.select.cancel");
+    await completion;
+    assert.equal(stateOf(session).kind, "ready");
+    const reopened = session.prompt("/plan");
+    await tui.waitForOpen();
+    tui.press("tui.select.confirm");
+    await tui.waitForOpen();
+    const actions = tui.render().join("\n");
+    assert.match(actions, /Implement in fresh session/);
+    assert.match(actions, /Implement here/);
+    assert.equal(f.requests.length, 1, "document confirmation is not implementation approval");
+    tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    await reopened;
+    await session.waitForIdle();
+    assert.equal(f.requests.length, 2);
+    assert.equal(stateOf(session).kind, "idle");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "implementing");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("finalize and later revisions automatically present review without control-text model requests", async () => {
+  const f = await fixture();
+  try {
+    const session = f.runtime.session;
+    await session.prompt("/plan start");
+    f.queueTool("plan_mode_complete", { plan });
+    await session.prompt("/plan finalize");
+    await session.waitForIdle();
+    assert.equal(f.reviewPlan.mock.calls.length, 1);
+    assert.equal(f.requests.length, 1);
+    f.queueTool("plan_mode_complete", { plan: `${plan}\n\nNew requirement.`, reason: "User added a requirement" });
+    await session.prompt("Revise the plan with the new requirement.");
+    await session.waitForIdle();
+    assert.equal(f.reviewPlan.mock.calls.length, 2);
+    assert.equal(f.requests.length, 2);
+    const ready = stateOf(session);
+    assert.ok(ready.kind === "ready");
+    assert.equal(ready.revision.revision, 2);
+    assert.equal(JSON.stringify(f.requests).includes("__review"), false);
   } finally {
     await f.dispose();
   }
@@ -445,7 +588,7 @@ test("tree navigation restores planning, ready, and idle from the active branch 
     const request = f.requests.at(-1);
     assert.ok(request);
     assert.equal(getCurrentSystemPrompt(request).includes(instructions), false);
-    assert.equal(f.reviewPlan.mock.calls.length, 0);
+    assert.equal(f.reviewPlan.mock.calls.length, 1, "restored readiness must not present another review");
   } finally {
     await f.dispose();
   }
@@ -465,9 +608,9 @@ test.each([undefined, "save", "continue", "here"] as const)(
       await session.waitForIdle();
       assert.equal(f.runtime.session, session);
       assert.equal(f.newSessions.length, 0);
-      assert.equal(f.reviewPlan.mock.calls.length, 1);
-      assert.equal(f.reviewPlan.mock.calls[0]?.[1], plan);
-      assert.deepEqual(f.reviewPlan.mock.calls[0]?.[2], ready.revision);
+      assert.equal(f.reviewPlan.mock.calls.length, 2, "manual /plan reopens the dismissed automatic review");
+      assert.equal(f.reviewPlan.mock.calls[1]?.[1], plan);
+      assert.deepEqual(f.reviewPlan.mock.calls[1]?.[2], ready.revision);
       assert.equal(await readFile(ready.revision.path, "utf8"), plan);
       if (action === undefined) {
         assert.deepEqual(stateOf(session), ready);
@@ -506,7 +649,7 @@ test("a review completed after runtime replacement is ignored without accessing 
     const pending = source.prompt("/plan");
     try {
       await opened.promise;
-      const reviewLifecycle = f.reviewPlan.mock.calls[0]?.[3];
+      const reviewLifecycle = f.reviewPlan.mock.calls.at(-1)?.[3];
       assert.ok(reviewLifecycle);
       assert.equal(reviewLifecycle.isCurrent(), true);
       await f.runtime.newSession();

@@ -13,7 +13,11 @@ export const { buildRuntime, validateEagerGraph, validateGeneratedFiles, publish
   ].join("\n"),
   forbiddenEagerInputs: ["src/interactive-ui.ts"],
   forbiddenEagerExternals: ["@narumitw/pi-tui-kit"],
-  allowedEagerExternals: ["@narumitw/pi-tui-kit/terminal-text", "@narumitw/pi-tui-kit/terminal-document"],
+  allowedEagerExternals: [
+    "@narumitw/pi-tui-kit/terminal-text",
+    "@narumitw/pi-tui-kit/terminal-document",
+    "@narumitw/pi-tui-kit/key-matching",
+  ],
 });
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;

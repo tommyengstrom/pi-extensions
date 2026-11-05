@@ -23,9 +23,9 @@ test("missing settings return fresh defaults without reading legacy settings or 
   await withSettings(async (path, directory) => {
     await writeFile(join(directory, "plan-mode.json"), '{"plansDirectory":"legacy","tools":["bash"]}');
     const settings = await readPlanModeSettings(path);
-    assert.deepEqual(settings, { plansDirectory: "plans" });
+    assert.deepEqual(settings, {});
     settings.plansDirectory = "changed";
-    assert.deepEqual(await readPlanModeSettings(path), { plansDirectory: "plans" });
+    assert.deepEqual(await readPlanModeSettings(path), {});
     assert.deepEqual(await readdir(directory), ["plan-mode.json"]);
   });
 });
@@ -46,13 +46,12 @@ test("settings round-trip relative directories, Unicode, and exact custom tool n
 
 test("empty tools means helpers only; null removes the custom selection", async () => {
   await withSettings(async (settingsPath) => {
-    assert.deepEqual(await updatePlanModeSettings({ tools: [] }, { settingsPath }), {
-      plansDirectory: "plans",
-      tools: [],
-    });
-    assert.deepEqual(await readPlanModeSettings(settingsPath), { plansDirectory: "plans", tools: [] });
-    assert.deepEqual(await updatePlanModeSettings({ tools: null }, { settingsPath }), { plansDirectory: "plans" });
-    assert.equal(Object.hasOwn(JSON.parse(await readFile(settingsPath, "utf8")), "tools"), false);
+    assert.deepEqual(await updatePlanModeSettings({ tools: [] }, { settingsPath }), { tools: [] });
+    assert.deepEqual(await readPlanModeSettings(settingsPath), { tools: [] });
+    assert.deepEqual(await updatePlanModeSettings({ tools: null }, { settingsPath }), {});
+    const document = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(Object.hasOwn(document, "tools"), false);
+    assert.equal(Object.hasOwn(document, "plansDirectory"), false);
   });
 });
 
@@ -60,13 +59,68 @@ test("updates preserve unknown fields without interpreting retired settings", as
   await withSettings(async (settingsPath) => {
     const unknown = { thinkingLevel: "invalid-retired-value", safeSubcommands: 42, future: { enabled: true } };
     await writeFile(settingsPath, JSON.stringify(unknown));
-    assert.deepEqual(await readPlanModeSettings(settingsPath), { plansDirectory: "plans" });
+    assert.deepEqual(await readPlanModeSettings(settingsPath), {});
     await updatePlanModeSettings({ plansDirectory: "drafts", tools: ["custom"] }, { settingsPath });
     assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
       ...unknown,
       plansDirectory: "drafts",
       tools: ["custom"],
     });
+  });
+});
+
+test("shortcut settings canonicalize overrides, preserve unknown fields, and support disabling and removal", async () => {
+  await withSettings(async (settingsPath) => {
+    const original = {
+      toggleShortcut: "ctrl+m", // Retired top-level settings remain uninterpreted.
+      shortcuts: { togglePlan: "ALT+CTRL+P", future: { keep: true } },
+      future: 42,
+    };
+    await writeFile(settingsPath, JSON.stringify(original));
+    assert.deepEqual(await readPlanModeSettings(settingsPath), { shortcuts: { togglePlan: "ctrl+alt+p" } });
+    await updatePlanModeSettings({ tools: [] }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      ...original,
+      shortcuts: { ...original.shortcuts, togglePlan: "ctrl+alt+p" },
+      tools: [],
+    });
+    for (const togglePlan of ["shift+tab", null] as const) {
+      await writeFile(settingsPath, JSON.stringify({ shortcuts: { togglePlan } }));
+      assert.deepEqual(await readPlanModeSettings(settingsPath), { shortcuts: { togglePlan } });
+      assert.deepEqual(await updatePlanModeSettings({}, { settingsPath }), { shortcuts: { togglePlan } });
+    }
+    await writeFile(settingsPath, JSON.stringify({ shortcuts: { future: true }, toggleShortcut: "ctrl+m" }));
+    assert.deepEqual(await readPlanModeSettings(settingsPath), { shortcuts: {} });
+    await updatePlanModeSettings({}, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      shortcuts: { future: true },
+      toggleShortcut: "ctrl+m",
+    });
+  });
+});
+
+test("invalid shortcut settings cannot be overwritten by unrelated updates", async () => {
+  await withSettings(async (settingsPath) => {
+    for (const shortcuts of [
+      null,
+      [],
+      "ctrl+p",
+      { togglePlan: false },
+      { togglePlan: [] },
+      { togglePlan: "" },
+      { togglePlan: " ctrl+p " },
+      { togglePlan: "ctrl+ctrl+p" },
+      { togglePlan: "not-a-key" },
+      { togglePlan: "CTRL+M" },
+    ]) {
+      const contents = JSON.stringify({ shortcuts, future: true });
+      await writeFile(settingsPath, contents);
+      await assert.rejects(readPlanModeSettings(settingsPath), /Invalid.*shortcuts/);
+      await assert.rejects(updatePlanModeSettings({ tools: [] }, { settingsPath }), /Invalid.*shortcuts/);
+      assert.equal(await readFile(settingsPath, "utf8"), contents);
+    }
+    await writeFile(settingsPath, '{"shortcuts":{"togglePlan":"ctrl+m"}}');
+    await assert.rejects(readPlanModeSettings(settingsPath), /aliases Enter/);
   });
 });
 

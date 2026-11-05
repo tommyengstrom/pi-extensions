@@ -1,11 +1,13 @@
-import type { PlanRevision } from "./plan-store.js";
+import { type PlanRevision, type PlanStorage, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
 
 export const PLAN_STATE_ENTRY = "pi-plan-state";
 
 export interface PlanWorkflow {
   projectRoot: string;
-  plansDirectory: string;
+  /** Legacy session location; new workflows use storage. */
+  plansDirectory?: string;
+  storage?: PlanStorage;
   instructions: string;
   previousTools: string[];
   /** Undefined means canonical inspection tools, not arbitrary tools with those names. */
@@ -19,7 +21,7 @@ export type PlanState =
   | { kind: "planning"; workflow: PlanWorkflow }
   | { kind: "ready"; workflow: PlanWorkflow; revision: PlanRevision };
 
-/** Only the current format is supported. Never infer state from prompt or assistant prose. */
+/** Restore explicit state, including legacy storage locators; never infer it from assistant prose. */
 export function restorePlanState(entries: readonly unknown[]): PlanState {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -31,7 +33,7 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
     if (
       !record(workflow) ||
       !text(workflow.projectRoot) ||
-      !text(workflow.plansDirectory) ||
+      !validPlanStorage(workflow.storage ?? { kind: "legacy", plansDirectory: workflow.plansDirectory }) ||
       typeof workflow.instructions !== "string" ||
       Buffer.byteLength(workflow.instructions, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
       !names(workflow.previousTools) ||
@@ -42,7 +44,8 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       return { kind: "idle" };
     const restored: PlanWorkflow = {
       projectRoot: workflow.projectRoot,
-      plansDirectory: workflow.plansDirectory,
+      ...(typeof workflow.plansDirectory === "string" ? { plansDirectory: workflow.plansDirectory } : {}),
+      ...(validPlanStorage(workflow.storage) ? { storage: workflow.storage } : {}),
       instructions: workflow.instructions,
       previousTools: [...workflow.previousTools],
       ...(workflow.tools !== undefined ? { tools: [...workflow.tools] } : {}),

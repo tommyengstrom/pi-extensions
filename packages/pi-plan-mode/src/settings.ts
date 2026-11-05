@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { KeyId } from "@earendil-works/pi-tui";
+import { canonicalizeConfiguredKey } from "@narumitw/pi-tui-kit/key-matching";
 import { planDirectoryComponents } from "./plan-store.js";
 
 export interface VerificationSettings {
@@ -10,10 +12,14 @@ export interface VerificationSettings {
   model?: { provider: string; id: string };
 }
 
+export const DEFAULT_TOGGLE_SHORTCUT: KeyId = "ctrl+alt+p";
+
 export interface PlanModeSettings {
+  /** Omission uses the default binding; null disables it. Loaded once per extension instance. */
+  shortcuts?: { togglePlan?: KeyId | null };
   verification?: VerificationSettings;
-  /** Relative paths are resolved from getAgentDir()/pi-plan-mode by plan storage. */
-  plansDirectory: string;
+  /** Retained only to discover legacy plans; never redirects new series. */
+  plansDirectory?: string;
   /** Omitted means canonical read-only built-ins; an empty list means helpers only. */
   tools?: string[];
 }
@@ -61,8 +67,11 @@ export async function updatePlanModeSettings(
     }
     const settings = parseSettings(document);
     // Persist normalized owned fields without dropping unrelated settings.
-    document.plansDirectory = settings.plansDirectory;
+    if (settings.plansDirectory !== undefined) document.plansDirectory = settings.plansDirectory;
     if (settings.tools !== undefined) document.tools = settings.tools;
+    if (settings.shortcuts?.togglePlan !== undefined) {
+      (document.shortcuts as SettingsDocument).togglePlan = settings.shortcuts.togglePlan;
+    }
     await publishSettings(settingsPath, document, signal);
     return settings;
   });
@@ -73,17 +82,31 @@ function parseSettings(value: unknown): PlanModeSettings {
     throw new Error("Invalid pi-plan-mode settings: expected an object");
   }
   const document = value as SettingsDocument;
-  const plansDirectory = Object.hasOwn(document, "plansDirectory") ? document.plansDirectory : "plans";
-  if (typeof plansDirectory !== "string") {
+  const plansDirectory = document.plansDirectory;
+  if (Object.hasOwn(document, "plansDirectory") && typeof plansDirectory !== "string") {
     throw new Error("Invalid pi-plan-mode settings: plansDirectory must be a string");
   }
   try {
-    planDirectoryComponents(plansDirectory);
+    if (typeof plansDirectory === "string") planDirectoryComponents(plansDirectory);
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid pi-plan-mode settings: plansDirectory: ${detail}`);
   }
-  const settings: PlanModeSettings = { plansDirectory };
+  const settings: PlanModeSettings = typeof plansDirectory === "string" ? { plansDirectory } : {};
+  if (Object.hasOwn(document, "shortcuts")) {
+    const value = document.shortcuts;
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("Invalid shortcuts settings: expected an object");
+    const shortcuts = value as SettingsDocument;
+    settings.shortcuts = {};
+    if (Object.hasOwn(shortcuts, "togglePlan")) {
+      const key = shortcuts.togglePlan === null ? null : canonicalizeConfiguredKey(shortcuts.togglePlan);
+      if (key === undefined) throw new Error("Invalid shortcuts.togglePlan: expected a Pi key binding or null");
+      if (key === "ctrl+m")
+        throw new Error("Invalid shortcuts.togglePlan: Ctrl+M aliases Enter and would intercept prompt submission");
+      settings.shortcuts.togglePlan = key;
+    }
+  }
   if (Object.hasOwn(document, "verification")) {
     const value = document.verification;
     if (typeof value !== "object" || value === null || Array.isArray(value))

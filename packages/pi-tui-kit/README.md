@@ -112,6 +112,7 @@ The `/markdown` module itself does not load `grok-mermaid`; consumers await prep
 
 Every documented interaction, display, and testing subpath exposes a focused ESM and declaration graph.
 The package root retains every existing export for compatibility.
+For configuration parsing without loading UI runtime code, import `canonicalizeConfiguredKey` from `@narumitw/pi-tui-kit/key-matching`; it normalizes Pi key syntax but does not decide shortcut conflicts or terminal support.
 
 Repository maintainers can benchmark cold root and focused-subpath imports plus first action, code-review, Mermaid, and task frames in fresh serial processes. After installing through the [workspace development flow](../../README.md), run from the repository root (also the workspace root):
 

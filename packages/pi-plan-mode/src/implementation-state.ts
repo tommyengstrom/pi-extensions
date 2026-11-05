@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
-import { type PlanRevision, planHash } from "./plan-store.js";
+import { type PlanRevision, type PlanStorage, planHash, validPlanStorage } from "./plan-store.js";
 import { validRevision } from "./state.js";
 
 export const IMPLEMENTATION_ENTRY = "pi-plan-implementation";
@@ -27,7 +27,8 @@ export interface ImplementationState {
   id: string;
   phase: "implementing" | "completed" | "detached";
   projectRoot: string;
-  plansDirectory: string;
+  plansDirectory?: string;
+  storage?: PlanStorage;
   previousTools: string[];
   tools?: string[];
   toolIdentities: ToolIdentity[];
@@ -55,7 +56,7 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
       typeof state.id !== "string" ||
       !["implementing", "completed", "detached"].includes(String(state.phase)) ||
       typeof state.projectRoot !== "string" ||
-      typeof state.plansDirectory !== "string" ||
+      !validPlanStorage(state.storage ?? { kind: "legacy", plansDirectory: state.plansDirectory }) ||
       !names(state.previousTools) ||
       (state.completion !== undefined && typeof state.completion !== "string") ||
       (state.lastCheck !== undefined &&

@@ -6,7 +6,7 @@ Explore a codebase, resolve important questions, and review an implementation-re
 
 ## Load this fork
 
-This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts, settings, and workflow states are not supported or migrated. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
+This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts are not supported. This fork retains compatibility with its previous path-hashed plan storage and captured workflow locations without moving files. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
 
 From the repository root, run the managed development job:
 
@@ -26,8 +26,8 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 
 1. Run `/plan <request>`, or `/plan start` and then describe the change.
 2. Let the planner inspect the repository and ask structured questions about material decisions.
-3. The planner calls `plan_mode_complete` with the complete Markdown plan. The result shows the plan and its saved path; **nothing starts automatically**.
-4. Open `/plan` to review the full saved document, then choose an action. **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative.
+3. The planner calls `plan_mode_complete` with the complete Markdown plan. The result shows the plan and its saved path, then **review opens automatically** in TUI or RPC once the agent settles.
+4. Review the full saved document, then explicitly choose an action. **Implementation never starts without your choice.** **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative. Dismissal leaves the plan ready; use `/plan` to reopen review or if automatic presentation was interrupted.
 5. Implementation remains tracked. The agent saves requested changes with `plan_mode_update`, including a reason, and finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
 
 Plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions.
@@ -41,7 +41,7 @@ Plans are decision briefs for an equally capable implementer who can inspect the
 | `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
 | `/plan saved` | Browse the current project's saved series and revisions outside an active workflow. |
 | `/plan tools` | Choose tools and start, or change the current workflow's tools while the agent is idle. |
-| `/plan settings` | Set tool/storage defaults, the checker model, or automatic adherence checking. |
+| `/plan settings` | Set tool defaults, the checker model, or automatic adherence checking. |
 | `/plan verify` | Check the current session's tracked implementation with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or exit, before sending fixes. |
 | `/plan cancel` | Cancel an in-progress adherence check. |
@@ -53,21 +53,41 @@ Commands require an idle agent with no queued messages, except `/plan cancel`. M
 
 There is no direct `implement` route, and no `show`, `export`, or `off` aliases. Implementation is selected only after document review. Exact subcommand arguments choose routes; other text is a planning request, so `/plan start a migration` is a prompt. See [command workflows](./docs/command-workflows.md).
 
-## Saved plans and revisions
+## Keyboard toggle
 
-Default storage is outside the repository:
+**Ctrl+Alt+P** toggles directly between planning and normal mode while the agent is idle with no queued messages. Entering behaves like `/plan start`; leaving restores the previous tools without opening review, sending a prompt, or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved revision rather than starting a new workflow.
 
-```text
-<getAgentDir()>/pi-plan-mode/plans/<project-key>/
-  improve-search-01.md
-  improve-search-02.md
+Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
+
+```json
+{
+  "shortcuts": { "togglePlan": "shift+tab" }
+}
 ```
 
-`getAgentDir()` is normally `~/.pi/agent`, or the configured Pi agent directory. Projects are scoped by the canonical Git root, falling back to the canonical working directory outside Git. The project key combines a readable name with a path hash, so equally named repositories do not share plans.
+Set `togglePlan` to `null` to disable the shortcut; remove the override to restore **Ctrl+Alt+P**. Run `/reload` or restart Pi after changing it, then check `/hotkeys`. There is no shortcut settings-menu editor or watcher.
+
+**Shift+Tab requires an extra step:** Pi reserves it for `app.thinking.cycle`. Merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json` (preserving other bindings), or move that action to another key, then reload. The default Ctrl+Alt+P needs no global binding changes, though your own bindings or other extensions can still conflict; Pi's conflict diagnostics apply.
+
+**Ctrl+M is rejected:** terminal control codes alias it to Enter, and Pi's matcher can intercept ordinary prompt submission. Reasoning-effort controls are independent and are not provided by this package. Dialogs retain their own navigation keys; RPC and print/JSON users should use commands.
+
+## Saved plans and revisions
+
+New series use a fixed location outside the repository:
+
+```text
+<getAgentDir()>/pi-plan-mode/<repo>/
+  2026-07-19-improve-search-01.md
+  2026-07-19-improve-search-02.md
+```
+
+`getAgentDir()` is normally `~/.pi/agent`, or the configured Pi agent directory. `<repo>` is the safe normalized directory name of the canonical Git root, falling back to the canonical working directory outside Git. **Same-named checkouts intentionally share plans**, without a path hash. Worktrees use their own top-level directory names.
+
+The date is the local-calendar `YYYY-MM-DD` of the first save. The date and short title-derived description stay fixed for the entire series, including revisions saved on later days or during implementation. Existing series in the old `pi-plan-mode/<plansDirectory>/<name>-<path-hash>/` layout remain readable and continuable in place; no files are moved or renamed.
 
 Every successful completion publishes a new numbered Markdown revision without overwriting an existing file—even when the planner resubmits an unchanged plan after clarification. Changed revisions require a reason and store parent/hash metadata atomically with the Markdown body. Existing plain Markdown files remain usable as baselines; no historical reasons are invented. A new workflow starts a new series; colliding titles are disambiguated. **Continue planning** keeps the selected series and writes its next revision, including when continuing from an older revision.
 
-`/plan saved` groups this project's files by series and defaults to the latest revision while keeping older revisions selectable. There is no separate saved-plan index or session-local slot. Exiting or implementing does not delete saved files.
+`/plan saved` includes the shared repo-name directory and the current project's legacy default/configured locations. It groups files by location and series and defaults to the latest revision while keeping older revisions selectable. There is no separate saved-plan index or session-local slot. Exiting or implementing does not delete saved files.
 
 ## Review and implementation
 
@@ -106,13 +126,12 @@ The optional settings file is `<getAgentDir()>/pi-plan-mode.json`:
 
 ```json
 {
-  "plansDirectory": "plans",
   "tools": ["read", "grep", "find", "ls"],
   "verification": { "automatic": true }
 }
 ```
 
-Omit `tools` for strict defaults; `[]` means planning helpers only. `plansDirectory` is a relative subdirectory beneath `<getAgentDir()>/pi-plan-mode`. There is no settings watcher: defaults are read for future workflows, while an active workflow retains its configuration unless you explicitly change its tools.
+Omit `tools` for strict defaults; `[]` means planning helpers only. The former `plansDirectory` setting is retained only as a legacy browsing hint; it never redirects new series, and there is no storage-subdirectory menu. There is no settings watcher: tool defaults are read for future workflows, while an active workflow retains its configuration unless you explicitly change its tools. Shortcut settings are loaded once per extension instance and require `/reload` or restart.
 
 Verification settings are read for the next check. Omit `verification.model` to use the current model, or set `{ "provider": "provider-id", "id": "model-id" }`. Automatic checks incur an additional model run; set `verification.automatic` to `false` to opt out.
 

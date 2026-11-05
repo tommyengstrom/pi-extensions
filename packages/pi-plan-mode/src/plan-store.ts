@@ -25,7 +25,28 @@ export interface PlanRevision {
   history?: RevisionHistory;
 }
 
+/** Persisted location: legacy paths are scoped to the current canonical project. */
+export type PlanStorage = { kind: "repo" } | { kind: "legacy"; plansDirectory: string };
+
+export function validPlanStorage(value: unknown): value is PlanStorage {
+  if (!value || typeof value !== "object" || !("kind" in value)) return false;
+  if (value.kind === "repo") return true;
+  if (value.kind !== "legacy" || !("plansDirectory" in value) || typeof value.plansDirectory !== "string") return false;
+  try {
+    planDirectoryComponents(value.plansDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Old session entries predate explicit storage locators. */
+export function storedPlanStorage(value: { storage?: PlanStorage; plansDirectory?: string }): PlanStorage {
+  return value.storage ?? { kind: "legacy", plansDirectory: value.plansDirectory ?? "plans" };
+}
+
 export interface PlanStore {
+  storage: PlanStorage;
   directory: string;
   projectRoot: string;
   list(): Promise<PlanRevision[]>;
@@ -78,16 +99,19 @@ class InvalidPlanFile extends Error {}
 
 export async function createPlanStore(
   cwd: string,
-  plansDirectory = "plans",
+  location: PlanStorage | string = { kind: "repo" },
   agentDir = getAgentDir(),
+  options: { existingOnly?: boolean } = {},
 ): Promise<PlanStore> {
-  const components = planDirectoryComponents(plansDirectory);
+  const storage: PlanStorage = typeof location === "string" ? { kind: "legacy", plansDirectory: location } : location;
+  if (!validPlanStorage(storage)) throw new Error("Invalid plan storage directory location.");
+  const components = storage.kind === "legacy" ? planDirectoryComponents(storage.plansDirectory) : [];
   const projectRoot = await findProjectRoot(cwd);
   const projectKey = `${slug(basename(projectRoot))}-${createHash("sha256").update(projectRoot).digest("hex")}`;
-  await mkdir(resolve(agentDir), { recursive: true, mode: 0o700 });
+  if (!options.existingOnly) await mkdir(resolve(agentDir), { recursive: true, mode: 0o700 });
   // The caller's agent directory is the trusted anchor; symlinks beneath it are not.
   const anchor = await realpath(resolve(agentDir));
-  const segments = ["pi-plan-mode", ...components, projectKey];
+  const segments = ["pi-plan-mode", ...components, storage.kind === "repo" ? slug(basename(projectRoot)) : projectKey];
   const directory = join(anchor, ...segments);
 
   async function checkDirectory(create = false) {
@@ -109,7 +133,7 @@ export async function createPlanStore(
     }
   }
 
-  await checkDirectory(true);
+  await checkDirectory(!options.existingOnly);
 
   function revisionPath(series: string, revision: number) {
     validateSeries(series);
@@ -170,7 +194,11 @@ export async function createPlanStore(
     const header = history ? `${METADATA_PREFIX}${Buffer.from(JSON.stringify(history)).toString("base64")} -->\n` : "";
     if (header.length > 32_768) throw new Error("Revision metadata exceeds 32768 bytes.");
     const document = header + content;
-    const baseSeries = slug(title);
+    // Capture once per new series, not once per publication retry or revision.
+    const now = new Date();
+    const date = `${String(now.getFullYear()).padStart(4, "0")}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    // Reserve room for the date and the existing UUID collision suffix (37 chars).
+    const baseSeries = storage.kind === "repo" ? `${date}-${slug(title).slice(0, 72).replace(/-+$/, "")}` : slug(title);
     if (options.series !== undefined) validateSeries(options.series);
     const checkCurrent = () => {
       if (options.signal?.aborted || options.isCurrent?.() === false) {
@@ -230,7 +258,7 @@ export async function createPlanStore(
     }
   }
 
-  return { directory, projectRoot, list, read, save };
+  return { storage, directory, projectRoot, list, read, save };
 }
 
 async function findProjectRoot(cwd: string) {

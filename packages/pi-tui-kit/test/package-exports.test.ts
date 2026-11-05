@@ -48,6 +48,28 @@ test("fullscreen handoff entry has no eager runtime dependencies", async () => {
   );
 });
 
+test("configured-key entry is usable without eager runtime dependencies", async () => {
+  const { canonicalizeConfiguredKey } = await import("@narumitw/pi-tui-kit/key-matching");
+  assert.equal(canonicalizeConfiguredKey("ALT+CTRL+P"), "ctrl+alt+p");
+  const result = await build({
+    entryPoints: [path.join(packageRoot, "dist/key-matching.js")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    packages: "external",
+    write: false,
+    metafile: true,
+  });
+  assert.deepEqual(
+    Object.keys(result.metafile.inputs).map((input) => path.basename(input)),
+    ["key-matching.js"],
+  );
+  assert.deepEqual(
+    Object.values(result.metafile.outputs).flatMap((output) => output.imports),
+    [],
+  );
+});
+
 test("built package entrypoints resolve their documented exports", async (t) => {
   const productionSpecifier = "@narumitw/pi-tui-kit";
   const confirmationSpecifier = "@narumitw/pi-tui-kit/confirmation";

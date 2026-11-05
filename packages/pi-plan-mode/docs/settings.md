@@ -10,7 +10,6 @@ The menu offers:
 
 - **Default planning tools** — save an explicit tool selection for future workflows.
 - **Reset to strict inspection tools** — remove the override and use canonical built-in defaults.
-- **Plans subdirectory** — change where future workflows store their revisions.
 - **Automatic adherence checks** — on by default; off disables the completion-triggered checker.
 - **Adherence checker model** — select a provider/model or reset to the current main-session model.
 
@@ -18,8 +17,8 @@ These are the only supported settings:
 
 ```json
 {
-  "plansDirectory": "plans",
   "tools": ["read", "grep", "find", "ls"],
+  "shortcuts": { "togglePlan": "ctrl+alt+p" },
   "verification": {
     "automatic": true,
     "model": { "provider": "provider-id", "id": "model-id" }
@@ -29,9 +28,9 @@ These are the only supported settings:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `plansDirectory` | `"plans"` | Relative storage subdirectory under `<getAgentDir()>/pi-plan-mode`. |
+| `plansDirectory` | Omitted | Legacy browsing hint only; retained values identify old relative subdirectories. Never changes the location of new series. |
 | `tools` | Omitted | Exact names of explicitly trusted planning tools. Omission uses canonical inspection defaults; `[]` permits only the required helpers. |
-
+| `shortcuts.togglePlan` | `"ctrl+alt+p"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload. |
 | `verification.automatic` | `true` | Run a fresh adherence check on explicit implementation completion. Explicit `false` is preserved. |
 | `verification.model` | Omitted | Use the current main-session model at check time, or an explicit `{ provider, id }`. |
 
@@ -41,21 +40,33 @@ Automatic checks incur a separate model run and disclose scoped implementation u
 
 Missing settings return defaults without creating a file. There is no watcher: new workflows read current defaults; an existing workflow keeps its captured settings. Changing defaults does not change a running workflow's tools or move its saved files. Use `/plan tools` while idle for an explicit workflow-local tool change.
 
-## Storage subdirectory
+## Keyboard toggle
 
-The default layout is:
+Ctrl+Alt+P is enabled by default. It enters planning like `/plan start`, or leaves planning (including a ready plan) and restores the previous tools. It never opens review or starts implementation, sends no model message, and preserves your editor draft and saved files. Leaving ends the current workflow; use `/plan saved` to continue a saved revision. Busy agents, queued messages, and open Plan commands prevent toggling rather than scheduling it for later.
+
+`shortcuts.togglePlan` accepts Pi key syntax, normalized for case, modifier order, and key aliases. Set it to another key string to rebind, `null` to disable, or remove it to restore the default. This setting is file-only and loaded once during extension initialization: run `/reload` or restart after editing, and inspect `/hotkeys`. Other settings retain their existing read timing. An invalid startup settings file leaves commands/tools registered but disables shortcut registration and reports the error when a UI is available; correct the file and reload.
+
+The default does not conflict with standard Pi bindings. Custom bindings and other extensions can conflict; Pi decides precedence and reports conflicts. This package never edits global keybindings or bypasses reserved actions.
+
+To choose Shift+Tab, set `"shortcuts": { "togglePlan": "shift+tab" }` in this file, and merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json`, preserving unrelated fields. Alternatively remap the native cycle action. Without that step Pi rejects the extension shortcut because Shift+Tab is reserved. No global change is needed for Ctrl+Alt+P.
+
+Ctrl+M is rejected because it aliases Enter and Pi's matcher can consume normal prompt submission. Reasoning-effort controls are separate and not provided here. Dialog navigation and paste continue through Pi's native input handling; RPC and noninteractive modes use commands.
+
+## Plan storage and legacy locations
+
+New series always use:
 
 ```text
-<agent-dir>/pi-plan-mode/plans/<project-key>/<title>-01.md
+<agent-dir>/pi-plan-mode/<repo>/<YYYY-MM-DD>-<short-description>-01.md
 ```
 
-For example, `"plansDirectory": "design/plans"` stores revisions beneath `<agent-dir>/pi-plan-mode/design/plans/<project-key>/`.
+The repo folder is the safe normalized basename of the canonical Git top-level directory, or canonical cwd outside Git. Same-named checkouts intentionally share plans. The first save's local-calendar date and title-derived description remain unchanged across later revisions, even on different days. Independent same-date/title series receive a collision suffix rather than being merged.
 
-Use a nonempty relative path with `/` separators. Storage rejects absolute paths, backslashes, NUL, empty components, and `.` or `..` components. Storage directories beneath the agent-directory anchor must be real directories, not symlinks. This setting is not an arbitrary export path.
+The storage-subdirectory setting is retired. A retained `plansDirectory` field is only a hint for finding old plans. `/plan saved` combines the new directory with the current canonical project's legacy `plans/<name>-<path-hash>/` directory and, when configured, `<plansDirectory>/<name>-<path-hash>/`. Missing legacy directories are not created by browsing. Old series continue at their original location with their original filenames; they are not assigned invented dates.
 
-The project key derives from the canonical Git root, or the canonical working directory when no Git root is available. It combines a readable directory name with a path hash. Copies at different paths therefore have different plan collections.
+Captured locations in existing planning and implementation sessions remain usable. A historic custom location no longer recorded in settings can still be accessed through a session that captured it; the browser does not search every past subdirectory or other checkouts' old hashed locations. New series always use the fixed layout, even when old settings or an unfinished old session are present.
 
-Changing the subdirectory redirects future workflows and the saved-plan browser; it does not relocate existing revisions. An already active workflow continues using its captured location. Switch the setting back to browse plans in a previous location.
+Legacy hints must be nonempty relative paths with `/` separators. Absolute paths, backslashes, NUL, empty components, and `.` or `..` components are rejected. All storage directories beneath the agent-directory anchor must be real directories, not symlinks. Stored paths are not arbitrary export permissions. Existing files and settings hints are never automatically moved, renamed, or deleted.
 
 ## Tool selection and trust
 
@@ -67,7 +78,6 @@ For example, this trusts a codemode orchestrator and one MCP callee in addition 
 
 ```json
 {
-  "plansDirectory": "plans",
   "tools": ["read", "codemode", "mcp__docs__read"]
 }
 ```
@@ -88,7 +98,7 @@ Settings reads are bounded to 64 KiB and require valid UTF-8 and a JSON object. 
 
 Updates reread and validate the existing document, preserve unknown fields, and publish atomically through a temporary file. Updates are ordered within one Pi process, but there is no cross-process settings lock. An invalid existing document is not overwritten to repair it implicitly.
 
-Only `plansDirectory`, `tools`, and `verification` have an effect. Retired top-level thinking, model, shortcut, reinjection, shell, and export keys are not interpreted. Unknown fields may remain in the document, but there is no compatibility or migration path, and the old `plan-mode.json` filename is not read.
+`tools`, `verification`, and `shortcuts.togglePlan` configure current behavior; `plansDirectory` has only the legacy-discovery role described above. Retired top-level thinking, model, shortcut (including `toggleShortcut`), reinjection, shell, and export keys are not interpreted. Unknown fields remain in the document. The unrelated old `plan-mode.json` filename is not read; compatibility with this fork's previous storage does not migrate settings from that file.
 
 ## Plan style and user instructions
 

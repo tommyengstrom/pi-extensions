@@ -71,7 +71,7 @@ export function planModeCompleted(plan: string, path: string) {
     content: [
       {
         type: "text" as const,
-        text: `**Plan ready**\n\n${plan}\n\nSaved to: ${terminalText(path)}\nOpen /plan to review and choose implementation or save for later.`,
+        text: `**Plan ready**\n\n${plan}\n\nSaved to: ${terminalText(path)}\nIn TUI or RPC, review opens automatically after this turn settles. Implementation requires your explicit choice. Open /plan to reopen review or if it does not appear; in print/JSON, resume interactively first.`,
       },
     ],
     details: {

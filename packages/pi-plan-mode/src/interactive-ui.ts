@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import { runConfirmation } from "@narumitw/pi-tui-kit/confirmation";
@@ -96,11 +97,17 @@ export async function selectSavedPlan(
   }
   const groups = new Map<string, PlanRevision[]>();
   for (const revision of revisions) {
-    const group = groups.get(revision.series) ?? [];
+    const key = join(dirname(revision.path), revision.series);
+    const group = groups.get(key) ?? [];
     group.push(revision);
-    groups.set(revision.series, group);
+    groups.set(key, group);
   }
-  for (const group of groups.values()) group.sort((a, b) => b.revision - a.revision);
+  const locationsPerSeries = new Map<string, number>();
+  for (const group of groups.values()) {
+    group.sort((a, b) => b.revision - a.revision);
+    const series = group[0].series;
+    locationsPerSeries.set(series, (locationsPerSeries.get(series) ?? 0) + 1);
+  }
   let activeGroup: PlanRevision[] = [];
   let chosen: PlanRevision | undefined;
   const menu = defineMenu<undefined, "series" | "revisions", "open" | "choose", ExtensionContext>({
@@ -112,7 +119,7 @@ export async function selectSavedPlan(
         lines: ["Choose a plan series, then its latest or an older revision."],
         items: [...groups].map(([series, group]) => ({
           id: series,
-          label: `${terminalText(group[0]?.title || series)} — ${terminalText(series)}`,
+          label: `${terminalText(group[0].title || group[0].series)} — ${terminalText(group[0].series)}${(locationsPerSeries.get(group[0].series) ?? 0) > 1 ? ` · ${terminalText(dirname(group[0].path))}` : ""}`,
           description: `Latest revision: ${group[0]?.revision} · ${group.length} revision(s)`,
           details: [`Path: ${terminalText(group[0]?.path ?? "")}`],
         })),

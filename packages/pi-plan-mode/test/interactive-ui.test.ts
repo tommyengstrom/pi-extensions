@@ -167,6 +167,20 @@ test("saved browser groups series and defaults to the newest numeric revision wi
   assert.deepEqual(revisions, [oldRevision, otherRevision, newest, revision]);
 });
 
+test("same-named series from different stores remain separate and selectable in RPC", async () => {
+  const legacy = { ...revision, path: "/legacy/plans/alpha-v2.md" };
+  const rpc = createRpcHarness([
+    {
+      kind: "select",
+      options: ["Alpha — alpha · /plans", "Alpha — alpha · /legacy/plans", "Done"],
+      response: "Alpha — alpha · /legacy/plans",
+    },
+    { kind: "select", options: ["Revision 2 (latest) — Alpha", "Back"], response: "Revision 2 (latest) — Alpha" },
+  ]);
+  assert.equal(await selectSavedPlan(rpcContext(rpc), [revision, oldRevision, legacy], owner().lifecycle), legacy);
+  rpc.assertConsumed();
+});
+
 test("RPC browser permits an older revision and never persists its selection", async () => {
   for (const selected of [oldRevision, revision]) {
     const rpc = createRpcHarness([

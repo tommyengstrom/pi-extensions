@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
-import { IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
+import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import planMode from "../src/plan-mode.js";
 import { createPlanStore, type PlanRevision } from "../src/plan-store.js";
 import { buildPlanModePrompt } from "../src/prompt.js";
+import { DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
 import type { VerificationInput, VerificationResult } from "../src/verification.js";
 import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
@@ -23,6 +24,9 @@ type Action = "fresh" | "here" | "save" | "continue" | undefined;
 async function fixture(
   config: {
     tools?: string[];
+    shortcuts?: PlanModeSettings["shortcuts"];
+    plansDirectory?: string;
+    selectSaved?: (revisions: PlanRevision[]) => PlanRevision | undefined;
     instructions?: string;
     automatic?: boolean;
     verify?: (input: VerificationInput) => Promise<VerificationResult>;
@@ -53,34 +57,42 @@ async function fixture(
     mode: "rpc",
     cwd,
     hasUI: true,
+    editorText: "Unsent draft",
     sessionManager: {
       getSessionFile: () => join(root, "source.jsonl"),
       getBranch: () => branch ?? mock.entries.map((entry) => ({ type: "custom", ...entry })),
     },
   });
   const dependencies = {
-    readSettings: async () => {
+    readSettings: async (): Promise<PlanModeSettings> => {
       await settingsHook?.();
       return {
-        plansDirectory: "plans",
+        plansDirectory: config.plansDirectory ?? "plans",
+        ...(config.shortcuts ? { shortcuts: config.shortcuts } : {}),
         ...(config.tools ? { tools: config.tools } : {}),
         ...(config.automatic !== undefined ? { verification: { automatic: config.automatic } } : {}),
       };
     },
     readInstructions: () => instructions,
     verify: config.verify,
-    createStore: (directory: string, plansDirectory?: string) => createPlanStore(directory, plansDirectory, agentDir),
+    createStore: (
+      directory: string,
+      location?: Parameters<typeof createPlanStore>[1],
+      _agent?: string,
+      options?: Parameters<typeof createPlanStore>[3],
+    ) => createPlanStore(directory, location, agentDir, options),
     loadUi: async () => ({
       reviewPlan: async (_ctx: unknown, text: string, _revision: PlanRevision, lifecycle: MenuLifecycle) => {
         reviews.push(text);
         await reviewHook?.(lifecycle);
         return action;
       },
-      selectSavedPlan: async (_ctx: unknown, revisions: PlanRevision[]) => revisions[0],
+      selectSavedPlan: async (_ctx: unknown, revisions: PlanRevision[]) =>
+        config.selectSaved ? config.selectSaved(revisions) : revisions[0],
       selectPlanTools: async () => chosenTools,
     }),
   };
-  planMode(mock.pi, dependencies);
+  await planMode(mock.pi, dependencies);
   async function emit(event: string, input: unknown = {}, ctx = context.ctx) {
     let result: unknown;
     for (const handler of mock.events.get(event) ?? []) {
@@ -109,11 +121,18 @@ async function fixture(
     cwd,
     agentDir,
     sourcePath: join(root, "source.jsonl"),
+    draft: () => context.editorText,
     emit,
     command,
     execute,
     reviews,
     dependencies,
+    toggle: async () => {
+      Object.assign(context.ctx, { mode: "tui" });
+      const shortcut = mock.shortcuts.get(config.shortcuts?.togglePlan ?? DEFAULT_TOGGLE_SHORTCUT);
+      assert.ok(shortcut);
+      await shortcut.handler(context.ctx);
+    },
     state: () => restorePlanState(mock.entries.map((entry) => ({ type: "custom", ...entry }))),
     choose: (value: Action) => {
       action = value;
@@ -135,6 +154,382 @@ async function fixture(
     },
   };
 }
+
+test("default and configured shortcuts register once; disabling and reload replace the binding", async () => {
+  for (const [shortcuts, keys] of [
+    [undefined, [DEFAULT_TOGGLE_SHORTCUT]],
+    [{ togglePlan: "shift+tab" }, ["shift+tab"]],
+    [{ togglePlan: null }, []],
+    [{}, [DEFAULT_TOGGLE_SHORTCUT]],
+  ] as const) {
+    const f = await fixture({ shortcuts });
+    assert.deepEqual([...f.shortcuts.keys()], keys);
+  }
+  const f = await fixture();
+  f.dependencies.readSettings = async () => ({ shortcuts: { togglePlan: "alt+p" } });
+  assert.deepEqual([...f.shortcuts.keys()], [DEFAULT_TOGGLE_SHORTCUT]);
+  const reloaded = createMockPi();
+  await planMode(reloaded.pi, f.dependencies);
+  assert.deepEqual([...reloaded.shortcuts.keys()], ["alt+p"]);
+});
+
+test("factory awaits shortcut settings; startup failure keeps commands and tools and reports once", async () => {
+  const mock = createMockPi();
+  const gate = Promise.withResolvers<PlanModeSettings>();
+  const loading = planMode(mock.pi, { readSettings: () => gate.promise });
+  assert.ok(mock.commands.has("plan"));
+  assert.ok(mock.tools.some((tool) => tool.name === "plan_mode_complete"));
+  assert.equal(mock.shortcuts.size, 0);
+  gate.reject(new Error("invalid settings\u001b[31m"));
+  await loading;
+  assert.equal(mock.shortcuts.size, 0);
+  const context = createMockContext({ mode: "tui" });
+  for (let i = 0; i < 2; i++) {
+    for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
+  }
+  const errors = context.notifications.filter((item) => item.message.includes("shortcut unavailable"));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.level, "error");
+  assert.ok(!errors[0]?.message.includes("\u001b"));
+});
+
+test("toggle enters and leaves directly without messages, review, effort changes, or editor mutation", async () => {
+  const f = await fixture();
+  await f.toggle();
+  assert.equal(f.state().kind, "planning");
+  assert.equal(f.statuses.get("plan-mode"), "plan active");
+  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  const prompt = promptEvent();
+  await f.emit("before_agent_start", prompt);
+  assert.ok(prompt.systemPromptOptions.sections.pi_plan_mode);
+  await f.toggle();
+  assert.equal(f.state().kind, "idle");
+  assert.equal(f.statuses.get("plan-mode"), undefined);
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  await f.emit("before_agent_start", prompt);
+  assert.equal(prompt.systemPromptOptions.sections.pi_plan_mode, undefined);
+  assert.equal(f.draft(), "Unsent draft");
+  assert.deepEqual(f.sentUserMessages, []);
+  assert.deepEqual(f.sentMessages, []);
+  assert.deepEqual(f.thinkingLevels, []);
+  assert.deepEqual(f.reviews, []);
+});
+
+test("toggle exits a ready plan without implementation or automatic review and preserves saved bytes", async () => {
+  const f = await fixture();
+  const saved = await ready(f);
+  await f.toggle();
+  await f.emit("agent_settled", { aborted: false });
+  assert.equal(f.state().kind, "idle");
+  assert.equal(await readFile(saved.details.path, "utf8"), PLAN);
+  assert.deepEqual(f.sentUserMessages, []);
+  assert.deepEqual(f.reviews, []);
+  assert.equal(implementationOf(f), undefined);
+  await f.toggle();
+  const state = f.state();
+  assert.equal(state.kind, "planning");
+  assert.equal(state.workflow.series, undefined);
+});
+
+test("toggle rejects busy and pending states and ignores non-TUI contexts", async () => {
+  for (const override of [{ isIdle: () => false }, { hasPendingMessages: () => true }]) {
+    const f = await fixture();
+    Object.assign(f.ctx, override);
+    await f.toggle();
+    assert.equal(f.state().kind, "idle");
+    assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+    assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  }
+  const f = await fixture();
+  for (const mode of ["rpc", "print", "json"]) {
+    Object.assign(f.ctx, { mode });
+    await f.shortcuts.get(DEFAULT_TOGGLE_SHORTCUT)?.handler(f.ctx);
+    assert.equal(f.state().kind, "idle");
+  }
+});
+
+test("toggle and commands share a gate across asynchronous entry in either direction", async () => {
+  for (const first of ["toggle", "command"]) {
+    const f = await fixture();
+    const gate = Promise.withResolvers<void>();
+    f.onSettings(() => gate.promise);
+    const pending = first === "toggle" ? f.toggle() : f.command("start");
+    await f.toggle();
+    await f.command("start");
+    assert.equal(f.notifications.filter((item) => item.message.includes("already open")).length, 2);
+    gate.resolve();
+    await pending;
+    assert.equal(f.state().kind, "planning");
+    assert.equal(f.entries.filter((entry) => entry.customType === PLAN_STATE_ENTRY).length, 1);
+    await f.toggle();
+    assert.equal(f.state().kind, "idle");
+  }
+});
+
+test("toggle revalidates ownership after settings and store awaits", async () => {
+  for (const stage of ["settings", "store"]) {
+    const f = await fixture();
+    const gate = Promise.withResolvers<void>();
+    const reached = Promise.withResolvers<void>();
+    if (stage === "settings")
+      f.onSettings(() => {
+        reached.resolve();
+        return gate.promise;
+      });
+    else {
+      // A fresh instance captures the blocked store dependency.
+      await f.emit("session_shutdown");
+      const makeStore = f.dependencies.createStore;
+      f.dependencies.createStore = async (...args) => {
+        reached.resolve();
+        await gate.promise;
+        return makeStore(...args);
+      };
+      f.events.clear();
+      await planMode(f.pi, f.dependencies);
+      await f.emit("session_start");
+    }
+    const pending = f.toggle();
+    await reached.promise;
+    await f.emit("session_shutdown");
+    const other = createMockContext({ mode: "tui", cwd: f.cwd });
+    await f.emit("session_start", {}, other.ctx);
+    gate.resolve();
+    await pending;
+    assert.equal(f.state().kind, "idle");
+    assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+    assert.deepEqual(f.sentUserMessages, []);
+  }
+});
+
+test("failed toggle transitions roll back tools and release the command gate", async () => {
+  const f = await fixture();
+  const append = f.rawPi.appendEntry;
+  f.rawPi.appendEntry = () => {
+    throw new Error("persist failed");
+  };
+  await f.toggle();
+  assert.equal(f.state().kind, "idle");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  assert.match(f.notifications.at(-1)?.message ?? "", /persist failed/);
+  f.rawPi.appendEntry = append;
+  await f.toggle();
+  const planningTools = f.rawPi.getActiveTools();
+  f.rawPi.appendEntry = () => {
+    throw new Error("exit failed");
+  };
+  await f.toggle();
+  assert.equal(f.state().kind, "planning");
+  assert.deepEqual(f.rawPi.getActiveTools(), planningTools);
+  f.rawPi.appendEntry = append;
+  await f.toggle();
+  assert.equal(f.state().kind, "idle");
+});
+
+test("toggle detaches implementation like plan start and rolls it back on entry failure", async () => {
+  for (const fail of [false, true]) {
+    const f = await fixture();
+    await ready(f);
+    f.choose("here");
+    await f.command("");
+    assert.equal(implementationOf(f)?.phase, "implementing");
+    const append = f.rawPi.appendEntry;
+    if (fail)
+      f.rawPi.appendEntry = (type, data) => {
+        if (type === PLAN_STATE_ENTRY) throw new Error("persist failed");
+        append(type, data);
+      };
+    const messages = f.sentUserMessages.length;
+    await f.toggle();
+    assert.equal(f.state().kind, fail ? "idle" : "planning");
+    assert.equal(implementationOf(f)?.phase, fail ? "implementing" : "detached");
+    assert.equal(f.sentUserMessages.length, messages);
+  }
+});
+
+test("custom legacy hints do not redirect new series and browsing uses the selected location", async () => {
+  let target = "";
+  let listed: PlanRevision[] = [];
+  const f = await fixture({
+    plansDirectory: "design/plans",
+    selectSaved: (revisions) => {
+      listed = revisions;
+      return revisions.find((revision) => revision.path === target);
+    },
+  });
+  const first = await ready(f);
+  assert.equal(first.details.path.startsWith(`${f.agentDir}/pi-plan-mode/project/`), true);
+  await f.command("save");
+  const legacyDefault = await createPlanStore(f.cwd, "plans", f.agentDir);
+  const legacyCustom = await createPlanStore(f.cwd, "design/plans", f.agentDir);
+  const old = await legacyDefault.save("# Legacy default");
+  const custom = await legacyCustom.save("# Legacy custom");
+  target = custom.path;
+  f.choose("continue");
+  await f.command("saved");
+  assert.deepEqual(
+    new Set(listed.map((revision) => revision.path)),
+    new Set([first.details.path, old.path, custom.path]),
+  );
+  assert.equal(f.reviews.at(-1), "# Legacy custom");
+  await f.execute("plan_mode_complete", { plan: "# Legacy custom" });
+  assert.equal((await legacyCustom.list()).length, 2);
+  assert.equal((await legacyDefault.list()).length, 1);
+  assert.equal(await legacyDefault.read(old), "# Legacy default");
+});
+
+test("old ready and implementation sessions restore their captured custom storage", async () => {
+  const f = await fixture();
+  const legacy = await createPlanStore(f.cwd, "old/custom", f.agentDir);
+  const revision = await legacy.save(PLAN);
+  f.rawPi.appendEntry(PLAN_STATE_ENTRY, {
+    kind: "ready",
+    workflow: {
+      projectRoot: f.cwd,
+      plansDirectory: "old/custom",
+      instructions: "",
+      previousTools: BASELINE,
+      series: revision.series,
+    },
+    revision,
+  });
+  await f.emit("session_tree");
+  f.choose("here");
+  await f.command("");
+  assert.deepEqual(f.reviews, [PLAN]);
+  const tracked = restoreImplementation(f.entries.map((entry) => ({ type: "custom", ...entry })));
+  assert.ok(tracked);
+  assert.deepEqual(tracked.storage, legacy.storage);
+  // Simulate a pre-locator implementation session entry, then restore it normally.
+  const { storage: _storage, ...old } = tracked;
+  f.rawPi.appendEntry(IMPLEMENTATION_ENTRY, { ...old, plansDirectory: "old/custom" });
+  await f.emit("session_tree");
+  await f.execute("plan_mode_update", { plan: "# Restored legacy update", reason: "User-requested change" });
+  const revisions = await legacy.list();
+  assert.equal(revisions.length, 2);
+  assert.equal(revisions[0].series, revision.series);
+  assert.equal(revisions[0].revision, 2);
+});
+
+test("old unfinished workflows start new series in the fixed layout", async () => {
+  const f = await fixture();
+  f.rawPi.appendEntry(PLAN_STATE_ENTRY, {
+    kind: "planning",
+    workflow: {
+      projectRoot: f.cwd,
+      plansDirectory: "old/custom",
+      instructions: "",
+      previousTools: BASELINE,
+    },
+  });
+  await f.emit("session_tree");
+  const result = await f.execute("plan_mode_complete", { plan: PLAN });
+  assert.equal(result.details.path.startsWith(`${f.agentDir}/pi-plan-mode/project/`), true);
+});
+
+test("review errors leave readiness recoverable without repeating automatic presentation", async () => {
+  const f = await fixture();
+  const result = await ready(f);
+  f.onReview(async () => {
+    throw new Error("Review unavailable");
+  });
+  await f.emit("agent_settled", { aborted: false });
+  const request = f.sentUserMessages.at(-1);
+  assert.ok(request);
+  await f.command(request.text.slice("/plan ".length));
+  assert.equal(f.state().kind, "ready");
+  assert.equal(await readFile(result.details.path, "utf8"), PLAN);
+  assert.match(f.notifications.at(-1)?.message ?? "", /Open \/plan to retry/);
+  await f.emit("agent_settled", { aborted: false });
+  assert.equal(f.sentUserMessages.length, 1);
+  f.onReview(undefined);
+  await f.command("");
+  assert.equal(f.reviews.length, 2);
+});
+
+test("automatic review dispatch is one-shot and requires the matching live token", async () => {
+  const f = await fixture();
+  await ready(f);
+  assert.equal(f.reviews.length, 0, "tool execution must not show review");
+  await f.emit("agent_settled", { aborted: false });
+  const request = f.sentUserMessages.at(-1);
+  assert.ok(request);
+  assert.ok(request.text.startsWith("/plan __review "));
+  assert.deepEqual(request.options, { expandPromptTemplates: true });
+  await f.emit("agent_settled", { aborted: false });
+  assert.equal(f.sentUserMessages.length, 1);
+  await f.command("__review wrong-token");
+  assert.equal(f.reviews.length, 0);
+  await f.command(request.text.slice("/plan ".length));
+  assert.deepEqual(f.reviews, [PLAN]);
+  await f.command(request.text.slice("/plan ".length));
+  assert.equal(f.reviews.length, 1);
+  assert.equal(f.state().kind, "ready");
+});
+
+test("automatic command resolution uses helper provenance, not another extension's plan command", async () => {
+  const f = await fixture();
+  await ready(f);
+  Object.assign(f.rawPi, {
+    getCommands: () => [
+      { name: "plan:1", source: "extension", sourceInfo: { path: "/foreign" } },
+      { name: "plan:2", source: "extension", sourceInfo: extensionTool("plan_mode_complete").sourceInfo },
+    ],
+  });
+  await f.emit("agent_settled", { aborted: false });
+  assert.match(f.sentUserMessages.at(-1)?.text ?? "", /^\/plan:2 __review /);
+});
+
+test("aborted runs, non-interactive contexts, queued work, and continuations do not auto-review", async () => {
+  for (const reason of ["aborted", "print", "json", "pending", "continuation"] as const) {
+    const f = await fixture();
+    await ready(f);
+    if (reason === "print" || reason === "json") Object.assign(f.ctx, { mode: reason, hasUI: false });
+    if (reason === "pending") Object.assign(f.ctx, { hasPendingMessages: () => true });
+    if (reason === "continuation") await f.emit("agent_start");
+    await f.emit("agent_settled", { aborted: reason === "aborted" });
+    assert.equal(f.sentUserMessages.length, 0, reason);
+    assert.equal(f.reviews.length, 0, reason);
+  }
+});
+
+test("superseding work, navigation, shutdown, or manual review invalidates a dispatched request", async () => {
+  for (const reason of ["work", "tree", "shutdown", "manual"] as const) {
+    const f = await fixture();
+    await ready(f);
+    await f.emit("agent_settled", { aborted: false });
+    const request = f.sentUserMessages.at(-1)?.text;
+    assert.ok(request);
+    if (reason === "work") await f.emit("before_agent_start", promptEvent());
+    if (reason === "tree") await f.emit("session_tree");
+    if (reason === "shutdown") await f.emit("session_shutdown");
+    if (reason === "manual") await f.command("");
+    await f.command(request.slice("/plan ".length));
+    assert.equal(f.reviews.length, reason === "manual" ? 1 : 0, reason);
+  }
+});
+
+test("legacy browsing and continuation retain the selected store through implementation", async () => {
+  const f = await fixture();
+  const legacy = await createPlanStore(f.cwd, "plans", f.agentDir);
+  const first = await legacy.save(PLAN);
+  f.choose("continue");
+  await f.command("saved");
+  const continued = f.state();
+  assert.ok(continued.kind !== "idle");
+  assert.deepEqual(continued.workflow.storage, legacy.storage);
+  const result = await f.execute("plan_mode_complete", { plan: PLAN });
+  assert.equal(result.details.path, first.path.replace("-01.md", "-02.md"));
+  f.choose("here");
+  await f.command("");
+  const implementation = f.entries.findLast((entry) => entry.customType === "pi-plan-implementation")?.data as {
+    storage: unknown;
+  };
+  assert.deepEqual(implementation.storage, legacy.storage);
+  await f.execute("plan_mode_update", { plan: "# Revised legacy plan", reason: "Requested change" });
+  assert.equal((await legacy.list())[0]?.revision, 3);
+  assert.equal(await legacy.read(first), PLAN);
+});
 
 async function ready(f: Awaited<ReturnType<typeof fixture>>) {
   await f.command("start");
@@ -388,7 +783,7 @@ test("completion persistence failure keeps the file discoverable without claimin
   };
   await assert.rejects(f.execute("plan_mode_complete", { plan: PLAN }), /saved at.*ready state could not be persisted/);
   assert.equal(f.state().kind, "planning");
-  const store = await createPlanStore(f.cwd, "plans", f.agentDir);
+  const store = await createPlanStore(f.cwd, undefined, f.agentDir);
   assert.equal((await store.list()).length, 1);
   f.rawPi.appendEntry = appendEntry;
   const retried = await f.execute("plan_mode_complete", { plan: PLAN });

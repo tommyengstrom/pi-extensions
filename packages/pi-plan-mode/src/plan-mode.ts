@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import {
@@ -9,7 +10,13 @@ import {
 } from "./completion-tool.js";
 import { implementationPrompt, startFreshImplementation } from "./fresh-implementation.js";
 import { type ImplementationDependencies, registerImplementation } from "./implementation.js";
-import { createPlanStore, type PlanRevision, type PlanStore } from "./plan-store.js";
+import {
+  createPlanStore,
+  type PlanRevision,
+  type PlanStorage,
+  type PlanStore,
+  storedPlanStorage,
+} from "./plan-store.js";
 import { readPlanModeInstructions } from "./planning-instructions.js";
 import { buildPlanModePrompt } from "./prompt.js";
 import {
@@ -19,7 +26,12 @@ import {
   PLAN_MODE_QUESTION_TOOL_NAME,
   planModeQuestionCancelled,
 } from "./question-tool.js";
-import { type PlanModeSettings, readPlanModeSettings, updatePlanModeSettings } from "./settings.js";
+import {
+  DEFAULT_TOGGLE_SHORTCUT,
+  type PlanModeSettings,
+  readPlanModeSettings,
+  updatePlanModeSettings,
+} from "./settings.js";
 import { PLAN_STATE_ENTRY, type PlanState, type PlanWorkflow, restorePlanState } from "./state.js";
 import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
 
@@ -34,17 +46,23 @@ interface PlanModeDependencies extends ImplementationDependencies {
 const FINALIZE_REQUEST =
   "Finish the planning discussion: ask a material remaining question with plan_mode_question, or submit the complete plan with plan_mode_complete alone.";
 
-export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDependencies = {}) {
+export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeDependencies = {}) {
   let state: PlanState = { kind: "idle" };
   let session: ExtensionContext["sessionManager"] | undefined;
   let generation = 0;
   let interaction = new AbortController();
+  // Commands and keyboard toggles share this gate across asynchronous transitions.
   let commandOpen = false;
+  let shortcutStartupError: string | undefined;
+  let pendingReview:
+    | { token: string; path: string; current: ReturnType<typeof lifecycle>; queued: boolean }
+    | undefined;
   const readSettings = dependencies.readSettings ?? readPlanModeSettings;
   const makeStore = dependencies.createStore ?? createPlanStore;
   const loadUi = dependencies.loadUi ?? (() => import("./interactive-ui.js"));
 
   function invalidate() {
+    pendingReview = undefined;
     generation++;
     interaction.abort();
     interaction = new AbortController();
@@ -116,8 +134,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   }
 
   async function storeFor(ctx: ExtensionContext, workflow?: PlanWorkflow): Promise<PlanStore> {
-    const directory = workflow?.plansDirectory ?? (await readSettings()).plansDirectory;
-    const store = await makeStore(ctx.cwd, directory);
+    // A restored unfinished draft without a series starts in the new layout too.
+    const location = workflow?.series ? storedPlanStorage(workflow) : { kind: "repo" as const };
+    const store = await makeStore(ctx.cwd, location);
     if (workflow && store.projectRoot !== workflow.projectRoot)
       throw new Error("This Plan workflow belongs to a different project.");
     return store;
@@ -125,13 +144,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   async function enter(
     ctx: ExtensionContext,
-    options: { tools?: string[]; series?: string; parent?: PlanRevision } = {},
+    options: { tools?: string[]; series?: string; parent?: PlanRevision; storage?: PlanStorage } = {},
   ) {
     idle(ctx);
     if (state.kind !== "idle") return lifecycle(ctx);
     const current = lifecycle(ctx);
     const settings = await readSettings();
-    const store = await makeStore(ctx.cwd, settings.plansDirectory);
+    if (!current.isCurrent()) return;
+    const store = await makeStore(ctx.cwd, options.storage ?? { kind: "repo" });
     if (!current.isCurrent()) return;
     idle(ctx);
     const instructions = (dependencies.readInstructions ?? readPlanModeInstructions)();
@@ -141,7 +161,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       if (previousImplementation?.phase === "implementing") implementation.detach(ctx);
       workflow = {
         projectRoot: store.projectRoot,
-        plansDirectory: settings.plansDirectory,
+        storage: store.storage,
         instructions,
         previousTools: pi.getActiveTools(),
         ...((options.tools ?? settings.tools) ? { tools: options.tools ?? settings.tools } : {}),
@@ -189,7 +209,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     if (current.isCurrent()) updateStatus(ctx);
   }
 
-  pi.on("session_start", (_event, ctx) => restore(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    await restore(ctx);
+    if (shortcutStartupError && session === ctx.sessionManager && ctx.hasUI) {
+      notify(ctx, shortcutStartupError, "error");
+      shortcutStartupError = undefined;
+    }
+  });
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", (_event, ctx) => {
     if (session !== ctx.sessionManager) return;
@@ -217,6 +243,56 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       delete event.systemPromptOptions.sections.pi_plan_mode;
     }
   });
+
+  // A queued continuation can start without another before_agent_start event.
+  pi.on("agent_start", () => {
+    pendingReview = undefined;
+  });
+
+  pi.on("agent_settled", (event, ctx) => {
+    const request = pendingReview;
+    if (!request || request.queued) return;
+    if (event.aborted || !canAutoReview(ctx, request) || commandOpen) {
+      pendingReview = undefined;
+      return;
+    }
+    // Match command provenance to our registered helper, including suffixed invocations.
+    const source = pi.getAllTools().find((tool) => tool.name === PLAN_MODE_COMPLETE_TOOL_NAME)?.sourceInfo;
+    const command = pi
+      .getCommands()
+      .find(
+        (candidate) =>
+          /^plan(?::\d+)?$/.test(candidate.name) &&
+          candidate.source === "extension" &&
+          candidate.sourceInfo?.path === source?.path &&
+          source?.path !== undefined,
+      );
+    if (!command) {
+      pendingReview = undefined;
+      notify(ctx, "Plan ready. Open /plan to review it (automatic command dispatch is unavailable).", "warning");
+      return;
+    }
+    request.queued = true;
+    try {
+      pi.sendUserMessage(`/${command.name} __review ${request.token}`, { expandPromptTemplates: true });
+    } catch {
+      pendingReview = undefined;
+      notify(ctx, "Plan ready. Open /plan to review and choose implementation.", "warning");
+    }
+  });
+
+  function canAutoReview(ctx: ExtensionContext, request: NonNullable<typeof pendingReview>) {
+    return (
+      request.current.isCurrent() &&
+      session === ctx.sessionManager &&
+      ctx.hasUI &&
+      (ctx.mode === "tui" || ctx.mode === "rpc") &&
+      ctx.isIdle() &&
+      !ctx.hasPendingMessages() &&
+      state.kind === "ready" &&
+      state.revision.path === request.path
+    );
+  }
 
   pi.on("tool_call", (event, ctx) => {
     const helper = PLAN_HELPER_NAMES.some((name) => name === event.toolName);
@@ -264,7 +340,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     label: "Complete plan",
     defaultActive: false,
     description:
-      "Save a complete Markdown plan as a numbered revision while /plan mode is active. Call alone as the final action; saving does not start implementation.",
+      "Save a complete Markdown plan as a numbered revision while /plan mode is active. Call alone as the final action. Interactive review opens after completion; implementation requires explicit user approval.",
     parameters: PLAN_MODE_COMPLETE_PARAMS,
     executionMode: "sequential",
     renderResult: renderPlanModeCompletion,
@@ -288,17 +364,20 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       try {
         commit({
           kind: "ready",
-          workflow: { ...source.workflow, series: revision.series, parent: revision },
+          workflow: { ...source.workflow, storage: store.storage, series: revision.series, parent: revision },
           revision,
         });
       } catch (error) {
         // Retain the published series for a retry, without claiming that readiness was persisted.
-        state = { ...source, workflow: { ...source.workflow, series: revision.series } };
+        state = { ...source, workflow: { ...source.workflow, storage: store.storage, series: revision.series } };
         throw new Error(
           `Plan saved at ${revision.path}, but ready state could not be persisted. Exit Plan mode, then reopen it through /plan saved. ${errorMessage(error)}`,
         );
       }
       invalidate();
+      if (ctx.hasUI && !signal?.aborted) {
+        pendingReview = { token: randomUUID(), path: revision.path, current: lifecycle(ctx), queued: false };
+      }
       updateStatus(ctx);
       return planModeCompleted(parsed.plan, revision.path);
     },
@@ -325,10 +404,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       notify(ctx, `Saved for later: ${selected.path}`);
     } else if (action === "continue") {
       let continued: ReturnType<typeof lifecycle> | undefined;
-      if (state.kind === "idle") continued = await enter(ctx, { series: selected.series, parent: selected });
+      if (state.kind === "idle")
+        continued = await enter(ctx, { series: selected.series, parent: selected, storage: storage.storage });
       else {
         transition(
-          { kind: "planning", workflow: { ...state.workflow, series: selected.series, parent: selected } },
+          {
+            kind: "planning",
+            workflow: { ...state.workflow, storage: storage.storage, series: selected.series, parent: selected },
+          },
           ctx,
         );
         continued = lifecycle(ctx);
@@ -348,7 +431,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         configuration.tools,
         source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
       );
-      tracked.plansDirectory = configuration.plansDirectory;
       const before = state;
       const previousImplementation = implementation.state;
       leave(ctx);
@@ -380,7 +462,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         configuration.tools,
         source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
       );
-      tracked.plansDirectory = configuration.plansDirectory;
       const before = state;
       const previousImplementation = implementation.state;
       leave(ctx);
@@ -398,11 +479,25 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   async function browse(ctx: ExtensionCommandContext) {
     const current = lifecycle(ctx);
     const store = await storeFor(ctx);
-    const revisions = await store.list();
+    const settings = await readSettings();
+    const stores = [store];
+    for (const directory of new Set(["plans", ...(settings.plansDirectory ? [settings.plansDirectory] : [])])) {
+      try {
+        stores.push(await makeStore(ctx.cwd, directory, undefined, { existingOnly: true }));
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      if (!current.isCurrent()) return;
+    }
+    const listings = await Promise.all(stores.map(async (storage) => ({ storage, revisions: await storage.list() })));
+    const revisions = listings.flatMap((listing) => listing.revisions);
     const ui = await loadUi();
     if (!current.isCurrent()) return;
     const selected = await ui.selectSavedPlan(ctx, revisions, current);
-    if (selected && current.isCurrent()) await review(ctx, selected, store);
+    const selectedStore = listings.find((listing) =>
+      listing.revisions.some((revision) => revision.path === selected?.path),
+    )?.storage;
+    if (selected && selectedStore && current.isCurrent()) await review(ctx, selected, selectedStore);
   }
 
   async function tools(ctx: ExtensionContext, persistent = false) {
@@ -439,7 +534,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       [
         "Default planning tools",
         "Reset to strict inspection tools",
-        "Plans subdirectory",
         "Automatic adherence checks",
         "Adherence checker model",
       ],
@@ -452,17 +546,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       return implementation.settings(ctx, choice, current.signal);
     if (choice === "Reset to strict inspection tools") {
       await updatePlanModeSettings({ tools: null }, { signal: current.signal });
-    } else {
-      const settings = await readSettings();
-      if (!current.isCurrent()) return;
-      const directory = await ctx.ui.input(
-        "Plans subdirectory under <agent-dir>/pi-plan-mode",
-        settings.plansDirectory,
-        { signal: current.signal },
-      );
-      if (directory === undefined || !current.isCurrent()) return;
-      idle(ctx);
-      await updatePlanModeSettings({ plansDirectory: directory }, { signal: current.signal });
     }
     if (current.isCurrent()) notify(ctx, "Settings saved for future workflows. Existing plan files were not moved.");
   }
@@ -474,6 +557,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
+      const internal = /^__review(?:\s|$)/i.test(args.trim());
+      if (internal) {
+        const request = pendingReview;
+        if (!request || args.trim() !== `__review ${request.token}`) return;
+        pendingReview = undefined;
+        if (!request.queued || commandOpen || !canAutoReview(ctx, request)) return;
+      } else {
+        // Manual commands supersede any not-yet-presented automatic review.
+        pendingReview = undefined;
+      }
       if (args.trim().toLowerCase() === "cancel") {
         implementation.cancel();
         return;
@@ -490,6 +583,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         idle(ctx);
         const input = args.trim();
         const command = input.toLowerCase();
+        if (internal) {
+          await review(ctx);
+          return;
+        }
         if (["verify", "resume"].includes(command)) {
           if (state.kind !== "idle") throw new Error("Exit planning before verifying or resuming implementation.");
           await implementation.command(command, ctx);
@@ -578,12 +675,49 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       } catch (error) {
         if (session !== commandSession) return;
         if (!ctx.hasUI) throw error;
-        notify(ctx, errorMessage(error), "error");
+        notify(
+          ctx,
+          internal ? `Automatic plan review failed: ${errorMessage(error)}. Open /plan to retry.` : errorMessage(error),
+          "error",
+        );
       } finally {
         commandOpen = false;
       }
     },
   });
+
+  // Pi awaits the factory before collecting shortcuts. Never register in session_start,
+  // and never fail the whole extension just because its shortcut configuration is invalid.
+  try {
+    const settings = await readSettings();
+    const shortcut =
+      settings.shortcuts?.togglePlan === undefined ? DEFAULT_TOGGLE_SHORTCUT : settings.shortcuts.togglePlan;
+    if (shortcut !== null) {
+      pi.registerShortcut(shortcut, {
+        description: "Toggle between planning and normal mode",
+        handler: async (ctx) => {
+          if (ctx.mode !== "tui" || session !== ctx.sessionManager) return;
+          if (commandOpen) {
+            notify(ctx, "A Plan command is already open.", "warning");
+            return;
+          }
+          const current = lifecycle(ctx);
+          commandOpen = true;
+          try {
+            idle(ctx);
+            if (state.kind === "idle") await enter(ctx);
+            else leave(ctx);
+          } catch (error) {
+            if (current.isCurrent()) notify(ctx, errorMessage(error), "error");
+          } finally {
+            commandOpen = false;
+          }
+        },
+      });
+    }
+  } catch (error) {
+    shortcutStartupError = `Plan mode shortcut unavailable: ${errorMessage(error)}. Correct settings and /reload.`;
+  }
 }
 
 function errorMessage(error: unknown) {

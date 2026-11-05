@@ -30,5 +30,13 @@ export function createMockPi(options: Parameters<typeof createBaseMockPi>[0] = {
     ...allTools(),
     ...mock.tools.map((tool) => ({ ...extensionTool(String(tool.name)), ...tool })),
   ];
+  Object.assign(mock.rawPi, {
+    getCommands: () =>
+      [...mock.commands.keys()].map((name) => ({
+        name,
+        source: "extension",
+        sourceInfo: extensionTool("plan_mode_complete").sourceInfo,
+      })),
+  });
   return mock;
 }

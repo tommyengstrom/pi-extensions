@@ -9,7 +9,11 @@ const { packageRoot, loadBuilder } = registerRuntimeBuilderContract({
   packageId: "pi-plan-mode",
   forbiddenEagerInputs: ["src/interactive-ui.ts"],
   forbiddenEagerExternals: ["@narumitw/pi-tui-kit"],
-  allowedEagerExternals: ["@narumitw/pi-tui-kit/terminal-text", "@narumitw/pi-tui-kit/terminal-document"],
+  allowedEagerExternals: [
+    "@narumitw/pi-tui-kit/terminal-text",
+    "@narumitw/pi-tui-kit/terminal-document",
+    "@narumitw/pi-tui-kit/key-matching",
+  ],
 });
 
 test("generated interactive UI is loadable and keeps TUI Kit external", async () => {
@@ -115,12 +119,12 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
       runner.createToolContext("complete-generated-plan", signal),
     );
     assert.equal(result.terminate, true);
-    const files = (await listFiles(join(agentDir, "pi-plan-mode", "plans"))).filter((path) => path.endsWith(".md"));
+    const files = (await listFiles(join(agentDir, "pi-plan-mode"))).filter((path) => path.endsWith(".md"));
     assert.equal(files.length, 1);
     const savedFile = files[0];
     assert.ok(savedFile);
-    assert.match(savedFile, /\/generated-runtime-01\.md$/u);
-    const savedPath = join(agentDir, "pi-plan-mode", "plans", savedFile);
+    assert.match(savedFile, /\/\d{4}-\d{2}-\d{2}-generated-runtime-01\.md$/u);
+    const savedPath = join(agentDir, "pi-plan-mode", savedFile);
     assert.equal(await readFile(savedPath, "utf8"), plan);
     const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     assert.ok(text.includes(plan));

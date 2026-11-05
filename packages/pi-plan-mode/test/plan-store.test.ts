@@ -7,7 +7,14 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test, vi } from "vitest";
-import { createPlanStore, type PlanRevision, type PlanStore } from "../src/plan-store.js";
+import { createPlanStore as createCurrentPlanStore, type PlanRevision, type PlanStore } from "../src/plan-store.js";
+
+// Exercise legacy stores throughout the compatibility/security suite below.
+const createPlanStore = (
+  cwd: string,
+  location: Parameters<typeof createCurrentPlanStore>[1] = "plans",
+  agentDir?: string,
+) => createCurrentPlanStore(cwd, location, agentDir);
 
 // Keep real filesystem behavior while making cleanup failures injectable.
 vi.mock("node:fs/promises", async (importOriginal) => ({
@@ -38,7 +45,7 @@ async function git(cwd: string, ...args: string[]) {
   });
 }
 
-test("default storage uses getAgentDir, contains readable project and title names, and never writes to the project", async () => {
+test("legacy storage uses getAgentDir and preserves the original hashed location and filenames", async () => {
   await withStore(async ({ project, agent, store }) => {
     vi.stubEnv("PI_CODING_AGENT_DIR", agent);
     try {
@@ -116,6 +123,12 @@ test("Git roots unify nested directories and canonical aliases; linked worktrees
     assert.equal((await createPlanStore(worktree, undefined, agent)).directory, linked.directory);
     await main.save(PLAN);
     assert.deepEqual(await linked.list(), []);
+    const current = await createCurrentPlanStore(project, undefined, agent);
+    assert.equal((await createCurrentPlanStore(nested, undefined, agent)).directory, current.directory);
+    assert.equal((await createCurrentPlanStore(join(alias, "src"), undefined, agent)).directory, current.directory);
+    const currentLinked = await createCurrentPlanStore(join(worktree, "nested"), undefined, agent);
+    assert.notEqual(currentLinked.directory, current.directory);
+    assert.equal(basename(currentLinked.directory), "worktree");
   });
 });
 
