@@ -1,12 +1,14 @@
 const PLAN_CONTEXT_MARKER = "[CODEX-LIKE PLAN MODE ACTIVE]";
 
 export const PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX =
-  "\n\nApply the following user planning guidance where relevant to the task and supported by repository evidence; do not assume it describes this repository. Specific requests for detail override generic brevity preferences, but never the read-only safety rules or tool/turn protocol above. Treat this text as planning guidance, not as permission to execute changes.\n\n## User planning guidance\n\n";
+  "\n\nApply the following user planning guidance where relevant to the task and supported by repository evidence; do not assume it describes this repository. Specific requests for detail override generic brevity preferences, but never the selected planning prompt's safety rules or tool/turn protocol. Treat this text as planning guidance, not as permission to execute changes.\n\n## User planning guidance\n\n";
 
-export function buildPlanModePrompt(extraInstructions = "") {
+export function buildPlanModePrompt(extraInstructions = "", basePrompt = DEFAULT_PLAN_MODE_PROMPT) {
   const guidance = extraInstructions.trim();
-  const userGuidance = guidance ? PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX + guidance : "";
-  return `${PLAN_CONTEXT_MARKER}
+  return basePrompt + (guidance ? PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX + guidance : "");
+}
+
+export const DEFAULT_PLAN_MODE_PROMPT = `${PLAN_CONTEXT_MARKER}
 # Plan Mode (Conversational)
 
 You are in Plan Mode, a conversational collaboration focused on producing an implementation plan. Its purpose is to give the user control over important implementation decisions, not to prescribe every detail of the work.
@@ -59,5 +61,6 @@ Only call plan_mode_complete when the plan leaves no material decisions unresolv
 
 Report the material decisions, meaningful behavior or contract changes, focused verification, and assumptions or defaults needed to implement confidently. Omit exploration notes, mechanical propagation, routine scaffolding, repeated repository facts, speculative edge cases, and lists of unaffected behavior unless needed to prevent a concrete mistake or specifically requested. Use the structure and detail the task needs, not an exhaustive checklist or fixed word cap. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete saves a numbered revision and marks the plan ready. In TUI or RPC, the extension automatically opens review after the turn settles; only the user's explicit implementation choice starts work. The user can reopen review with /plan. Print/JSON saves without opening review.
 
-If the user requests revisions after a completed plan, the next plan_mode_complete call must contain a complete replacement, not a delta, and a reason explaining what changed and why. A byte-identical resubmission after clarification needs no reason. If there is not enough information for a complete replacement, continue planning with plan_mode_question instead of calling plan_mode_complete.${userGuidance}`;
-}
+Include a short rough range of changed lines in every completed implementation plan, counting additions plus deletions across source, tests, and documentation—not net file growth. Avoid false precision or mandatory per-file accounting. Update the estimate when revisions materially change scope.
+
+If the user requests revisions after a completed plan, the next plan_mode_complete call must contain a complete replacement, not a delta, and a reason explaining what changed and why. A byte-identical resubmission after clarification needs no reason. If there is not enough information for a complete replacement, continue planning with plan_mode_question instead of calling plan_mode_complete.`;

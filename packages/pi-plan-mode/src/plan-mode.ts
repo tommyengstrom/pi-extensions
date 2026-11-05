@@ -17,7 +17,7 @@ import {
   type PlanStore,
   storedPlanStorage,
 } from "./plan-store.js";
-import { readPlanModeInstructions } from "./planning-instructions.js";
+import { readPlanModeBasePrompt, readPlanModeInstructions } from "./planning-instructions.js";
 import { buildPlanModePrompt } from "./prompt.js";
 import {
   answerPlanModeQuestions,
@@ -39,6 +39,7 @@ type InteractiveUi = typeof import("./interactive-ui.js");
 interface PlanModeDependencies extends ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   readInstructions?(): string;
+  readBasePrompt?(): string;
   createStore?: typeof createPlanStore;
   loadUi?(): Promise<InteractiveUi>;
 }
@@ -155,6 +156,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!current.isCurrent()) return;
     idle(ctx);
     const instructions = (dependencies.readInstructions ?? readPlanModeInstructions)();
+    const basePrompt = (dependencies.readBasePrompt ?? readPlanModeBasePrompt)();
     const previousImplementation = implementation.state;
     let workflow: PlanWorkflow;
     try {
@@ -163,6 +165,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         projectRoot: store.projectRoot,
         storage: store.storage,
         instructions,
+        basePrompt,
         previousTools: pi.getActiveTools(),
         ...((options.tools ?? settings.tools) ? { tools: options.tools ?? settings.tools } : {}),
         ...(options.series ? { series: options.series } : {}),
@@ -233,7 +236,10 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (state.kind !== "idle" && session === ctx.sessionManager) {
       // Set guidance even if persisting the ready-to-planning transition subsequently fails.
       // Native sections survive compaction and use Pi's ordinary prompt/tool deltas.
-      event.systemPromptOptions.sections.pi_plan_mode = buildPlanModePrompt(state.workflow.instructions);
+      event.systemPromptOptions.sections.pi_plan_mode = buildPlanModePrompt(
+        state.workflow.instructions,
+        state.workflow.basePrompt,
+      );
       event.systemPromptOptions.selectedTools = planTools(state.workflow).active;
       if (state.kind === "ready" && event.messageType !== "custom") {
         commit({ kind: "planning", workflow: { ...state.workflow, parent: state.revision } });

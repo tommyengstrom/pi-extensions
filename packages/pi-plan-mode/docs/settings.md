@@ -90,7 +90,7 @@ During implementation, `/plan tools` changes the checker selection without restr
 
 The previous active-tool selection is restored when planning ends. You do not need to enable registered built-in search tools separately in Pi merely to use them in Plan mode.
 
-**Trust warning:** selecting nondefault tools—including `bash`, `powershell`, `write`, or a core-name override—trusts their implementation and arguments. There is no shell parser, command filter, or automatic side-effect analysis. The planner is still instructed not to mutate the project, but trusted tools can execute code or modify local and external state. Read-only annotations are hints, not guarantees. Plan mode is not an OS sandbox and does not prevent disclosure of data Pi can read.
+**Trust warning:** selecting nondefault tools—including `bash`, `powershell`, `write`, or a core-name override—trusts their implementation and arguments. There is no shell parser, command filter, or automatic side-effect analysis. The default planning prompt instructs the planner not to mutate the project, but trusted tools can execute code or modify local and external state. Read-only annotations are hints, not guarantees. Plan mode is not an OS sandbox and does not prevent disclosure of data Pi can read.
 
 ## Persistence and invalid files
 
@@ -102,15 +102,40 @@ Updates reread and validate the existing document, preserve unknown fields, and 
 
 ## Plan style and user instructions
 
-Optional `<getAgentDir()>/pi-plan-mode.md` adds user-wide planning guidance. It is plain UTF-8 Markdown, not JSON, and has a 64 KiB limit. There are no per-project profiles in this feature; write conditional prose when guidance applies only to some repositories:
+By default, every completed implementation plan should include a short approximate range of changed lines, counting **additions plus deletions** across source, tests, and documentation—not net file growth. Avoid false precision and mandatory per-file accounting. Update the estimate when a revision materially changes scope. This is planning guidance only: completion does not parse plans or reject a missing estimate, and a custom prompt can omit it.
+
+Two optional files under `getAgentDir()` (normally `~/.pi/agent`, respecting `PI_CODING_AGENT_DIR`) control the planning text:
+
+| File | Role |
+| --- | --- |
+| `pi-plan-mode-prompt.md` | Nonblank content replaces the entire built-in extension planning prompt. Missing or whitespace-only selects the built-in default. |
+| `pi-plan-mode.md` | Appends optional guidance to whichever base prompt was selected. Missing or blank adds nothing. |
+
+Both are plain UTF-8 Markdown, not JSON, with a **64 KiB per-file** limit and regular-file checks. Reads are bounded; invalid UTF-8, oversized/nonregular files, and read errors block activation with the offending path rather than silently falling back. Markdown is not expanded; only surrounding whitespace is trimmed. Files are not auto-created. There is no watcher, built-in editor, prompt settings menu, or project-local override.
+
+### Appended guidance
+
+Existing `pi-plan-mode.md` files retain their appended-guidance role. Write conditional prose when guidance applies only to some repositories:
 
 ```markdown
 For repositories with event-sourced models, explain material event-schema changes
 and the conceptual migration strategy. Keep routine propagation details brief.
 ```
 
-The planner first grounds decisions in repository evidence. Plans should explain consequential choices, non-obvious work, and focused verification for an equally capable implementer without the planning conversation. They need not enumerate routine mechanics or follow a fixed exhaustive outline. Specific requests for detail override generic brevity, but guidance cannot authorize mutations or bypass the question/completion protocol.
+The built-in prompt first grounds decisions in repository evidence. Plans should explain consequential choices, non-obvious work, and focused verification for an equally capable implementer without the planning conversation. They need not enumerate routine mechanics or follow a fixed exhaustive outline. Specific requests for detail override generic brevity, but appended guidance cannot authorize mutations or bypass the selected planning prompt's safety rules or question/completion protocol.
 
-Guidance is read once when a new workflow starts and saved with that workflow. Follow-ups, revisions, and restored workflows use the captured guidance, not later edits to the file. Missing or blank guidance adds nothing; read errors, invalid UTF-8, or oversized content block activation. There is no watcher or built-in editor for it.
+### Full prompt replacement
 
-Guidance is sent to the model and stored in the session. Do not put secrets in it.
+Use [`src/prompt.ts`](../src/prompt.ts) as the built-in starting point for customization. A nonblank `pi-plan-mode-prompt.md` replaces all built-in planning methodology, safety prose, turn/completion instructions, and the estimate convention. No built-in sections are silently retained, and the estimate requirement is not injected into a replacement. When both files exist, the replacement is the base and `pi-plan-mode.md` is appended.
+
+**Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions.** Replacement affects only the extension-owned `pi_plan_mode` system section, not Pi's overall system prompt, project instructions, or tool declarations. Runtime permissions, completion validation (including existing length limits), and explicit implementation approval remain enforced by code. Trusted tools can still have side effects; this is not a sandbox.
+
+### Snapshots and reset
+
+The selected base prompt (including the built-in default when selected) and appended guidance are captured when a new workflow starts and persisted with it. Ordinary turns, follow-ups, revisions, session restoration, tree navigation, and compaction use these snapshots, not later file edits. Continuing a saved revision from outside an active workflow starts a new workflow and captures current files.
+
+Legacy entries without a base snapshot use a one-time fallback to the current built-in prompt plus their already-captured guidance; they never read today's replacement during restoration. The fallback is retained in memory and included in subsequent workflow state writes. This may introduce the new default estimate guidance when an old workflow first restores.
+
+To reset to the built-in base, remove or empty `pi-plan-mode-prompt.md`; also remove or empty `pi-plan-mode.md` to remove appended guidance. Exit planning and start a new workflow for these changes to take effect. Reloading or resuming an existing workflow does not reset its snapshots. The tool-default reset menu does not modify these files.
+
+Both snapshots are sent to the model and stored in the session. Do not put secrets in them.

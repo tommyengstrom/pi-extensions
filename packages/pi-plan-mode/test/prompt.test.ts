@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildPlanModePrompt, PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX } from "../src/prompt.js";
+import { buildPlanModePrompt, DEFAULT_PLAN_MODE_PROMPT, PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX } from "../src/prompt.js";
+
+test("the default asks for approximate changed-line ranges, including revisions", () => {
+  assert.equal(buildPlanModePrompt(), DEFAULT_PLAN_MODE_PROMPT);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /rough range of changed lines in every completed implementation plan/);
+  assert.match(
+    DEFAULT_PLAN_MODE_PROMPT,
+    /additions plus deletions across source, tests, and documentation—not net file growth/,
+  );
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /Avoid false precision or mandatory per-file accounting/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /Update the estimate when revisions materially change scope/);
+});
+
+test("a replacement is the entire base, with only optional guidance appended", () => {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: Literal Markdown must not be expanded.
+  const replacement = "# My protocol\r\n\r\n```text\r\n  ${HOME} {{value}}\r\n```";
+  assert.equal(buildPlanModePrompt("", replacement), replacement);
+  assert.equal(buildPlanModePrompt(" \n\t ", replacement), replacement);
+  assert.equal(
+    buildPlanModePrompt(" Extra guidance ", replacement),
+    `${replacement}${PLAN_MODE_EXTRA_INSTRUCTIONS_PREFIX}Extra guidance`,
+  );
+  assert.ok(!buildPlanModePrompt("", replacement).includes("CODEX-LIKE"));
+  assert.ok(!buildPlanModePrompt("", replacement).includes("changed lines"));
+});
 
 test("user guidance is appended deterministically with unchanged Markdown", () => {
   const extra =

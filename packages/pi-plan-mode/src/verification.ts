@@ -15,6 +15,7 @@ import {
   type ToolInfo,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { renderPlanModeCompletion } from "./completion-tool.js";
 import { IMPLEMENTATION_HELPERS, type ImplementationState, record, type ToolIdentity } from "./implementation-state.js";
 import { type TranscriptSnapshot, writeTranscriptArtifact } from "./implementation-transcript.js";
@@ -200,6 +201,15 @@ export function renderVerificationResult(result: {
   return renderPlanModeCompletion(result);
 }
 
+const MAX_CHECKER_TURNS = 60;
+const MAX_CHECKER_TOOL_CALLS = 200;
+
+/** Error strings are persisted and displayed; never include full prompts or report bodies. */
+function diagnosticText(value: unknown): string {
+  const text = sanitizeTerminalText(value instanceof Error ? value.message : String(value));
+  return text.length > 2000 ? `${text.slice(0, 2000)}… [truncated]` : text;
+}
+
 /** A new child, not a fork. Only selected tool sources and normal context files load. */
 export async function runVerification(input: VerificationInput): Promise<VerificationResult> {
   const { ctx, implementation, transcript, settings, signal } = input;
@@ -213,7 +223,10 @@ export async function runVerification(input: VerificationInput): Promise<Verific
   if (!selected) throw new Error("Verification model is unavailable. Select a model in /plan settings.");
   const auth = await registry.getApiKeyAndHeaders(selected);
   signal.throwIfAborted();
-  if (!auth.ok) throw new Error(`Verification authentication failed: ${auth.error}`);
+  if (!auth.ok)
+    throw new Error(
+      `Verification authentication failed for ${diagnosticText(`${selected.provider}/${selected.id}`)}: ${diagnosticText(auth.error)}. Check the provider credentials or choose a checker model in /plan settings.`,
+    );
   const identities = implementation.toolIdentities;
   const forbidden = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS]);
   const allowed = new Set(identities.map((tool) => tool.name).filter((name) => !forbidden.has(name)));
@@ -250,6 +263,10 @@ export async function runVerification(input: VerificationInput): Promise<Verific
   let unsubscribe: (() => void) | undefined;
   let toolFailed = false;
   let calls = 0;
+  let turns = 0;
+  let stage = "preparing checker prompt";
+  let lastTool: string | undefined;
+  let lastFailedTool: string | undefined;
   let actualModel = { provider: selected.provider, id: selected.id };
   let usage: Usage | undefined;
   const abort = () => {
@@ -279,10 +296,14 @@ export async function runVerification(input: VerificationInput): Promise<Verific
         const actual = pi.getAllTools().find((tool) => tool.name === event.toolName);
         if (!expected || !sameTool(expected, actual))
           return { block: true, reason: "Verification tool provenance or exposure changed." };
-        if (++calls > 200) return { block: true, reason: "Verification tool-call limit reached.", terminate: true };
+        if (++calls > MAX_CHECKER_TOOL_CALLS)
+          return { block: true, reason: "Verification tool-call limit reached.", terminate: true };
       });
       pi.on("tool_execution_end", (event) => {
-        if (event.isError) toolFailed = true;
+        if (event.isError) {
+          toolFailed = true;
+          lastFailedTool = event.toolName;
+        }
         pi.setActiveTools(
           identities
             .filter((tool) => allowed.has(tool.name) && ["direct", "model-only"].includes(tool.exposure))
@@ -309,9 +330,21 @@ export async function runVerification(input: VerificationInput): Promise<Verific
       systemPrompt: CHECKER_INSTRUCTIONS,
       appendSystemPromptOverride: () => [],
     });
+    stage = "loading inspection tool sources";
     await loader.reload({ resolveProjectTrust: async () => trusted });
     signal.throwIfAborted();
-    if (loader.getExtensions().errors.length) throw new Error("Could not load selected verification tool sources.");
+    const loadErrors = loader.getExtensions().errors;
+    if (loadErrors.length) {
+      const details = loadErrors
+        .slice(0, 5)
+        .map((error) => `${diagnosticText(error.path)}: ${diagnosticText(error.error)}`)
+        .join("; ");
+      const remaining = loadErrors.length > 5 ? `; ${loadErrors.length - 5} more errors` : "";
+      throw new Error(
+        `Could not load selected verification tool sources: ${details}${remaining}. Check these extensions or change /plan tools.`,
+      );
+    }
+    stage = "creating checker runtime";
     // Authentication and transport delegate to the parent's registry; no parent messages are forwarded.
     const modelRuntime = await ModelRuntime.create({
       authPath: join(artifact.directory, "auth.json"),
@@ -343,8 +376,10 @@ export async function runVerification(input: VerificationInput): Promise<Verific
     });
     child = created.session;
     signal.throwIfAborted();
+    stage = "binding checker extensions";
     await child.bindExtensions({ mode: "json" });
     signal.throwIfAborted();
+    stage = "checking tool provenance and context budget";
     const available = child.getAllTools();
     for (const expected of identities) {
       const found = available.find((tool) => tool.name === expected.name);
@@ -359,10 +394,12 @@ export async function runVerification(input: VerificationInput): Promise<Verific
       throw new Error(
         "Plan history and user messages exceed the verification model's safe context budget. Choose a larger-context model.",
       );
-    let turns = 0;
     unsubscribe = child.subscribe((event) => {
-      if (event.type === "turn_start" && ++turns > 60) void child?.abort();
-      if (event.type === "tool_execution_start") input.onProgress?.(`Inspecting: ${event.toolName}`);
+      if (event.type === "turn_start" && ++turns > MAX_CHECKER_TURNS) void child?.abort();
+      if (event.type === "tool_execution_start") {
+        lastTool = event.toolName;
+        input.onProgress?.(`Inspecting: ${event.toolName}`);
+      }
       if (event.type === "message_end" && event.message.role === "assistant") {
         actualModel = { provider: event.message.provider, id: event.message.model };
         const next = event.message.usage;
@@ -375,13 +412,44 @@ export async function runVerification(input: VerificationInput): Promise<Verific
         }
       }
     });
+    stage = "running checker";
     input.onProgress?.("Checking plan adherence…");
     await child.prompt(prompt, { expandPromptTemplates: false });
     signal.throwIfAborted();
+    // Also fail if a limit ended the run without prompt() rejecting. The catch below
+    // identifies the limit even when the child reports only an aborted response.
+    if (turns > MAX_CHECKER_TURNS || calls > MAX_CHECKER_TOOL_CALLS) throw new Error("Checker limit reached.");
     const last = child.messages.findLast((message) => message.role === "assistant");
-    if (last?.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted" || turns > 60)
-      throw new Error("Verification did not complete successfully.");
-    const report = parseVerificationReport(child.getLastAssistantText() ?? "");
+    if (!last)
+      throw new Error(
+        "The checker produced no assistant response. Check provider availability and retry /plan verify.",
+      );
+    if (last.stopReason === "error")
+      throw new Error(
+        `The checker model returned an error: ${last.errorMessage ? diagnosticText(last.errorMessage) : "the provider supplied no error detail"}. Check the provider/model configuration, then retry /plan verify.`,
+      );
+    if (last.stopReason === "aborted")
+      throw new Error(
+        `The checker stopped with an aborted response, without a parent cancellation: ${last.errorMessage ? diagnosticText(last.errorMessage) : "no reason supplied"}. Retry /plan verify.`,
+      );
+    stage = "validating checker report";
+    const text = child.getLastAssistantText() ?? "";
+    let report: VerificationReport;
+    try {
+      report = parseVerificationReport(text);
+    } catch (error) {
+      const detail = !text.trim()
+        ? "The checker returned no report text."
+        : error instanceof SyntaxError
+          ? "The checker did not return valid JSON."
+          : diagnosticText(error);
+      // JSON.parse errors can quote historical evidence from the response. Report the
+      // failure category and size, not an excerpt of private transcript/report content.
+      throw new Error(
+        `${detail} Report length: ${text.length} characters.${last.stopReason === "length" ? " The model reached its output-token limit; choose a checker model with more output capacity in /plan settings." : " Retry /plan verify or choose a checker model that follows the required report schema in /plan settings."}`,
+        { cause: error },
+      );
+    }
     const limitations = [
       ...transcript.limitations,
       ...(toolFailed ? ["One or more inspection tool calls failed; evidence may be incomplete."] : []),
@@ -389,6 +457,27 @@ export async function runVerification(input: VerificationInput): Promise<Verific
     report.limitations.push(...limitations);
     if (limitations.length && report.status === "adherent") report.status = "inconclusive";
     return { report, model: actualModel, usage };
+  } catch (error) {
+    const last = child?.messages.findLast((message) => message.role === "assistant");
+    const reason = signal.aborted
+      ? `Verification was cancelled by its caller: ${diagnosticText(signal.reason ?? "no reason supplied")}. Run /plan verify when ready.`
+      : turns > MAX_CHECKER_TURNS
+        ? `The checker exceeded the ${MAX_CHECKER_TURNS}-turn limit and was stopped. Narrow the plan/evidence scope or choose a different checker model in /plan settings before retrying.`
+        : calls > MAX_CHECKER_TOOL_CALLS
+          ? `The checker exceeded the ${MAX_CHECKER_TOOL_CALLS}-tool-call limit and was stopped. Narrow the inspection scope or choose a different checker model in /plan settings before retrying.`
+          : diagnosticText(error);
+    const model = diagnosticText(`${actualModel.provider}/${actualModel.id}`);
+    const context = [
+      `model: ${model}`,
+      `turns started: ${turns}/${MAX_CHECKER_TURNS}`,
+      `permitted tool calls attempted: ${calls}/${MAX_CHECKER_TOOL_CALLS}`,
+      `last stop reason: ${last?.stopReason ?? "none"}`,
+      ...(lastTool ? [`last inspection tool: ${diagnosticText(lastTool)}`] : []),
+      ...(lastFailedTool ? [`last failed tool: ${diagnosticText(lastFailedTool)}`] : []),
+    ].join("; ");
+    const failure = new Error(`Verification failed while ${stage} (${context}). ${reason}`, { cause: error });
+    if (signal.aborted) failure.name = "AbortError";
+    throw failure;
   } finally {
     signal.removeEventListener("abort", abort);
     unsubscribe?.();

@@ -29,8 +29,7 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
       type: "string",
       minLength: 1,
       maxLength: PLAN_MODE_MAX_CHARS,
-      description:
-        "The complete implementation decision brief in Markdown: resolve material decisions, start with the intended change and main affected code paths, include non-obvious required changes, and delegate routine mechanics.",
+      description: "The complete Markdown implementation plan under the active planning instructions.",
     },
   },
 } as const;

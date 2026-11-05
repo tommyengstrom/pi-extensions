@@ -1,5 +1,6 @@
 import { type PlanRevision, type PlanStorage, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
+import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
 
 export const PLAN_STATE_ENTRY = "pi-plan-state";
 
@@ -9,6 +10,8 @@ export interface PlanWorkflow {
   plansDirectory?: string;
   storage?: PlanStorage;
   instructions: string;
+  /** Captured base; absent only in legacy entries, which restore the built-in default. */
+  basePrompt?: string;
   previousTools: string[];
   /** Undefined means canonical inspection tools, not arbitrary tools with those names. */
   tools?: string[];
@@ -36,6 +39,10 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       !validPlanStorage(workflow.storage ?? { kind: "legacy", plansDirectory: workflow.plansDirectory }) ||
       typeof workflow.instructions !== "string" ||
       Buffer.byteLength(workflow.instructions, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
+      (workflow.basePrompt !== undefined &&
+        (typeof workflow.basePrompt !== "string" ||
+          !workflow.basePrompt.trim() ||
+          Buffer.byteLength(workflow.basePrompt, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
       !names(workflow.previousTools) ||
       (workflow.tools !== undefined && !names(workflow.tools)) ||
       (workflow.series !== undefined && !text(workflow.series)) ||
@@ -47,6 +54,7 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       ...(typeof workflow.plansDirectory === "string" ? { plansDirectory: workflow.plansDirectory } : {}),
       ...(validPlanStorage(workflow.storage) ? { storage: workflow.storage } : {}),
       instructions: workflow.instructions,
+      basePrompt: workflow.basePrompt ?? DEFAULT_PLAN_MODE_PROMPT,
       previousTools: [...workflow.previousTools],
       ...(workflow.tools !== undefined ? { tools: [...workflow.tools] } : {}),
       ...(workflow.series !== undefined ? { series: workflow.series } : {}),

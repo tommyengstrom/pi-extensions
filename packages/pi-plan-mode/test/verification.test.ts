@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionContext, ProviderConfig } from "@earendil-works/pi-coding-agent";
-import { afterAll, test } from "vitest";
+import { afterAll, test, vi } from "vitest";
 import type { VerificationReport } from "../src/verification.js";
 
 // Initialize before any Pi/extension imports.
@@ -18,7 +18,7 @@ afterAll(() => {
   else process.env.PI_CODING_AGENT_DIR = previous;
   rmSync(root, { recursive: true, force: true });
 });
-const { ModelRuntime, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+const { AgentSession, ModelRuntime, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
 const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } = await import(
   "@earendil-works/pi-ai"
 );
@@ -37,7 +37,18 @@ const report: VerificationReport = {
 };
 
 async function fixture(
-  options: { badTool?: boolean; cancel?: boolean; invalid?: boolean; tools?: string[]; firstTool?: string } = {},
+  options: {
+    badTool?: boolean;
+    cancel?: boolean;
+    invalid?: boolean;
+    tools?: string[];
+    firstTool?: string;
+    stopReason?: "error" | "aborted" | "length";
+    errorMessage?: string;
+    repeatTools?: boolean;
+    toolsPerTurn?: number;
+    reportText?: string;
+  } = {},
 ) {
   const cwd = join(root, `project-${Math.random()}`);
   await mkdir(cwd, { recursive: true });
@@ -66,23 +77,27 @@ async function fixture(
     const path = /Path: (.+implementation\.md)/.exec(text)?.[1];
     assert.ok(path);
     if (requests.length === 1) artifacts.push(path);
-    const tool = requests.length === 1;
+    const tool =
+      options.repeatTools ||
+      (requests.length === 1 && options.stopReason !== "error" && options.stopReason !== "aborted");
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
       provider: model.provider,
       model: model.id,
       content: tool
-        ? [
-            {
-              type: "toolCall",
-              id: "inspect",
+        ? Array.from(
+            { length: options.toolsPerTurn ?? 1 },
+            (_, index): ToolCall => ({
+              type: "toolCall" as const,
+              id: `inspect-${requests.length}-${index}`,
               name: options.badTool ? "write" : (options.firstTool ?? "read"),
               arguments: options.badTool ? { path: join(cwd, "should-not-exist"), content: "bad" } : { path },
-            },
-          ]
-        : [{ type: "text", text: options.invalid ? "not JSON" : JSON.stringify(report) }],
-      stopReason: tool ? "toolUse" : "stop",
+            }),
+          )
+        : [{ type: "text", text: options.reportText ?? (options.invalid ? "not JSON" : JSON.stringify(report)) }],
+      stopReason: tool ? "toolUse" : (options.stopReason ?? "stop"),
+      errorMessage: options.errorMessage,
       timestamp: Date.now(),
       usage: {
         input: 1,
@@ -95,8 +110,15 @@ async function fixture(
     };
     const stream = createAssistantMessageEventStream();
     stream.push({ type: "start", partial: message });
-    if (options.cancel) controller.abort();
-    stream.push({ type: "done", reason: tool ? "toolUse" : "stop", message });
+    if (options.cancel) controller.abort(new Error("User cancelled the check"));
+    if (message.stopReason === "error" || message.stopReason === "aborted")
+      stream.push({ type: "error", reason: message.stopReason, error: message });
+    else
+      stream.push({
+        type: "done",
+        reason: tool ? "toolUse" : options.stopReason === "length" ? "length" : "stop",
+        message,
+      });
     stream.end();
     return stream;
   };
@@ -214,6 +236,111 @@ test("invalid output and cancellation clean up transcript artifacts", async () =
     await assert.rejects(runVerification(f));
     for (const path of f.artifacts) await assert.rejects(stat(path), /ENOENT/);
   }
+});
+
+test("provider failures retain bounded safe error details, model, stage, and stop reason", async () => {
+  const f = await fixture({
+    stopReason: "error",
+    errorMessage: `HTTP 429: rate limit\u001b[31m\nRetry after 30s ${"x".repeat(3000)}`,
+  });
+  await assert.rejects(runVerification(f), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /failed while running checker/);
+    assert.match(error.message, /model: plan-check-offline\/checker/);
+    assert.match(error.message, /turns started: 1\/60/);
+    assert.match(error.message, /last stop reason: error/);
+    assert.match(error.message, /HTTP 429: rate limit/);
+    assert.match(error.message, /Retry after 30s/);
+    assert.match(error.message, /truncated/);
+    assert.ok(!error.message.includes("\u001b"));
+    assert.ok(error.message.length < 3000);
+    assert.ok(error.cause instanceof Error);
+    return true;
+  });
+  for (const path of f.artifacts) await assert.rejects(stat(path), /ENOENT/);
+  const noDetail = await fixture({ stopReason: "error" });
+  await assert.rejects(runVerification(noDetail), /provider supplied no error detail/);
+});
+
+test("caller cancellation and provider aborts have distinct diagnostics", async () => {
+  const cancelled = await fixture({ cancel: true });
+  await assert.rejects(runVerification(cancelled), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.name, "AbortError");
+    assert.match(error.message, /cancelled by its caller: User cancelled the check/);
+    return true;
+  });
+  const aborted = await fixture({ stopReason: "aborted", errorMessage: "Upstream request interrupted" });
+  await assert.rejects(
+    runVerification(aborted),
+    /aborted response, without a parent cancellation: Upstream request interrupted/,
+  );
+  for (const path of [...cancelled.artifacts, ...aborted.artifacts]) await assert.rejects(stat(path), /ENOENT/);
+});
+
+test("turn and tool-call limits report the limit instead of an incidental abort or invalid JSON", async () => {
+  for (const [toolsPerTurn, limit] of [
+    [1, "60-turn"],
+    [5, "200-tool-call"],
+  ] as const) {
+    const f = await fixture({ repeatTools: true, toolsPerTurn });
+    await assert.rejects(runVerification(f), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(`exceeded the ${limit} limit`));
+      assert.match(error.message, /last inspection tool: read/);
+      assert.match(error.message, /choose a different checker model/);
+      return true;
+    });
+    for (const path of f.artifacts) await assert.rejects(stat(path), /ENOENT/);
+  }
+});
+
+test("report failures distinguish empty, invalid JSON, schema, and output-token truncation without leaking text", async () => {
+  for (const [options, expected] of [
+    [{ reportText: "" }, /returned no report text/],
+    [{ reportText: "PRIVATE_TRANSCRIPT_EVIDENCE not JSON" }, /did not return valid JSON/],
+    [{ reportText: '{"summary":"PRIVATE_TRANSCRIPT_EVIDENCE"}' }, /Invalid adherence report schema/],
+    [{ stopReason: "length", reportText: '{"summary":"PRIVATE_TRANSCRIPT_EVIDENCE' }, /output-token limit/],
+  ] as const) {
+    const f = await fixture(options);
+    await assert.rejects(runVerification(f), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /validating checker report/);
+      assert.match(error.message, expected);
+      assert.match(error.message, /Report length: \d+ characters/);
+      assert.ok(!error.message.includes("PRIVATE_TRANSCRIPT_EVIDENCE"));
+      return true;
+    });
+    for (const path of f.artifacts) await assert.rejects(stat(path), /ENOENT/);
+  }
+});
+
+test("missing assistant messages and rejected prompt calls retain distinct causes", async () => {
+  const f = await fixture();
+  const prompt = vi.spyOn(AgentSession.prototype, "prompt");
+  try {
+    prompt.mockResolvedValueOnce(undefined);
+    await assert.rejects(runVerification(f), /last stop reason: none.*produced no assistant response/);
+    prompt.mockRejectedValueOnce(new Error("Connection refused by proxy"));
+    await assert.rejects(runVerification(f), /running checker.*Connection refused by proxy/);
+  } finally {
+    prompt.mockRestore();
+  }
+});
+
+test("tool-source loading failures identify the failing extension and underlying error", async () => {
+  const f = await fixture();
+  const path = join(f.cwd, "broken-inspection.ts");
+  await writeFile(path, 'throw new Error("Inspection configuration missing");');
+  f.implementation.toolIdentities.push({ name: "inspect", source: "extension", path, exposure: "direct" });
+  await assert.rejects(runVerification(f), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /loading inspection tool sources/);
+    assert.match(error.message, /broken-inspection\.ts/);
+    assert.match(error.message, /Inspection configuration missing/);
+    assert.match(error.message, /turns started: 0\/60/);
+    return true;
+  });
 });
 
 test("missing transcript access and unknown explicit models fail without fallback", async () => {

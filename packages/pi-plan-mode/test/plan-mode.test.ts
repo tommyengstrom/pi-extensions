@@ -7,7 +7,8 @@ import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } f
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import planMode from "../src/plan-mode.js";
 import { createPlanStore, type PlanRevision } from "../src/plan-store.js";
-import { buildPlanModePrompt } from "../src/prompt.js";
+import { readPlanModeBasePrompt } from "../src/planning-instructions.js";
+import { buildPlanModePrompt, DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
 import { DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
 import type { VerificationInput, VerificationResult } from "../src/verification.js";
@@ -28,6 +29,7 @@ async function fixture(
     plansDirectory?: string;
     selectSaved?: (revisions: PlanRevision[]) => PlanRevision | undefined;
     instructions?: string;
+    basePrompt?: string;
     automatic?: boolean;
     verify?: (input: VerificationInput) => Promise<VerificationResult>;
   } = {},
@@ -37,6 +39,8 @@ async function fixture(
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
   await mkdir(cwd);
+  await mkdir(agentDir);
+  if (config.basePrompt !== undefined) await writeFile(join(agentDir, "pi-plan-mode-prompt.md"), config.basePrompt);
   await writeFile(join(root, "source.jsonl"), "source session");
   const mock = createMockPi({
     activeTools: BASELINE,
@@ -74,6 +78,7 @@ async function fixture(
       };
     },
     readInstructions: () => instructions,
+    readBasePrompt: () => readPlanModeBasePrompt(join(agentDir, "pi-plan-mode-prompt.md")),
     verify: config.verify,
     createStore: (
       directory: string,
@@ -104,7 +109,11 @@ async function fixture(
   }
   const registeredCommand = mock.commands.get("plan");
   assert.ok(registeredCommand);
-  const command = (args: string) => registeredCommand.handler(args, context.ctx);
+  const command = (args: string) => {
+    const current = mock.commands.get("plan");
+    assert.ok(current);
+    return current.handler(args, context.ctx);
+  };
   const execute = (name: string, params: unknown, signal = new AbortController().signal) => {
     const tool = mock.tools.find((candidate) => candidate.name === name);
     assert.ok(tool);
@@ -579,6 +588,98 @@ test("explicit tool changes take effect during planning without authorizing nest
   );
   await f.command("exit");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+});
+
+test.each([undefined, "# Custom protocol\n\nUse a checklist, without estimates."])(
+  "base prompt %s is captured across turns, revisions, restoration and new workflows",
+  async (basePrompt) => {
+    const f = await fixture({ basePrompt });
+    await f.command("start");
+    const captured = f.state();
+    assert.equal(captured.kind, "planning");
+    assert.equal(captured.workflow.basePrompt, basePrompt ?? DEFAULT_PLAN_MODE_PROMPT);
+    const expected = buildPlanModePrompt("Keep personal guidance.", captured.workflow.basePrompt);
+    const path = join(f.agentDir, "pi-plan-mode-prompt.md");
+    await writeFile(path, "# Changed on disk");
+    f.instructions("Changed guidance");
+    const assertPrompt = async () => {
+      const event = promptEvent();
+      await f.emit("before_agent_start", event);
+      assert.equal(event.systemPromptOptions.sections.pi_plan_mode, expected);
+      assert.equal(event.systemPromptOptions.sections.other, "keep");
+    };
+    await assertPrompt();
+    await assertPrompt();
+    // Completion accepts custom style and no estimate; it does not authorize implementation.
+    const result = await f.execute("plan_mode_complete", { plan: "- Update the parser.\n- Test Unicode." });
+    assert.equal(await readFile(result.details.path, "utf8"), "- Update the parser.\n- Test Unicode.");
+    assert.equal(f.state().kind, "ready");
+    assert.equal(implementationOf(f), undefined);
+    assert.equal(((await f.emit("tool_call", { toolName: "write" })) as { block: boolean }).block, true);
+    await assertPrompt();
+    await f.execute("plan_mode_complete", { plan: "- Update the parser.\n- Test Unicode." });
+    const branch = f.entries.map((entry) => ({ type: "custom", ...entry }));
+    // Invalid current files must not be read during restoration.
+    await writeFile(path, Buffer.from([0xff]));
+    await f.command("exit");
+    f.branch(branch);
+    await f.emit("session_tree");
+    await assertPrompt();
+    await f.emit("session_shutdown");
+    f.events.clear();
+    await planMode(f.pi, f.dependencies);
+    await f.emit("session_start");
+    await assertPrompt();
+    await f.emit("session_compact");
+    await assertPrompt();
+    await f.command("exit");
+    await writeFile(path, "# Changed on disk");
+    await f.command("start");
+    const next = promptEvent();
+    await f.emit("before_agent_start", next);
+    assert.equal(
+      next.systemPromptOptions.sections.pi_plan_mode,
+      buildPlanModePrompt("Changed guidance", "# Changed on disk"),
+    );
+  },
+);
+
+test("legacy workflows restore the built-in base without consulting today's replacement", async () => {
+  const f = await fixture({ basePrompt: "Today's replacement" });
+  await f.command("start");
+  const state = f.state();
+  assert.equal(state.kind, "planning");
+  delete state.workflow.basePrompt;
+  f.branch([{ type: "custom", customType: PLAN_STATE_ENTRY, data: state }]);
+  await f.emit("session_tree");
+  const event = promptEvent();
+  await f.emit("before_agent_start", event);
+  assert.equal(event.systemPromptOptions.sections.pi_plan_mode, buildPlanModePrompt("Keep personal guidance."));
+  await f.execute("plan_mode_complete", { plan: PLAN });
+  const restored = f.state();
+  assert.equal(restored.kind, "ready");
+  assert.equal(restored.workflow.basePrompt, DEFAULT_PLAN_MODE_PROMPT);
+});
+
+test("invalid replacement blocks activation without detaching implementation or changing tools", async () => {
+  for (const implementing of [false, true]) {
+    const f = await fixture();
+    if (implementing) {
+      await ready(f);
+      f.choose("here");
+      await f.command("");
+    }
+    const before = structuredClone(f.entries);
+    const tools = f.rawPi.getActiveTools();
+    await writeFile(join(f.agentDir, "pi-plan-mode-prompt.md"), Buffer.from([0xff]));
+    await f.command("start");
+    assert.match(f.notifications.at(-1)?.message ?? "", /pi-plan-mode-prompt.md.*valid UTF-8/);
+    assert.deepEqual(f.entries, before);
+    assert.deepEqual(f.rawPi.getActiveTools(), tools);
+    await writeFile(join(f.agentDir, "pi-plan-mode-prompt.md"), "Recovered prompt");
+    await f.command("start");
+    assert.equal(f.state().kind, "planning");
+  }
 });
 
 test("native prompt section is stable across turns, snapshots guidance, and is removed on exit", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { AssistantMessage, Message, SystemMessage, ToolCall } from "@earendil-works/pi-ai";
@@ -396,6 +396,48 @@ test("entrypoint registers inactive helpers and selects real core inspection too
     assert.deepEqual(session.getActiveToolNames(), previous);
     assert.equal(stateOf(session).kind, "idle");
   } finally {
+    await f.dispose();
+  }
+});
+
+test("a file replacement uses the configured agent directory and survives real compaction unchanged", async () => {
+  const f = await fixture((pi) => {
+    pi.on("session_before_compact", (event) => ({
+      compaction: {
+        summary: "Planning is still active.",
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+      },
+    }));
+  });
+  const path = join(agentDir, "pi-plan-mode-prompt.md");
+  try {
+    await writeFile(path, "# Custom protocol\n\nPlan as a checklist.");
+    const session = f.runtime.session;
+    await session.prompt("/plan start");
+    await session.prompt("First planning turn.");
+    const first = f.requests.at(-1);
+    assert.ok(first);
+    const section = f.promptOptions.at(-1)?.section;
+    assert.ok(section);
+    assert.ok(section.startsWith("# Custom protocol"));
+    assert.ok(section.includes(instructions));
+    assert.equal(section.includes("CODEX-LIKE"), false);
+    await writeFile(path, "# Edited protocol");
+    await session.prompt("Second planning turn.");
+    assert.deepEqual(f.requests.at(-1)?.slice(0, first.length), first);
+    session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    await session.compact();
+    await session.prompt("Continue after compaction.");
+    assert.equal(f.promptOptions.at(-1)?.section, section);
+    assert.ok(getCurrentSystemPrompt(f.requests.at(-1) ?? []).includes(section));
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...planningTools].sort());
+    await session.prompt("/plan exit");
+    await session.prompt("/plan start");
+    await session.prompt("New workflow.");
+    assert.ok(f.promptOptions.at(-1)?.section?.startsWith("# Edited protocol"));
+  } finally {
+    await rm(path, { force: true });
     await f.dispose();
   }
 });

@@ -28,6 +28,12 @@ After completion or exit, run **`/plan resume` before sending fixes or changes**
 
 TUI manual checks show a cancellable dialog and progress status. RPC uses supported dialogs/status messages. Print/JSON checks do not require a dialog. `/plan cancel`, cancellation of an automatic tool run, new main-agent work, tree navigation, session replacement, reload, and shutdown invalidate ongoing checks and suppress stale results.
 
+## Diagnosing failed checks
+
+Checker-run failures report the stage, provider/model, turns started, permitted tool calls attempted, last assistant stop reason, and last inspection/failed tool when available. Provider error details are retained as bounded, terminal-safe text in the error recorded by the check; the full child conversation is still not persisted. These diagnostics distinguish caller cancellation, a provider-aborted response, missing responses, the 60-turn and 200-tool-call limits, and invalid reports. Tool-source loading failures identify the extension and its load error.
+
+Malformed report diagnostics give the validation failure and response length without copying report or transcript excerpts. Invalid output that ends at the model's output-token limit points to choosing a checker model with more output capacity. Fix the reported provider/tool configuration issue or choose another checker model in `/plan settings`, then retry `/plan verify`. A failed check is not an implementation-deviation finding.
+
 ## Fresh checker and transcript boundary
 
 Each check uses a new in-memory SDK session, not a conversation fork. Its initial task contains:

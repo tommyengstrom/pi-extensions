@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Verification diagnostics
+
+- Replace generic checker failures with stage, model, turn/tool counts, stop reason, and bounded provider errors. Distinguish caller cancellation, provider aborts, missing responses, execution limits, malformed/truncated reports, and tool-source loading failures without copying report or transcript excerpts into diagnostics.
+
 ### Keyboard toggle
 
 - Enable Ctrl+Alt+P by default to toggle directly between planning and normal mode while idle. Leaving restores tools without starting implementation or deleting saved plans.

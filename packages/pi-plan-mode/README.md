@@ -30,7 +30,7 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 4. Review the full saved document, then explicitly choose an action. **Implementation never starts without your choice.** **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative. Dismissal leaves the plan ready; use `/plan` to reopen review or if automatic presentation was interrupted.
 5. Implementation remains tracked. The agent saves requested changes with `plan_mode_update`, including a reason, and finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
 
-Plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions.
+By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. Each completed plan should include a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Revisions update the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
 
 ## Commands
 
@@ -108,7 +108,7 @@ The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls
 
 Use `/plan tools` while idle to change a workflow's selection, including after planning has started. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools.
 
-**Explicitly selecting a tool trusts its implementation**, including shells, editing tools, MCP tools, and overrides. There is no shell parser or command-level read-only filter. A trusted tool can mutate files, execute code, or affect external systems, even though the planner is instructed not to do so. Tool annotations are not verified permissions. This is an agent workflow restriction, **not an OS sandbox or confidentiality boundary**.
+**Explicitly selecting a tool trusts its implementation**, including shells, editing tools, MCP tools, and overrides. There is no shell parser or command-level read-only filter. A trusted tool can mutate files, execute code, or affect external systems, even though the default planning prompt instructs the planner not to do so. Tool annotations are not verified permissions. This is an agent workflow restriction, **not an OS sandbox or confidentiality boundary**.
 
 Each host-mediated tool call, including a nested call, must have an allowed exact name. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Direct and `model-only` selections are activated; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The planning helpers must be registered and available too, and reject calls outside Plan mode.
 
@@ -137,7 +137,14 @@ Verification settings are read for the next check. Omit `verification.model` to 
 
 The checker compares the exact approved baseline and its implementation revisions against repository evidence. It receives scoped implementation user messages upfront and can inspect the implementation transcript to identify user-requested changes and reasons for deviations. This content goes to the selected checker provider. It is **not a general code review**, and findings never trigger an automatic repair loop. See [adherence checks](./docs/adherence-checks.md) for transcript scope, limitations, and tool compatibility.
 
-Optional `<getAgentDir()>/pi-plan-mode.md` supplies user-wide planning guidance, snapshotted when a workflow starts. See the [settings reference](./docs/settings.md) for storage rules, safe persistence, and guidance examples.
+Two optional user-wide Markdown files customize planning (`getAgentDir()` respects `PI_CODING_AGENT_DIR`):
+
+- `pi-plan-mode-prompt.md` replaces the **entire extension planning prompt** when nonblank. Missing or blank selects the built-in default in [`src/prompt.ts`](./src/prompt.ts), which is the starting point for customization.
+- `pi-plan-mode.md` appends guidance to the selected base prompt; existing guidance files keep that role.
+
+A replacement removes built-in methodology, safety prose, question/completion instructions, and the estimate convention. Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions. Only the extension's `pi_plan_mode` section is replaced—not Pi's overall system prompt, project instructions, or tool declarations. Runtime tool permissions, completion validation, and explicit implementation approval remain enforced; trusted tools are still not sandboxed.
+
+Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, revisions, session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy sessions without a base snapshot fall back once to the current built-in prompt plus their captured guidance, never today's replacement. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. No files are auto-created, and there is no watcher, prompt menu, or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
 
 ## License
 

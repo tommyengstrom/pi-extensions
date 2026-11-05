@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
 
 export const MAX_PLAN_MODE_INSTRUCTIONS_BYTES = 64 * 1024;
 
@@ -8,8 +9,21 @@ export function planModeInstructionsPath(): string {
   return join(getAgentDir(), "pi-plan-mode.md");
 }
 
+export function planModePromptPath(): string {
+  return join(getAgentDir(), "pi-plan-mode-prompt.md");
+}
+
+/** Select a complete base prompt without retaining any built-in sections in a replacement. */
+export function readPlanModeBasePrompt(path = planModePromptPath()): string {
+  return readOptionalMarkdown(path, "prompt") || DEFAULT_PLAN_MODE_PROMPT;
+}
+
 /** Read optional user guidance without creating files or expanding Markdown content. */
 export function readPlanModeInstructions(path = planModeInstructionsPath()): string {
+  return readOptionalMarkdown(path, "instructions");
+}
+
+function readOptionalMarkdown(path: string, role: string): string {
   let descriptor: number | undefined;
   try {
     // Nonblocking open lets fstat reject FIFOs without waiting for a writer.
@@ -40,7 +54,7 @@ export function readPlanModeInstructions(path = planModeInstructionsPath()): str
   } catch (error) {
     if (descriptor === undefined && (error as NodeJS.ErrnoException).code === "ENOENT") return "";
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Unable to read Plan-mode instructions at ${JSON.stringify(path)}: ${reason}`, { cause: error });
+    throw new Error(`Unable to read Plan-mode ${role} at ${JSON.stringify(path)}: ${reason}`, { cause: error });
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
