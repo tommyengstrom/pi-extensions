@@ -70,7 +70,7 @@ Legacy hints must be nonempty relative paths with `/` separators. Absolute paths
 
 ## Tool selection and trust
 
-Without `tools`, Plan mode selects available canonical built-in `read`, `grep`, `find`, and `ls`. A custom override with the same name is not canonical. The registered `plan_mode_question` and `plan_mode_complete` helpers are always required; do not add them manually.
+Without `tools`, Plan mode selects available canonical built-in `read`, `grep`, `find`, and `ls`. A custom override with the same name is not canonical. The registered `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit` helpers are always required; do not add them manually.
 
 Explicit `tools` replaces the optional defaults rather than adding to them. Names must be nonempty strings; duplicates are removed in first-seen order. Names are exact: namespace names, wildcards, and Pi's `+name`/`-name` settings syntax are not expanded here.
 
@@ -82,7 +82,7 @@ For example, this trusts a codemode orchestrator and one MCP callee in addition 
 }
 ```
 
-Each nested callee must be selected separately. Direct and `model-only` tools are activated for the workflow; registered `codemode` and `deferred` tools are allowed without forcing direct activation. Pi's own exposure rules still apply, including the prohibition on nested calls to `model-only` tools. Unknown or hidden tools are unavailable, not implicitly registered or made reachable.
+Each nested callee must be selected separately. Planning saves (`plan_mode_complete` and `plan_mode_edit`) are an exception: call them directly and alone, not nested or batched, so Pi can terminate the turn. During tracked implementation, `plan_mode_edit` may be nested and does not terminate. Direct and `model-only` tools are activated for the workflow; registered `codemode` and `deferred` tools are allowed without forcing direct activation. Pi's own exposure rules still apply, including the prohibition on nested calls to `model-only` tools. Unknown or hidden tools are unavailable, not implicitly registered or made reachable.
 
 The selector retains unavailable configured names and warns that they may become available later. Edit the JSON or reset defaults to remove those retained names. This is not a first-request frozen policy: permissions are resolved against current tool metadata, and users can change the selection between turns with `/plan tools`.
 
@@ -122,13 +122,13 @@ For repositories with event-sourced models, explain material event-schema change
 and the conceptual migration strategy. Keep routine propagation details brief.
 ```
 
-The built-in prompt first grounds decisions in repository evidence. Plans should explain consequential choices, non-obvious work, and focused verification for an equally capable implementer without the planning conversation. They need not enumerate routine mechanics or follow a fixed exhaustive outline. Specific requests for detail override generic brevity, but appended guidance cannot authorize mutations or bypass the selected planning prompt's safety rules or question/completion protocol.
+The built-in prompt first grounds decisions in repository evidence. Plans should explain consequential choices, non-obvious work, and focused verification for an equally capable implementer without the planning conversation. They need not enumerate routine mechanics or follow a fixed exhaustive outline. Specific requests for detail override generic brevity, but appended guidance cannot authorize mutations or bypass the selected planning prompt's safety rules or question/completion/edit protocol.
 
 ### Full prompt replacement
 
-Use [`src/prompt.ts`](../src/prompt.ts) as the built-in starting point for customization. A nonblank `pi-plan-mode-prompt.md` replaces all built-in planning methodology, safety prose, turn/completion instructions, and the estimate convention. No built-in sections are silently retained, and the estimate requirement is not injected into a replacement. When both files exist, the replacement is the base and `pi-plan-mode.md` is appended.
+Use [`src/prompt.ts`](../src/prompt.ts) as the built-in starting point for customization. A nonblank `pi-plan-mode-prompt.md` replaces all built-in planning methodology, safety prose, turn/completion instructions, and the estimate convention. No built-in methodology or estimate requirement is silently retained. The extension still appends the current saved revision path when one exists so the editor can target it. When both files exist, the replacement is the base and `pi-plan-mode.md` is appended.
 
-**Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions.** Replacement affects only the extension-owned `pi_plan_mode` system section, not Pi's overall system prompt, project instructions, or tool declarations. Runtime permissions, completion validation (including existing length limits), and explicit implementation approval remain enforced by code. Trusted tools can still have side effects; this is not a sandbox.
+**Custom prompt authors must supply their desired read-only planning and question/completion/edit protocol instructions.** Both planning save helpers must be called directly and alone as the final action: successful completion or editing marks the plan ready and ends the turn. Replacement affects only the extension-owned `pi_plan_mode` system section, not Pi's overall system prompt, project instructions, or tool declarations. Runtime permissions, completion validation (including existing length limits), and explicit implementation approval remain enforced by code. Trusted tools can still have side effects; this is not a sandbox.
 
 ### Snapshots and reset
 

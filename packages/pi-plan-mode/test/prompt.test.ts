@@ -37,3 +37,17 @@ test("user guidance is appended deterministically with unchanged Markdown", () =
   assert.equal(buildPlanModePrompt(""), base);
   assert.equal(buildPlanModePrompt(" \n\t "), base);
 });
+
+test("the default describes edit inputs, immutable revisions, and the planning completion protocol", () => {
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /plan_mode_edit.*path.*edits.*oldText.*newText/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /no reason field/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /current active revision/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /source is preserved/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /new numbered revision.*same series/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /new path.*subsequent edits/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /do not echo the full plan/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /edit.*ready.*ends the turn/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /reason field is optional/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /alone as your final action/);
+  assert.match(DEFAULT_PLAN_MODE_PROMPT, /explicit implementation choice/);
+});

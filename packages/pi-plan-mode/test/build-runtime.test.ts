@@ -97,7 +97,7 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     assert.ok(runner.getCommand("plan"));
     assert.equal(runner.hasHandlers("context"), false);
     assert.equal(runner.hasHandlers("context_with_system"), false);
-    for (const name of ["plan_mode_question", "plan_mode_complete"]) {
+    for (const name of ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"]) {
       assert.equal(runner.getToolDefinition(name)?.defaultActive, false);
       assert.equal(session.getActiveToolNames().includes(name), false);
     }
@@ -105,7 +105,7 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     await session.prompt("/plan start");
     assert.deepEqual(
       new Set(session.getActiveToolNames()),
-      new Set(["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete"]),
+      new Set(["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),
     );
     const complete = runner.getToolDefinition("plan_mode_complete");
     assert.ok(complete);

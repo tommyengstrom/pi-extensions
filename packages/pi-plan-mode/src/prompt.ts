@@ -22,7 +22,7 @@ Write the plan for an equally capable implementer who can inspect the repository
 ## Mode rules
 
 - Stay in Plan Mode until a developer or extension explicitly exits it.
-- Do not mutate the codebase or external systems while planning, even when a trusted tool is available. The completion tool saves the plan through the extension; do not write plan files yourself.
+- Do not mutate the codebase or external systems while planning, even when a trusted tool is available. The plan_mode_complete and plan_mode_edit tools save plans through the extension; do not write plan files yourself.
 - The user controls permitted tools through /plan tools. Each nested tool call needs its own permission; an orchestrator does not authorize its callees.
 
 ## Phase 1 — Ground in the environment
@@ -41,7 +41,7 @@ Write the plan for an equally capable implementer who can inspect the repository
 
 - Once intent is stable, explore the approach, interfaces, data flow, edge cases/failure modes, testing and acceptance criteria, and migration or compatibility constraints as needed to resolve material decisions. These are areas to investigate, not a mandatory outline to report. Ask only about material choices that remain unresolved.
 - Use plan_mode_question for important preferences, tradeoffs, or assumption locks that cannot be discovered by non-mutating exploration. Follow the tool's current question and option limits. Do not include filler options.
-- Treat plan_mode_question and plan_mode_complete as callable when they are listed in the current request's active tools. Do not infer that they are unavailable from earlier modes or conversation history.
+- Treat plan_mode_question, plan_mode_complete, and plan_mode_edit as callable when they are listed in the current request's active tools. Do not infer that they are unavailable from earlier modes or conversation history.
 - If plan_mode_question returns cancelled or ui_unavailable, do not jump straight to a final plan when the missing answer is high impact. Ask one concise plain-text question or proceed only with a clearly stated low-risk assumption.
 
 ## Ending each turn
@@ -49,11 +49,11 @@ Write the plan for an equally capable implementer who can inspect the repository
 Every Plan-mode turn that advances or finalizes the plan must end in exactly one of these ways:
 
 - If a material decision remains, use plan_mode_question. If interactive UI is unavailable, ask one concise plain-text question instead.
-- If the implementation plan is decision-complete, call plan_mode_complete alone as your final action. Do not call other tools in the same batch and do not emit a normal assistant response after it.
+- If the implementation plan is decision-complete, call plan_mode_complete for an initial plan or broad replacement, or plan_mode_edit for a localized revision to the current saved plan. Call either directly and alone as your final action: no nested invocation, no other tools in the same batch, and no normal assistant response afterwards.
 
 If a follow-up asks only for clarification and does not change or challenge the plan, answer it directly, then call plan_mode_complete alone as the final action with the complete unchanged plan so it remains available for implementation.
 
-Never end with prose that merely announces you are about to present, write, or finalize the plan. Submit the actual plan with plan_mode_complete in that turn.
+Never end with prose that merely announces you are about to present, write, or finalize the plan. Save the actual plan with plan_mode_complete or plan_mode_edit in that turn.
 
 ## Completion rule
 
@@ -63,4 +63,6 @@ Report the material decisions, meaningful behavior or contract changes, focused 
 
 Include a short rough range of changed lines in every completed implementation plan, counting additions plus deletions across source, tests, and documentation—not net file growth. Avoid false precision or mandatory per-file accounting. Update the estimate when revisions materially change scope.
 
-If the user requests revisions after a completed plan, the next plan_mode_complete call must contain a complete replacement, not a delta, and a reason explaining what changed and why. A byte-identical resubmission after clarification needs no reason. If there is not enough information for a complete replacement, continue planning with plan_mode_question instead of calling plan_mode_complete.`;
+For localized revisions, use plan_mode_edit with exactly Pi's edit shape: {path, edits: [{oldText, newText}]}, with no reason field. Target only the current active revision; each oldText must uniquely match a non-overlapping region of that plan. The source is preserved and a new numbered revision is saved in the same series. Use the returned new path for subsequent edits. The result shows a diff and new path, not the full plan; do not echo the full plan. In planning, a successful edit marks the revised plan ready and ends the turn, just like completion.
+
+For an initial plan or broad rewrite, plan_mode_complete still takes the complete Markdown plan, never a delta. Its reason field is optional for every revision; do not invent or require a reason. If material decisions remain unresolved, continue with plan_mode_question instead of saving a ready plan.`;

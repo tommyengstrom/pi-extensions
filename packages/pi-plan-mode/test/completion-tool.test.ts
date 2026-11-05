@@ -2,7 +2,19 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
-import { planModeCompleted, renderPlanModeCompletion } from "../src/completion-tool.js";
+import { normalizePlanModeCompletion, planModeCompleted, renderPlanModeCompletion } from "../src/completion-tool.js";
+
+test("completion normalization rejects malformed UTF-16 rather than changing it on UTF-8 publication", () => {
+  for (const plan of ["\ud800", "\udfff", "# Plan\n\ud800text", JSON.parse('"\\ud800"')]) {
+    const result = normalizePlanModeCompletion({ plan });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /well-formed Unicode/);
+  }
+  for (const plan of ["# Plan\n\ud83d\ude00", "# Plan\n\ufffd"]) {
+    assert.deepEqual(normalizePlanModeCompletion({ plan }), { ok: true, plan });
+    assert.equal(Buffer.from(plan, "utf8").toString("utf8"), plan);
+  }
+});
 
 test("completion rendering strips terminal controls without modifying the saved-plan payload", () => {
   initTheme("dark", false);

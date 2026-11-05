@@ -74,14 +74,19 @@ test("helpers must actually be registered and reachable", () => {
     active: [],
     unavailable: [...PLAN_HELPER_NAMES],
   });
-  assert.deepEqual(
-    resolvePlanTools([extension(PLAN_HELPER_NAMES[0], { exposure: "hidden" }), extension(PLAN_HELPER_NAMES[1])], []),
-    {
-      allowed: [PLAN_HELPER_NAMES[1]],
-      active: [PLAN_HELPER_NAMES[1]],
-      unavailable: [PLAN_HELPER_NAMES[0]],
-    },
-  );
+  assert.ok(PLAN_HELPER_NAMES.includes("plan_mode_edit"));
+  for (const missing of PLAN_HELPER_NAMES) {
+    const available = PLAN_HELPER_NAMES.filter((name) => name !== missing);
+    for (const hidden of [false, true]) {
+      const tools = available.map((name) => extension(name));
+      if (hidden) tools.push(extension(missing, { exposure: "hidden" }));
+      assert.deepEqual(resolvePlanTools(tools, []), {
+        allowed: available,
+        active: available,
+        unavailable: [missing],
+      });
+    }
+  }
 });
 
 test("hidden and unknown tools are unavailable, with exact names and stable deduplication", () => {

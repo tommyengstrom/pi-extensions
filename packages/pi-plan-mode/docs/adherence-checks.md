@@ -16,11 +16,13 @@ Reports distinguish:
 
 Execution failures, cancellation, missing/tampered history, and malformed model output are not passing checks. General style, correctness, and security review are outside scope unless a finding directly establishes plan nonadherence. A reason alone does not authorize a scope change. A user-requested change implemented without updating the plan is a plan-update failure, not necessarily agent drift.
 
-The report includes file/location evidence, revision references, user-message citations, recorded reasons and authorization evidence, and limitations. It is an observation of the working tree at check time—not a permanent guarantee. It never starts an automatic repair loop.
+The report includes file/location evidence, revision references, user-message citations, recorded reasons when available, authorization evidence, and limitations. Reasons are optional: absence alone is not a deviation, and the checker must not invent one. It is an observation of the working tree at check time—not a permanent guarantee. It never starts an automatic repair loop.
 
 ## Completion and further changes
 
-Implementation exposes `plan_mode_update` (complete plan plus reason), `plan_mode_implementation_status` (read the authoritative current plan after compaction), and `plan_mode_implementation_complete` (standalone completion signal). The main agent keeps its normal tools. Persistent instructions require saving user-requested plan changes before implementing them, but there is no hard gate after every message. An LLM assessment cannot guarantee recognition of every natural-language request.
+Tracked implementation exposes `plan_mode_edit` (localized changes), `plan_mode_update` (complete plan with an optional reason), `plan_mode_implementation_status` (read the authoritative current plan after compaction), and `plan_mode_implementation_complete` (standalone completion signal). The main agent keeps its normal tools. Persistent instructions require saving user-requested plan changes before implementing them, but there is no hard gate after every message. An LLM assessment cannot guarantee recognition of every natural-language request.
+
+`plan_mode_edit` uses exactly Pi's `{path, edits: [{oldText, newText}]}` input, without a reason field, and targets only the current active revision. It preserves the source and saves a new numbered revision in the same series, advancing tracking without changing the approved baseline or losing ancestry. It returns a diff and new path, not the full plan; subsequent edits use that path. During implementation it continues work without termination or a new approval dialog. Agent-discovered material scope changes still need user authorization. In planning, by contrast, edit is a standalone final action that marks the plan ready and ends the turn. Initial plans and broad planning rewrites still use `plan_mode_complete` with the full plan and an optional reason.
 
 Automatic checking is **on by default**, using the main session's current model at check time. `/plan settings` can select another checker model or disable automatic checking. Explicit completion then records “not checked”; manual verification is still available.
 
@@ -38,7 +40,7 @@ Malformed report diagnostics give the validation failure and response length wit
 
 Each check uses a new in-memory SDK session, not a conversation fork. Its initial task contains:
 
-1. The exact approved baseline and implementation revisions with reasons.
+1. The exact approved baseline and implementation revisions, with reasons where recorded.
 2. All implementation-phase user messages on the active branch, in chronological order.
 3. A transcript index and path for on-demand inspection.
 4. Normal project context instructions, such as `AGENTS.md`, and fixed adherence-check instructions.
@@ -55,10 +57,10 @@ The private temporary artifact is outside the repository, with restrictive files
 
 ## Tools and compatibility
 
-The child recreates the workflow's selected inspection tools and verifies their provenance/exposure. It does not receive the question, plan-save, plan-update, implementation-status, or implementation-completion helpers. Each nested tool call must be explicitly allowed; selecting an orchestrator does not authorize its callees. Model-only and deferred exposure rules remain in force.
+The child recreates the workflow's selected inspection tools and verifies their provenance/exposure. It does not receive the question, plan-save, plan-edit, plan-update, implementation-status, or implementation-completion helpers. These helpers are inactive outside their applicable planning or tracked-implementation workflow; the checker is not such a workflow. Each nested tool call must be explicitly allowed; selecting an orchestrator does not authorize its callees. Model-only and deferred exposure rules remain in force.
 
 The `read` tool is required to access the local transcript artifact. A custom `read` implementation must support reading that path. Missing tools, changed provenance/exposure, and SDK-only/dynamic tools that cannot be reconstructed fail visibly rather than broadening permissions or substituting canonical tools. Selected file-backed extension sources and supported built-in sources are loaded; unrelated ambient extensions/skills/templates are not discovered.
 
 Explicitly trusting a shell, editing tool, or other nondefault planning tool still trusts its implementation. The checker is instructed not to mutate anything, but this is a workflow restriction, **not an OS sandbox or confidentiality boundary**. Loaded extension code has Pi's operating-system permissions.
 
-New revisions store versioned parent/hash/reason metadata in a comment header atomically with the Markdown plan body. Existing plain Markdown plans remain readable as baselines. Old sessions without implementation records cannot reconstruct an implementation from conversation heuristics. Saved plan files are not rewritten or migrated automatically.
+New revisions store versioned parent/hash metadata and any supplied reason in a comment header atomically with the Markdown plan body. Existing optional reasons remain readable; absent reasons are neither required nor fabricated. Existing plain Markdown plans remain readable as baselines. Old sessions without implementation records cannot reconstruct an implementation from conversation heuristics. Saved plan files are not rewritten or migrated automatically.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Localized plan revisions
+
+- Add `plan_mode_edit` with Pi's exact `{path, edits: [{oldText, newText}]}` input and no reason field. Only the current active revision can be edited; the source is preserved and a new numbered revision is saved in the same series. Results show a diff and new path instead of echoing the full plan; subsequent edits use the new path.
+- In planning, edit is a standalone final action that marks the plan ready and terminates the turn for the usual review. During tracked implementation, it advances the current plan while preserving the approved baseline and tracking, then continues work without new approval. Save user-requested changes before implementing them; material scope changes still require authorization.
+- Keep full-plan `plan_mode_complete` for initial plans/broad rewrites and `plan_mode_update` for broad implementation revisions. Reasons are now optional everywhere they are accepted, superseding the earlier requirement below; missing reasons are not invented or treated as adherence failures.
+- Activate helpers only in their applicable planning/tracked-implementation workflow, and exclude all of them, including edit, from the adherence checker.
+
 ### Verification diagnostics
 
 - Replace generic checker failures with stage, model, turn/tool counts, stop reason, and bounded provider errors. Distinguish caller cancellation, provider aborts, missing responses, execution limits, malformed/truncated reports, and tool-source loading failures without copying report or transcript excerpts into diagnostics.

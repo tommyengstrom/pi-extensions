@@ -23,7 +23,7 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
       type: "string",
       minLength: 1,
       maxLength: 8000,
-      description: "What changed and why; required when revising a saved plan.",
+      description: "Optional explanation of what changed and why when revising a saved plan.",
     },
     plan: {
       type: "string",
@@ -48,6 +48,7 @@ export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCo
       error: `plan must not exceed ${PLAN_MODE_MAX_CHARS} characters`,
     };
   }
+  if (!plan.isWellFormed()) return { ok: false, error: "plan must be well-formed Unicode (no unpaired surrogates)" };
   if (
     input.reason !== undefined &&
     (typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 8000)

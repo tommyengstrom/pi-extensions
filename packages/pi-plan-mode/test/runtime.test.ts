@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { AssistantMessage, Message, SystemMessage, ToolCall } from "@earendil-works/pi-ai";
@@ -47,17 +47,18 @@ const { default: entrypoint } = await import("../src/index.js");
 type ReviewAction = Awaited<ReturnType<typeof import("../src/interactive-ui.js").reviewPlan>>;
 const instructions = "Runtime smoke instructions: inspect before proposing changes.";
 const plan = "# Runtime smoke\n\n1. Inspect the affected code.\n2. Implement the change.\n3. Verify the result.";
-const helpers = ["plan_mode_question", "plan_mode_complete"];
+const helpers = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"];
 const planningTools = ["read", "grep", "find", "ls", ...helpers];
 
 async function fixture(
   extra?: (pi: ExtensionAPI) => void,
   shortcuts?: import("../src/settings.js").PlanModeSettings["shortcuts"],
+  trustedTools?: string[],
 ) {
   const cwd = await mkdtemp(join(suiteRoot, "project-"));
   await mkdir(agentDir, { recursive: true });
   const requests: Message[][] = [];
-  const replies: ToolCall[] = [];
+  const replies: ToolCall[][] = [];
   const errors: ExtensionError[] = [];
   const statuses = new Map<string, string | undefined>();
   const promptOptions: Array<{ section: string | undefined; forced: string | undefined }> = [];
@@ -71,10 +72,11 @@ async function fixture(
     modelsPath: null,
     refreshOnCreate: false,
   });
-  const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (model, context) => {
+  const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (model, context, options) => {
+    assert.equal(options?.apiKey, "offline-test-key", "main and checker requests must use the parent credential");
     requests.push(structuredClone(context.messages));
     const stream = createAssistantMessageEventStream();
-    const call = replies.shift();
+    const calls = replies.shift();
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -93,11 +95,13 @@ async function fixture(
       },
     };
     stream.push({ type: "start", partial: message });
-    if (call) {
-      message.content.push(call);
+    if (calls) {
       message.stopReason = "toolUse";
-      stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
-      stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: message });
+      for (const [contentIndex, call] of calls.entries()) {
+        message.content.push(call);
+        stream.push({ type: "toolcall_start", contentIndex, partial: message });
+        stream.push({ type: "toolcall_end", contentIndex, toolCall: call, partial: message });
+      }
     } else {
       const checking = JSON.stringify(context.messages).includes("Assess implementation adherence.");
       const text = checking
@@ -122,7 +126,7 @@ async function fixture(
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
       stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
     }
-    message.stopReason = call ? "toolUse" : "stop";
+    message.stopReason = calls ? "toolUse" : "stop";
     stream.push({ type: "done", reason: message.stopReason, message });
     stream.end();
     return stream;
@@ -161,7 +165,7 @@ async function fixture(
       extensionFactories: [
         (pi) =>
           planMode(pi, {
-            readSettings: async () => ({ plansDirectory: "plans", shortcuts }),
+            readSettings: async () => ({ plansDirectory: "plans", shortcuts, tools: trustedTools }),
             readInstructions: () => instructions,
             loadUi,
           }),
@@ -246,14 +250,19 @@ async function fixture(
       loadUi,
       newSessions,
       queueTool(name: string, args: ToolCall["arguments"] = {}) {
-        replies.push({ type: "toolCall", id: `tool-${requests.length}`, name, arguments: args });
+        replies.push([{ type: "toolCall", id: `tool-${requests.length}`, name, arguments: args }]);
+      },
+      queueBatch(calls: Array<{ name: string; arguments: ToolCall["arguments"] }>) {
+        replies.push(
+          calls.map((call, index) => ({ type: "toolCall", id: `tool-${requests.length}-${index}`, ...call })),
+        );
       },
       choose(action: ReviewAction) {
         reviewPlan.mockResolvedValueOnce(action);
       },
       async complete() {
         const before = requests.length;
-        replies.push({ type: "toolCall", id: `complete-${before}`, name: "plan_mode_complete", arguments: { plan } });
+        replies.push([{ type: "toolCall", id: `complete-${before}`, name: "plan_mode_complete", arguments: { plan } }]);
         await currentRuntime.session.prompt("Complete the plan now.");
         assert.equal(requests.length, before + 1, "terminating completion must not make a follow-up request");
         const state = stateOf(currentRuntime.session);
@@ -851,6 +860,195 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     assert.equal(getCurrentSystemPrompt(transferred).includes(instructions), false);
     assert.deepEqual(toolNames(transferred), [...defaultTools, ...IMPLEMENTATION_HELPERS].sort());
     assert.equal(await readFile(ready.revision.path, "utf8"), plan);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("real edit activation, terminating planning review, implementation continuation, and branch restoration share one helper", async () => {
+  const f = await fixture((pi) => {
+    pi.on("session_before_compact", (event) => ({
+      compaction: {
+        summary: "Continue the tracked implementation from its authoritative plan status.",
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+      },
+    }));
+  });
+  try {
+    const session = f.runtime.session;
+    const baselineTools = session.getActiveToolNames();
+    await session.prompt("Baseline context before planning.");
+    await session.prompt("/plan start");
+    const first = await f.complete();
+    const before = f.requests.length;
+    f.queueTool("plan_mode_edit", {
+      path: first.revision.path,
+      edits: [{ oldText: "Inspect the affected code.", newText: "Inspect the parser." }],
+    });
+    await session.prompt("Localize the inspection step.");
+    assert.equal(f.requests.length, before + 1, "planning edits terminate without another model request");
+    const second = stateOf(session);
+    assert.ok(second.kind === "ready");
+    const secondPlan = plan.replace("Inspect the affected code.", "Inspect the parser.");
+    assert.equal(second.revision.revision, 2);
+    assert.equal(second.revision.history?.parent.revision, 1);
+    assert.equal(await readFile(first.revision.path, "utf8"), plan);
+    assert.ok((await readFile(second.revision.path, "utf8")).endsWith(secondPlan));
+    assert.equal(f.reviewPlan.mock.calls.length, 2);
+    assert.equal(f.reviewPlan.mock.calls.at(-1)?.[1], secondPlan);
+    const result = session.messages.findLast((message) => message.role === "toolResult");
+    assert.ok(result?.role === "toolResult");
+    assert.equal(result.isError, false);
+    const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+    assert.ok(text.includes(second.revision.path));
+    assert.equal(text.includes(secondPlan), false);
+    const readyLeaf = session.sessionManager.getLeafId();
+    assert.ok(readyLeaf);
+    f.choose("here");
+    await session.prompt("/plan");
+    await session.waitForIdle();
+    assert.deepEqual(session.getActiveToolNames(), [...baselineTools, ...IMPLEMENTATION_HELPERS]);
+    assert.equal(session.getActiveToolNames().filter((name) => name === "plan_mode_edit").length, 1);
+    const beforeEdit = f.requests.length;
+    f.queueTool("plan_mode_edit", {
+      path: second.revision.path,
+      edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
+    });
+    await session.prompt("Include Unicode verification before proceeding.");
+    assert.equal(f.requests.length, beforeEdit + 2, "implementation edits allow the normal follow-up request");
+    const tracked = restoreImplementation(session.sessionManager.getBranch());
+    assert.ok(tracked);
+    assert.equal(tracked.phase, "implementing");
+    assert.equal(tracked.revisions.length, 2);
+    assert.equal(tracked.revisions[0].plan, secondPlan);
+    const latest = tracked.revisions[1];
+    assert.equal(latest.revision.revision, 3);
+    assert.equal(latest.revision.history?.reason, undefined);
+    assert.equal(latest.plan, secondPlan.replace("Verify the result.", "Verify Unicode parsing."));
+    assert.equal(f.reviewPlan.mock.calls.length, 3, "only the manual implementation choice opened another review");
+    session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    await session.compact();
+    f.queueTool("plan_mode_implementation_status");
+    await session.prompt("Recover the current plan after compaction.");
+    assert.ok(session.getActiveToolNames().includes("plan_mode_edit"));
+    const status = session.messages.findLast((message) => message.role === "toolResult");
+    assert.ok(status?.role === "toolResult");
+    assert.equal(status.isError, false);
+    assert.ok(JSON.stringify(status.content).includes(latest.revision.path));
+    assert.ok(JSON.stringify(status.content).includes("Not supplied"));
+    const implementationLeaf = session.sessionManager.getLeafId();
+    assert.ok(implementationLeaf);
+    await session.prompt("/plan exit");
+    assert.deepEqual(session.getActiveToolNames(), baselineTools);
+    await session.navigateTree(readyLeaf, { summarize: false });
+    assert.deepEqual(
+      session.getActiveToolNames().sort(),
+      [...planningTools].sort(),
+      "implementation restoration must not strip the shared edit helper from planning",
+    );
+    f.queueTool("plan_mode_edit", {
+      path: second.revision.path,
+      edits: [{ oldText: "Inspect the parser.", newText: "Inspect the lexer." }],
+    });
+    await session.prompt("Revise this earlier planning branch instead.");
+    const branch = stateOf(session);
+    assert.ok(branch.kind === "ready");
+    assert.equal(branch.revision.revision, 4);
+    assert.equal(branch.revision.history?.parent.revision, 2);
+    assert.equal(restoreImplementation(session.sessionManager.getBranch()), undefined);
+    await session.navigateTree(implementationLeaf, { summarize: false });
+    assert.deepEqual(restoreImplementation(session.sessionManager.getBranch())?.revisions, tracked.revisions);
+    assert.deepEqual(session.getActiveToolNames(), [...baselineTools, ...IMPLEMENTATION_HELPERS]);
+    assert.equal(f.runtime.session.extensionRunner.getToolDefinition("plan_mode_edit")?.executionMode, "sequential");
+    await f.runtime.newSession();
+    assert.equal(f.runtime.session.getActiveToolNames().includes("plan_mode_edit"), false);
+    assert.deepEqual(stateOf(f.runtime.session), { kind: "idle" });
+    assert.equal(JSON.stringify(f.requests).includes("__review"), false);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("real planning save helpers reject sibling batches and nested relays; implementation editing remains nestable", async () => {
+  let target = "plan_mode_complete";
+  let input: ToolCall["arguments"] = { plan };
+  let nestedError: boolean | undefined;
+  const f = await fixture(
+    (pi) => {
+      pi.registerTool({
+        name: "plan_test_relay",
+        label: "Test relay",
+        description: "Exercise nested tool permissions.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute(_id, _params, signal, _update, ctx) {
+          const result = await ctx.executeTool(target, input, { signal });
+          nestedError = result.isError;
+          return { ...result.result, isError: result.isError };
+        },
+      });
+    },
+    undefined,
+    ["read", "plan_test_relay"],
+  );
+  try {
+    const session = f.runtime.session;
+    await session.prompt("/plan start");
+    const first = await f.complete();
+    for (const name of ["plan_mode_complete", "plan_mode_edit"]) {
+      target = name;
+      input =
+        name === "plan_mode_complete"
+          ? { plan: `${plan}\n\nNew requirement.` }
+          : {
+              path: first.revision.path,
+              edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
+            };
+      f.queueBatch([
+        { name, arguments: input },
+        { name: "read", arguments: { path: first.revision.path } },
+      ]);
+      await session.prompt("Try saving alongside an inspection call.");
+      const blocked = session.messages.findLast(
+        (message) => message.role === "toolResult" && message.toolName === name,
+      );
+      assert.ok(blocked?.role === "toolResult");
+      assert.equal(blocked.isError, true);
+      nestedError = undefined;
+      f.queueTool("plan_test_relay");
+      await session.prompt("Try the same save through a trusted relay.");
+      assert.equal(nestedError, true, "a trusted orchestrator cannot hide a planning finalization call");
+      const current = stateOf(session);
+      assert.ok(current.kind === "planning");
+      assert.deepEqual(current.workflow.parent, first.revision);
+      assert.equal(await readFile(first.revision.path, "utf8"), plan);
+      assert.deepEqual(await readdir(dirname(first.revision.path)), [basename(first.revision.path)]);
+      assert.equal(f.reviewPlan.mock.calls.length, 1, "rejected saves must not schedule review");
+    }
+    // A standalone retry still works, and only planning imposes this turn-ending protocol.
+    await f.complete();
+    f.choose("here");
+    await session.prompt("/plan");
+    await session.waitForIdle();
+    const baseline = restoreImplementation(session.sessionManager.getBranch());
+    assert.ok(baseline);
+    target = "plan_mode_edit";
+    input = {
+      path: baseline.revisions[0].revision.path,
+      edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
+    };
+    nestedError = undefined;
+    const before = f.requests.length;
+    f.queueTool("plan_test_relay");
+    await session.prompt("Record this implementation change through the relay.");
+    assert.equal(nestedError, false);
+    assert.equal(f.requests.length, before + 2, "nested implementation edits do not end the turn");
+    const revised = restoreImplementation(session.sessionManager.getBranch());
+    assert.ok(revised);
+    assert.equal(revised.revisions.length, 2);
+    assert.deepEqual(revised.revisions[0], baseline.revisions[0]);
+    assert.equal(revised.revisions[1].plan, plan.replace("Verify the result.", "Verify Unicode parsing."));
+    assert.equal(f.reviewPlan.mock.calls.length, 3);
   } finally {
     await f.dispose();
   }

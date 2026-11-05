@@ -28,7 +28,7 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 2. Let the planner inspect the repository and ask structured questions about material decisions.
 3. The planner calls `plan_mode_complete` with the complete Markdown plan. The result shows the plan and its saved path, then **review opens automatically** in TUI or RPC once the agent settles.
 4. Review the full saved document, then explicitly choose an action. **Implementation never starts without your choice.** **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative. Dismissal leaves the plan ready; use `/plan` to reopen review or if automatic presentation was interrupted.
-5. Implementation remains tracked. The agent saves requested changes with `plan_mode_update`, including a reason, and finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
+5. Implementation remains tracked. Before implementing requested changes, the agent saves localized revisions with `plan_mode_edit` or complete replacements with `plan_mode_update`, then continues without another approval dialog. Reasons are optional. It finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
 
 By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. Each completed plan should include a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Revisions update the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
 
@@ -85,7 +85,7 @@ New series use a fixed location outside the repository:
 
 The date is the local-calendar `YYYY-MM-DD` of the first save. The date and short title-derived description stay fixed for the entire series, including revisions saved on later days or during implementation. Existing series in the old `pi-plan-mode/<plansDirectory>/<name>-<path-hash>/` layout remain readable and continuable in place; no files are moved or renamed.
 
-Every successful completion publishes a new numbered Markdown revision without overwriting an existing file—even when the planner resubmits an unchanged plan after clarification. Changed revisions require a reason and store parent/hash metadata atomically with the Markdown body. Existing plain Markdown files remain usable as baselines; no historical reasons are invented. A new workflow starts a new series; colliding titles are disambiguated. **Continue planning** keeps the selected series and writes its next revision, including when continuing from an older revision.
+Every successful completion publishes a new numbered Markdown revision without overwriting an existing file—even when the planner resubmits an unchanged plan after clarification. Localized edits also preserve the source and publish a new numbered revision in the same series. Revisions store parent/hash metadata atomically with the Markdown body. Reasons are optional on `plan_mode_complete` and `plan_mode_update`; `plan_mode_edit` has no reason field. Existing plain Markdown files remain usable as baselines; absent reasons are never invented. A new workflow starts a new series; colliding titles are disambiguated. **Continue planning** keeps the selected series and writes its next revision, including when continuing from an older revision.
 
 `/plan saved` includes the shared repo-name directory and the current project's legacy default/configured locations. It groups files by location and series and defaults to the latest revision while keeping older revisions selectable. There is no separate saved-plan index or session-local slot. Exiting or implementing does not delete saved files.
 
@@ -104,13 +104,13 @@ A successful handoff ends restricted planning in the source session and establis
 
 ## Tools and trust
 
-The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question` and `plan_mode_complete`. Same-name extension overrides are not trusted defaults. Plan mode temporarily activates the required direct tools and restores the previous active-tool selection when it ends.
+The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. Same-name extension overrides are not trusted defaults. Plan mode temporarily activates the required direct tools and restores the previous active-tool selection when it ends.
 
 Use `/plan tools` while idle to change a workflow's selection, including after planning has started. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools.
 
 **Explicitly selecting a tool trusts its implementation**, including shells, editing tools, MCP tools, and overrides. There is no shell parser or command-level read-only filter. A trusted tool can mutate files, execute code, or affect external systems, even though the default planning prompt instructs the planner not to do so. Tool annotations are not verified permissions. This is an agent workflow restriction, **not an OS sandbox or confidentiality boundary**.
 
-Each host-mediated tool call, including a nested call, must have an allowed exact name. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Direct and `model-only` selections are activated; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The planning helpers must be registered and available too, and reject calls outside Plan mode.
+Each host-mediated tool call, including a nested call, must have an allowed exact name. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Direct and `model-only` selections are activated; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The required helpers must be registered and available too. Question/completion helpers are planning-only; `plan_mode_edit` is available in planning and active tracked implementation. Implementation update/status/completion helpers are available only during tracked implementation. All helpers are inactive outside their applicable workflow and excluded from adherence-checker sessions.
 
 ## Structured questions
 
@@ -118,7 +118,9 @@ The rich questionnaire is retained: `plan_mode_question` asks one to three quest
 
 RPC uses sequential selection/editor dialogs. If interactive questions are unavailable or cancelled, the planner should ask a concise plain-text question or state a low-risk assumption—not silently guess a material decision.
 
-Completion requires a standalone `plan_mode_complete` call with a nonempty complete plan, at most 50,000 JavaScript characters. Prose announcements and legacy plan tags do not complete a workflow. `/plan finalize` is an explicit request, not an automatic retry loop.
+Initial plans and broad rewrites use a standalone `plan_mode_complete` call with a nonempty complete plan, at most 50,000 JavaScript characters. Localized revisions use `plan_mode_edit` with exactly Pi's `{path, edits: [{oldText, newText}]}` shape, no reason field, targeting only the current active revision. Each replacement must uniquely match a non-overlapping region. Its result shows a diff and the newly saved path rather than echoing the full plan; subsequent edits must use that new path.
+
+In planning, either save tool is a standalone, top-level final action: nested or batched saves are rejected. Success marks the plan ready, terminates the turn, and schedules the usual review. During tracked implementation, editing advances the current plan while preserving the approved baseline and tracking; work continues without a new approval dialog. User-requested changes must be saved before implementation; agent-discovered material scope changes still require user authorization. Use `plan_mode_update` for complete implementation-plan replacements. Prose announcements and legacy plan tags do not complete a workflow. `/plan finalize` is an explicit request, not an automatic retry loop.
 
 ## Settings and guidance
 

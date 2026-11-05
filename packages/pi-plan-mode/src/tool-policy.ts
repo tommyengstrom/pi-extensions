@@ -1,7 +1,17 @@
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 
-export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete"] as const;
+export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"] as const;
 const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+
+/** Pi only honors terminate when every result in the top-level batch terminates. */
+export function standaloneToolCall(ctx: ExtensionContext, name: string): boolean {
+  const message = [...ctx.sessionManager.getBranch()]
+    .reverse()
+    .find((entry) => entry.type === "message" && entry.message.role === "assistant");
+  if (message?.type !== "message" || message.message.role !== "assistant") return true;
+  const calls = message.message.content.filter((block) => block.type === "toolCall");
+  return calls.length === 1 && calls[0].name === name;
+}
 
 /** Only Pi's canonical core implementations are trusted without an explicit selection. */
 export function defaultPlanTools(tools: readonly ToolInfo[]): string[] {

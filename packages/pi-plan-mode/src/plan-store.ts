@@ -183,7 +183,6 @@ export async function createPlanStore(
       if (planHash(await read(options.parent)) !== planHash(parentPlan))
         throw new Error("Parent plan changed on disk.");
       const reason = options.reason?.trim();
-      if (content !== parentPlan && !reason) throw new Error("A changed plan requires a change reason.");
       if (reason && reason.length > 8_000) throw new Error("Change reason exceeds 8000 characters.");
       history = {
         version: 1,

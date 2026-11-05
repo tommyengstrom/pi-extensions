@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test, vi } from "vitest";
-import { createPlanStore as createCurrentPlanStore, type PlanRevision, type PlanStore } from "../src/plan-store.js";
+import {
+  createPlanStore as createCurrentPlanStore,
+  type PlanRevision,
+  type PlanStore,
+  planHash,
+} from "../src/plan-store.js";
 
 // Exercise legacy stores throughout the compatibility/security suite below.
 const createPlanStore = (
@@ -70,7 +75,6 @@ test("legacy storage uses getAgentDir and preserves the original hashed location
 test("revision metadata is atomic, explains changes, and tracks actual parents rather than filename order", async () => {
   await withStore(async ({ store }) => {
     const first = await store.save(PLAN);
-    await assert.rejects(store.save("# Changed", { series: first.series, parent: first }), /change reason/);
     const second = await store.save("# Changed", {
       series: first.series,
       parent: first,
@@ -90,6 +94,62 @@ test("revision metadata is atomic, explains changes, and tracks actual parents r
     await writeFile(third.path, "# External replacement");
     await assert.rejects(store.read(third), /metadata has changed/);
     assert.equal(await store.read(first), PLAN);
+  });
+});
+
+test("changed revisions without reasons retain actual parent hashes and round-trip without invented metadata", async () => {
+  await withStore(async ({ project, agent, store }) => {
+    const first = await store.save(PLAN);
+    const second = await store.save("# Changed scope", { series: first.series, parent: first });
+    const third = await store.save("# Alternative scope", {
+      series: first.series,
+      parent: first,
+      parentPlan: PLAN,
+    });
+    for (const revision of [second, third]) {
+      assert.deepEqual(revision.history, {
+        version: 1,
+        parent: { series: first.series, revision: first.revision, hash: planHash(PLAN) },
+      });
+    }
+    assert.equal(third.revision, 3);
+    const reopened = await createPlanStore(project, undefined, agent);
+    assert.deepEqual(await reopened.list(), [third, second, first]);
+    assert.equal(await reopened.read(second), "# Changed scope");
+    assert.equal(await reopened.read(third), "# Alternative scope");
+    assert.equal(await reopened.read(first), PLAN);
+  });
+});
+
+test("reasonless changes still validate parent identity and supplied parentPlan against disk", async () => {
+  await withStore(async ({ store }) => {
+    const first = await store.save(PLAN);
+    await assert.rejects(
+      store.save("# Changed", { series: "other-series", parent: first, parentPlan: PLAN }),
+      /same series/,
+    );
+    await assert.rejects(
+      store.save("# Changed", {
+        series: first.series,
+        parent: { ...first, path: join(store.directory, "other-01.md") },
+        parentPlan: PLAN,
+      }),
+      /does not belong/,
+    );
+    await assert.rejects(
+      store.save("# Changed", { series: first.series, parent: first, parentPlan: "# Incorrect parent" }),
+      /Parent plan changed on disk/,
+    );
+    await assert.rejects(
+      store.save("# Changed", { series: first.series, parent: first, reason: "x".repeat(8001) }),
+      /Change reason exceeds/,
+    );
+    await writeFile(first.path, "# External replacement");
+    await assert.rejects(
+      store.save("# Changed", { series: first.series, parent: first, parentPlan: PLAN }),
+      /Parent plan changed on disk/,
+    );
+    assert.deepEqual(await readdir(store.directory), [basename(first.path)]);
   });
 });
 

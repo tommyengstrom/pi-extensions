@@ -8,15 +8,26 @@
 
 `/plan tools` opens a searchable tool selector. If no workflow is active, applying the selection starts one. During planning or while a plan is ready, it changes that workflow's tools without requiring an exit/restart. Wait until the agent is idle before opening it. Cancelling leaves the current selection unchanged.
 
-The required question/completion helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. See [tool selection and trust](./settings.md#tool-selection-and-trust).
+The required question/completion/edit helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. See [tool selection and trust](./settings.md#tool-selection-and-trust).
 
 `/plan settings` edits future-workflow defaults, not the current selection. Its choices are default tools, reset to strict inspection tools, automatic adherence checks, and the checker model. New plan storage has a fixed layout.
 
 ## Complete, then review
 
-The planner explores and resolves material questions before calling `plan_mode_complete` alone with the complete Markdown plan. Every successful completion saves a new immutable numbered revision. A revision request must produce a full replacement plan, not a delta, and include a reason explaining what changed and why; it does not overwrite the previous revision. Byte-identical clarification resubmissions need no reason. Revisions retain their explicit parent even when continued from an older revision.
+The planner explores and resolves material questions before calling `plan_mode_complete` alone with the complete Markdown plan. Use it for initial plans and broad replacements, never a delta. Every successful completion saves a new immutable numbered revision. Its `reason` field remains accepted but optional, including for changed revisions; no reason needs to be supplied or invented. Revisions retain their explicit parent even when continued from an older revision.
 
-The completion result displays the plan and saved path. The status becomes `plan ready · /plan`. In TUI or RPC, review opens automatically after the agent fully settles, including when completion follows `/plan finalize`. It does **not** start implementation or automatically retry finalization.
+For localized changes to the current active revision, use `plan_mode_edit` with exactly Pi's edit input, without a `reason` field:
+
+```json
+{
+  "path": "/absolute/path/to/current-revision.md",
+  "edits": [{ "oldText": "Use a 30-second timeout.", "newText": "Use a 60-second timeout." }]
+}
+```
+
+Each `oldText` must uniquely match a non-overlapping region of the current plan. Arbitrary files and inactive revisions are not edit targets. The source remains unchanged; a new numbered revision is saved in the same series. The result shows the diff and new path, not the full plan. Do not echo the full plan; use the returned new path for subsequent edits. In planning, call `plan_mode_edit` directly and alone as the final action, with no assistant response afterwards: success marks the plan ready and terminates the turn. Both planning save helpers reject nested or batched calls so Pi can honor termination.
+
+The completion result displays the plan and saved path; the edit result displays only the diff and new path. Either save makes the status `plan ready · /plan`. In TUI or RPC, review opens automatically after the agent fully settles, including when completion follows `/plan finalize`. It does **not** start implementation or automatically retry finalization.
 
 Review shows the full saved document, including its path and revision number. The TUI review supports searching. Confirm the review before the action menu appears; closing either screen leaves the plan ready and does not authorize implementation. Open `/plan` to reopen review or if automatic presentation was interrupted. Aborted runs, superseding work, and session replacement cancel pending automatic presentation. Restoring a ready session or navigating its history does not reopen old reviews automatically.
 
@@ -38,7 +49,9 @@ There is no `/plan implement` shortcut around document review.
 
 ## Track, complete, and verify implementation
 
-The agent uses `plan_mode_update` with a complete revised plan and a reason **before** implementing user-requested changes; no second approval dialog is needed. Persistent instructions enforce this protocol conversationally, not through a hard tool-call gate. Agent-discovered material scope changes still require user agreement.
+The agent saves user-requested plan changes **before** implementing them: use `plan_mode_edit` for localized revisions or `plan_mode_update` with a complete revised plan for broad replacements. `plan_mode_update` accepts an optional reason; `plan_mode_edit` has no reason field. Both preserve the approved baseline and advance the tracked plan to a new revision. Implementation edits do not end the turn or open another approval dialog: continue work using the returned new path. Persistent instructions enforce this protocol conversationally, not through a hard tool-call gate. Agent-discovered material scope changes still require user agreement; saving a revision is not authorization.
+
+Question/completion helpers are active only in planning; edit is active in planning and tracked implementation; update/status/implementation-completion helpers are active only during tracked implementation. Helpers are inactive outside their applicable workflow and never exposed to the adherence checker.
 
 `plan_mode_implementation_complete` must be called alone. It closes implementation tracking and runs a fresh adherence check automatically unless disabled in settings. Ordinary prose and agent pauses do not trigger checks. Findings are reported directly, without automatic fixes or another main-agent response.
 

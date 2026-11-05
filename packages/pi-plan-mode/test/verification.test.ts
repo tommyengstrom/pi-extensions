@@ -56,6 +56,7 @@ async function fixture(
   await writeFile(join(cwd, "AGENTS.md"), "Project rule: preserve color compatibility.");
   await writeFile(join(cwd, "color.ts"), 'export const color = "blue";');
   const requests: Message[][] = [];
+  const requestAuth: Array<{ apiKey?: string; headers?: Record<string, string | null> }> = [];
   const artifacts: string[] = [];
   const controller = new AbortController();
   const modelRuntime = await ModelRuntime.create({
@@ -63,7 +64,8 @@ async function fixture(
     modelsPath: null,
     refreshOnCreate: false,
   });
-  const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (model, context) => {
+  const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (model, context, streamOptions) => {
+    requestAuth.push({ apiKey: streamOptions?.apiKey, headers: streamOptions?.headers });
     requests.push(structuredClone(context.messages));
     const user = context.messages.find((item) => item.role === "user");
     const text = user
@@ -124,7 +126,8 @@ async function fixture(
   };
   modelRuntime.registerProvider("plan-check-offline", {
     api: "openai-completions",
-    apiKey: "offline",
+    apiKey: "parent-offline-key",
+    headers: { "x-parent-auth": "parent-offline-header" },
     baseUrl: "https://offline.invalid",
     streamSimple,
     models: [
@@ -171,11 +174,13 @@ async function fixture(
   );
   return {
     ctx: ctx as ExtensionContext,
+    modelRuntime,
     cwd,
     implementation,
     transcript,
     signal: controller.signal,
     requests,
+    requestAuth,
     artifacts,
     settings: { automatic: true },
     streamSimple,
@@ -189,6 +194,11 @@ test("real fresh SDK checker delegates current provider, loads project instructi
   assert.equal(result.model.provider, "plan-check-offline");
   assert.equal(result.usage?.totalTokens, 4);
   assert.equal(f.requests.length, 2);
+  assert.deepEqual(
+    f.requestAuth.map((auth) => auth.apiKey),
+    ["parent-offline-key", "parent-offline-key"],
+  );
+  assert.ok(f.requestAuth.every((auth) => auth.headers?.["x-parent-auth"] === "parent-offline-header"));
   const first = JSON.stringify(f.requests[0]);
   assert.ok(first.includes("Please use blue."));
   assert.equal(first.includes("TRANSCRIPT ONLY RATIONALE"), false);
@@ -204,6 +214,84 @@ test("real fresh SDK checker delegates current provider, loads project instructi
   assert.equal(await readFile(join(f.cwd, "color.ts"), "utf8"), 'export const color = "blue";');
 });
 
+test("checker receives meaningful reasonless revisions without invented rationale or unchanged labels", async () => {
+  const f = await fixture();
+  const baseline = snapshot(f.implementation.revisions[0].revision, "# Colors\n\nUse red.");
+  const updated = snapshot(
+    {
+      series: "colors",
+      revision: 2,
+      path: join(f.cwd, "colors-02.md"),
+      title: "Colors",
+      history: { version: 1, parent: { series: "colors", revision: 1, hash: baseline.hash } },
+    },
+    "# Colors\n\nUse blue.",
+  );
+  const clarified = snapshot(
+    {
+      series: "colors",
+      revision: 3,
+      path: join(f.cwd, "colors-03.md"),
+      title: "Colors",
+      history: {
+        version: 1,
+        parent: { series: "colors", revision: 2, hash: updated.hash },
+        reason: "Preserve the existing compatibility requirement.",
+      },
+    },
+    "# Colors\n\nUse blue. Preserve color compatibility.",
+  );
+  f.implementation.revisions = [baseline, updated, clarified];
+  const result = await runVerification(f);
+  assert.equal(result.report.status, "adherent");
+  assert.deepEqual(result.report.limitations, []);
+  const user = f.requests[0].find((message) => message.role === "user");
+  assert.ok(user);
+  const prompt =
+    typeof user.content === "string"
+      ? user.content
+      : user.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+  assert.ok(prompt.includes("## Approved baseline: colors/1\nReason: Not supplied\n# Colors\n\nUse red."));
+  assert.ok(prompt.includes("## Updated plan: colors/2\nReason: Not supplied\n# Colors\n\nUse blue."));
+  assert.ok(
+    prompt.includes(
+      "## Updated plan: colors/3\nReason: Preserve the existing compatibility requirement.\n# Colors\n\nUse blue. Preserve color compatibility.",
+    ),
+  );
+  assert.ok(prompt.includes("Please use blue."));
+  assert.ok(!prompt.includes("Baseline / unchanged"));
+  assert.ok(!prompt.includes("TRANSCRIPT ONLY RATIONALE"));
+  const instructions = getCurrentSystemPrompt(f.requests[0]);
+  assert.match(instructions, /Do not invent rationale/);
+  assert.match(instructions, /Explained but unapproved material scope changes remain deviations/);
+  assert.match(instructions, /Unknown provenance is not proof of user authorization/);
+  assert.equal(updated.revision.history?.reason, undefined);
+});
+
+test("delegation resolves parent credentials again after the authentication preflight", async () => {
+  const f = await fixture();
+  const registry = f.ctx.modelRegistry;
+  const getAuth = registry.getApiKeyAndHeaders.bind(registry);
+  const preflight = vi.spyOn(registry, "getApiKeyAndHeaders").mockImplementationOnce(async (model) => {
+    const originalAuth = await getAuth(model);
+    await f.modelRuntime.setRuntimeApiKey(model.provider, "refreshed-offline-key");
+    return originalAuth;
+  });
+  try {
+    const result = await runVerification(f);
+    assert.equal(result.report.status, "adherent");
+    assert.deepEqual(
+      f.requestAuth.map((auth) => auth.apiKey),
+      ["refreshed-offline-key", "refreshed-offline-key"],
+    );
+  } finally {
+    preflight.mockRestore();
+  }
+});
+
 test("unselected mutation tools cannot execute and errors cannot produce an adherent verdict", async () => {
   const f = await fixture({ badTool: true });
   const result = await runVerification(f);
@@ -217,7 +305,8 @@ test("an explicit checker model uses its configured provider without changing th
   assert.ok(main);
   f.ctx.modelRegistry.registerProvider("other-offline", {
     api: main.api,
-    apiKey: "offline",
+    apiKey: "other-offline-key",
+    headers: { "x-parent-auth": "other-offline-header" },
     baseUrl: "https://offline.invalid",
     streamSimple: f.streamSimple,
     models: [{ ...main, id: "other" }],
@@ -228,6 +317,11 @@ test("an explicit checker model uses its configured provider without changing th
   });
   assert.deepEqual(result.model, { provider: "other-offline", id: "other" });
   assert.equal(f.ctx.model, main);
+  assert.deepEqual(
+    f.requestAuth.map((auth) => auth.apiKey),
+    ["other-offline-key", "other-offline-key"],
+  );
+  assert.ok(f.requestAuth.every((auth) => auth.headers?.["x-parent-auth"] === "other-offline-header"));
 });
 
 test("invalid output and cancellation clean up transcript artifacts", async () => {
@@ -376,6 +470,42 @@ test("reconstructed model-only orchestrators retain deferred callees and nested 
     assert.ok(declared.includes("inspect_router"));
     assert.equal(declared.includes("inspect_deferred"), false);
     await assert.rejects(stat(join(f.cwd, "must-not-exist")), /ENOENT/);
+  }
+});
+
+test("the checker excludes loaded plan editors from direct and nested calls through a trusted orchestrator", async () => {
+  for (const nested of [false, true]) {
+    const f = await fixture({ firstTool: nested ? "inspect_router" : "plan_mode_edit" });
+    const extension = join(f.cwd, "inspection-extension.ts");
+    const sentinel = join(f.cwd, "must-not-edit");
+    await writeFile(
+      extension,
+      `import { writeFile } from "node:fs/promises";
+      export default function(pi) {
+        const parameters = { type: "object", properties: { path: { type: "string" } }, required: ["path"] };
+        pi.registerTool({ name: "inspect_router", label: "Router", description: "Inspect", parameters,
+          async execute(id, args, signal, update, ctx) {
+            const outcome = await ctx.executeTool("plan_mode_edit", args, {signal});
+            return { ...outcome.result, isError: outcome.isError };
+          } });
+        pi.registerTool({ name: "plan_mode_edit", label: "Editor", description: "Must never run", parameters,
+          async execute() {
+            await writeFile(${JSON.stringify(sentinel)}, "forbidden");
+            return { content: [{type: "text", text: "Edited"}], details: {} };
+          } });
+      }`,
+    );
+    f.implementation.toolIdentities.push({
+      name: "inspect_router",
+      source: "extension",
+      path: extension,
+      exposure: "direct",
+    });
+    const result = await runVerification(f);
+    assert.equal(result.report.status, "inconclusive");
+    assert.ok(getCurrentTools(f.requests[0]).some((tool) => tool.name === "inspect_router"));
+    assert.ok(!getCurrentTools(f.requests[0]).some((tool) => tool.name === "plan_mode_edit"));
+    await assert.rejects(stat(sentinel), /ENOENT/);
   }
 });
 

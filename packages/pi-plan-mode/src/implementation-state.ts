@@ -10,6 +10,7 @@ export const IMPLEMENTATION_HELPERS = [
   "plan_mode_update",
   "plan_mode_implementation_complete",
   "plan_mode_implementation_status",
+  "plan_mode_edit",
 ] as const;
 export interface PlanSnapshot {
   revision: PlanRevision;

@@ -8,6 +8,7 @@ import {
   planModeCompleted,
   renderPlanModeCompletion,
 } from "./completion-tool.js";
+import { applyPlanEdits, PLAN_MODE_EDIT_PARAMS, PLAN_MODE_EDIT_TOOL_NAME, planModeEdited } from "./edit-tool.js";
 import { implementationPrompt, startFreshImplementation } from "./fresh-implementation.js";
 import { type ImplementationDependencies, registerImplementation } from "./implementation.js";
 import {
@@ -33,7 +34,7 @@ import {
   updatePlanModeSettings,
 } from "./settings.js";
 import { PLAN_STATE_ENTRY, type PlanState, type PlanWorkflow, restorePlanState } from "./state.js";
-import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
+import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools, standaloneToolCall } from "./tool-policy.js";
 
 type InteractiveUi = typeof import("./interactive-ui.js");
 interface PlanModeDependencies extends ImplementationDependencies {
@@ -45,7 +46,7 @@ interface PlanModeDependencies extends ImplementationDependencies {
 }
 
 const FINALIZE_REQUEST =
-  "Finish the planning discussion: ask a material remaining question with plan_mode_question, or submit the complete plan with plan_mode_complete alone.";
+  "Finish the planning discussion: ask a material remaining question with plan_mode_question, or finalize with plan_mode_complete (complete plan) or plan_mode_edit (localized revision), alone.";
 
 export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeDependencies = {}) {
   let state: PlanState = { kind: "idle" };
@@ -106,7 +107,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   function planTools(workflow: PlanWorkflow) {
     const resolved = resolvePlanTools(pi.getAllTools(), workflow.tools);
     if (PLAN_HELPER_NAMES.some((name) => !resolved.active.includes(name))) {
-      throw new Error("The Plan question and completion helpers must be registered and available.");
+      throw new Error("The Plan helpers must be registered and available.");
     }
     return resolved;
   }
@@ -236,10 +237,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (state.kind !== "idle" && session === ctx.sessionManager) {
       // Set guidance even if persisting the ready-to-planning transition subsequently fails.
       // Native sections survive compaction and use Pi's ordinary prompt/tool deltas.
-      event.systemPromptOptions.sections.pi_plan_mode = buildPlanModePrompt(
-        state.workflow.instructions,
-        state.workflow.basePrompt,
-      );
+      const base = state.kind === "ready" ? state.revision : state.workflow.parent;
+      event.systemPromptOptions.sections.pi_plan_mode =
+        buildPlanModePrompt(state.workflow.instructions, state.workflow.basePrompt) +
+        (base
+          ? `\n\nCurrent saved plan revision: ${JSON.stringify(base.path)}. Use this source path for plan_mode_edit; each successful edit returns the new current path.`
+          : "");
       event.systemPromptOptions.selectedTools = planTools(state.workflow).active;
       if (state.kind === "ready" && event.messageType !== "custom") {
         commit({ kind: "planning", workflow: { ...state.workflow, parent: state.revision } });
@@ -303,7 +306,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   pi.on("tool_call", (event, ctx) => {
     const helper = PLAN_HELPER_NAMES.some((name) => name === event.toolName);
     if (state.kind === "idle") {
-      if (helper) return { block: true, reason: "Plan helpers require active /plan mode." };
+      if (event.toolName === PLAN_MODE_EDIT_TOOL_NAME && implementation.active(ctx)) return;
+      if (helper)
+        return {
+          block: true,
+          reason: "Plan helpers require active /plan mode or tracked implementation for plan_mode_edit.",
+        };
       return;
     }
     if (session !== ctx.sessionManager || !planTools(state.workflow).allowed.includes(event.toolName)) {
@@ -312,6 +320,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         reason: `Plan mode blocks '${event.toolName}'. The user can change trusted tools with /plan tools while idle. Each nested call needs its own permission.`,
       };
     }
+    if (
+      (event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME || event.toolName === PLAN_MODE_EDIT_TOOL_NAME) &&
+      (event.parentToolCallId !== undefined || !standaloneToolCall(ctx, event.toolName))
+    )
+      return { block: true, reason: "Planning saves must be called alone as a top-level tool, not nested or batched." };
   });
 
   pi.registerTool({
@@ -341,6 +354,56 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     },
   });
 
+  function planningOperation(ctx: ExtensionContext, name: string, signal?: AbortSignal) {
+    if (state.kind === "idle" || session !== ctx.sessionManager) throw new Error("Plan mode is not active.");
+    if (!standaloneToolCall(ctx, name)) throw new Error("Planning saves must be called alone as a top-level tool.");
+    const source = state;
+    const current = lifecycle(ctx);
+    const combined = AbortSignal.any(
+      [current.signal, signal, ctx.signal].filter((value): value is AbortSignal => !!value),
+    );
+    return { source, signal: combined, isCurrent: () => current.isCurrent() && state === source && !combined.aborted };
+  }
+
+  async function publishPlan(
+    ctx: ExtensionContext,
+    operation: ReturnType<typeof planningOperation>,
+    store: PlanStore,
+    plan: string,
+    options: { parentPlan?: string; reason?: string } = {},
+  ) {
+    const { source, signal, isCurrent } = operation;
+    if (!isCurrent()) throw new Error("Plan completion cancelled because the session changed.");
+    const revision = await store.save(plan, {
+      series: source.workflow.series,
+      parent: source.kind === "ready" ? source.revision : source.workflow.parent,
+      ...options,
+      signal,
+      isCurrent,
+    });
+    if (!isCurrent())
+      throw new Error(`Plan saved at ${revision.path}, but the workflow changed before it could become ready.`);
+    try {
+      commit({
+        kind: "ready",
+        workflow: { ...source.workflow, storage: store.storage, series: revision.series, parent: revision },
+        revision,
+      });
+    } catch (error) {
+      // Retain the published series for a retry, without claiming that readiness was persisted.
+      state = { ...source, workflow: { ...source.workflow, storage: store.storage, series: revision.series } };
+      throw new Error(
+        `Plan saved at ${revision.path}, but ready state could not be persisted. Exit Plan mode, then reopen it through /plan saved. ${errorMessage(error)}`,
+      );
+    }
+    invalidate();
+    if (ctx.hasUI) {
+      pendingReview = { token: randomUUID(), path: revision.path, current: lifecycle(ctx), queued: false };
+    }
+    updateStatus(ctx);
+    return revision;
+  }
+
   pi.registerTool({
     name: PLAN_MODE_COMPLETE_TOOL_NAME,
     label: "Complete plan",
@@ -351,45 +414,43 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     executionMode: "sequential",
     renderResult: renderPlanModeCompletion,
     async execute(_id, params, signal, _update, ctx) {
-      if (state.kind === "idle" || session !== ctx.sessionManager) throw new Error("Plan mode is not active.");
+      const operation = planningOperation(ctx, PLAN_MODE_COMPLETE_TOOL_NAME, signal);
       const parsed = normalizePlanModeCompletion(params);
       if (!parsed.ok) throw new Error(parsed.error);
-      const source = state;
-      const current = lifecycle(ctx);
-      const store = await storeFor(ctx, source.workflow);
-      if (!current.isCurrent()) throw new Error("Plan completion cancelled because the session changed.");
-      const revision = await store.save(parsed.plan, {
-        series: source.workflow.series,
-        parent: source.kind === "ready" ? source.revision : source.workflow.parent,
-        reason: parsed.reason,
-        signal,
-        isCurrent: current.isCurrent,
-      });
-      if (!current.isCurrent())
-        throw new Error(`Plan saved at ${revision.path}, but the workflow changed before it could become ready.`);
-      try {
-        commit({
-          kind: "ready",
-          workflow: { ...source.workflow, storage: store.storage, series: revision.series, parent: revision },
-          revision,
-        });
-      } catch (error) {
-        // Retain the published series for a retry, without claiming that readiness was persisted.
-        state = { ...source, workflow: { ...source.workflow, storage: store.storage, series: revision.series } };
-        throw new Error(
-          `Plan saved at ${revision.path}, but ready state could not be persisted. Exit Plan mode, then reopen it through /plan saved. ${errorMessage(error)}`,
-        );
-      }
-      invalidate();
-      if (ctx.hasUI && !signal?.aborted) {
-        pendingReview = { token: randomUUID(), path: revision.path, current: lifecycle(ctx), queued: false };
-      }
-      updateStatus(ctx);
+      const store = await storeFor(ctx, operation.source.workflow);
+      const revision = await publishPlan(ctx, operation, store, parsed.plan, { reason: parsed.reason });
       return planModeCompleted(parsed.plan, revision.path);
     },
   });
 
-  const implementation = registerImplementation(pi, dependencies);
+  const implementation = registerImplementation(
+    pi,
+    dependencies,
+    (ctx) => state.kind !== "idle" && session === ctx.sessionManager,
+  );
+
+  pi.registerTool({
+    name: PLAN_MODE_EDIT_TOOL_NAME,
+    label: "Edit plan revision",
+    defaultActive: false,
+    description:
+      "Apply targeted edits to the current saved plan, preserving the source and publishing a new numbered revision. Use the returned path for subsequent edits. In /plan mode call alone as the final action; during tracked implementation, record user-requested changes before implementing them. No reason required. Use plan_mode_complete for an initial plan.",
+    parameters: PLAN_MODE_EDIT_PARAMS,
+    executionMode: "sequential",
+    async execute(_id, params, signal, _update, ctx) {
+      if (state.kind === "idle") return implementation.edit(ctx, params, signal);
+      const operation = planningOperation(ctx, PLAN_MODE_EDIT_TOOL_NAME, signal);
+      const { source } = operation;
+      const parent = source.kind === "ready" ? source.revision : source.workflow.parent;
+      if (!parent) throw new Error("No saved plan is active. Use plan_mode_complete for the initial plan.");
+      const store = await storeFor(ctx, source.workflow);
+      if (!operation.isCurrent()) throw new Error("Plan edit cancelled because the session changed.");
+      const plan = await store.read(parent);
+      const edited = await applyPlanEdits(ctx, params, parent, plan, operation.signal);
+      const revision = await publishPlan(ctx, operation, store, edited.plan, { parentPlan: plan });
+      return planModeEdited(revision, parent.path, edited, true);
+    },
+  });
 
   async function review(ctx: ExtensionCommandContext, revision?: PlanRevision, store?: PlanStore) {
     if (!ctx.hasUI) throw new Error("Plan review and implementation require TUI or RPC mode.");
