@@ -1,0 +1,11 @@
+[install]
+# Preserve the previous three-day npm release-age gate (Bun uses seconds).
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = ["@narumitw/pi-tui-kit"]
+# Preserve the workspace's existing flat dependency layout.
+linker = "hoisted"
+
+[run]
+# Bun is the package manager, not a replacement for the Node runtime.
+bun = false
+shell = "system"

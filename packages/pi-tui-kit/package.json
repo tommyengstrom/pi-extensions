@@ -1,0 +1,128 @@
+{
+  "name": "@narumitw/pi-tui-kit",
+  "version": "0.69.0",
+  "description": "Declarative UI flows and navigation helpers built on Pi TUI.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "sideEffects": false,
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "tui",
+    "menu",
+    "library"
+  ],
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./confirmation": {
+      "types": "./dist/confirmation.d.ts",
+      "import": "./dist/confirmation.js"
+    },
+    "./custom-interaction": {
+      "types": "./dist/custom-interaction.d.ts",
+      "import": "./dist/custom-interaction.js"
+    },
+    "./document-review": {
+      "types": "./dist/document-review.d.ts",
+      "import": "./dist/document-review.js"
+    },
+    "./editor-status-collection": {
+      "types": "./dist/editor-status-collection.d.ts",
+      "import": "./dist/editor-status-collection.js"
+    },
+    "./editor-status-publisher": {
+      "types": "./dist/editor-status-publisher.d.ts",
+      "import": "./dist/editor-status-publisher.js"
+    },
+    "./editor-status-view": {
+      "types": "./dist/editor-status-view.d.ts",
+      "import": "./dist/editor-status-view.js"
+    },
+    "./editor-status-widget": {
+      "types": "./dist/editor-status-widget.d.ts",
+      "import": "./dist/editor-status-widget.js"
+    },
+    "./fullscreen-handoff": {
+      "types": "./dist/fullscreen-handoff.d.ts",
+      "import": "./dist/fullscreen-handoff.js"
+    },
+    "./interaction-hints": {
+      "types": "./dist/interaction-hints.d.ts",
+      "import": "./dist/interaction-hints.js"
+    },
+    "./live-choice": {
+      "types": "./dist/live-choice.d.ts",
+      "import": "./dist/live-choice.js"
+    },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "import": "./dist/markdown.js"
+    },
+    "./multi-select": {
+      "types": "./dist/multi-select.d.ts",
+      "import": "./dist/multi-select.js"
+    },
+    "./questionnaire": {
+      "types": "./dist/questionnaire.d.ts",
+      "import": "./dist/questionnaire.js"
+    },
+    "./selectors": {
+      "types": "./dist/pi-selectors.d.ts",
+      "import": "./dist/pi-selectors.js"
+    },
+    "./task": {
+      "types": "./dist/task.d.ts",
+      "import": "./dist/task.js"
+    },
+    "./terminal-document": {
+      "types": "./dist/terminal-document.d.ts",
+      "import": "./dist/terminal-document.js"
+    },
+    "./terminal-text": {
+      "types": "./dist/terminal-text.d.ts",
+      "import": "./dist/terminal-text.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "prepack": "bun run build",
+    "check": "biome check src test scripts package.json tsconfig.json tsconfig.build.json && bun run typecheck && bun run build",
+    "format": "biome check --write src test scripts package.json tsconfig.json tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "typescript": "7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/narumiruna/pi-extensions",
+    "directory": "packages/pi-tui-kit"
+  },
+  "dependencies": {
+    "diff": "9.0.0",
+    "grok-mermaid": "0.2.3",
+    "highlight.js": "11.12.0"
+  }
+}

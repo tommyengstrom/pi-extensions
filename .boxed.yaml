@@ -1,0 +1,22 @@
+# Boxed project config.
+# Edit the defaults below for this project.
+
+exposed-ports: []
+#   - 9000
+#   - 9001
+
+host-postgres:
+  enabled: false
+  port: 5432
+
+# Dedicated persistent Postgres for this checkout:
+# postgres:
+#   version: 17
+#   databases: [myapp, myapp-test]
+
+worktree:
+  after-create: ""
+#  after-create: |
+#     if [ -f "$BOXED_SOURCE_REPO/.env.local" ] && [ ! -e .env.local ]; then
+#       cp -p "$BOXED_SOURCE_REPO/.env.local" .env.local
+#     fi

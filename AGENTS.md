@@ -1,0 +1,26 @@
+# Repository guidelines
+
+- Keep extensions and reusable internal libraries under `packages/<name>/`, with source under `src/` and package-owned tests under `test/`.
+- Retain internal dependency packages in this workspace and build libraries before their consumers. The root build script explicitly builds TUI Kit, then Plan mode; update root build/typecheck scripts when adding a workspace rather than relying on workspace listing order.
+- Keep each extension independently installable with one declared Pi entrypoint and a thin `src/index.ts` default-export forwarder.
+- List extension source entrypoints in root `package.json` under `pi.extensions`, but do not register reusable libraries as extensions.
+- Keep each package's manifest, README, license, and TypeScript configuration inside that package.
+- Preserve upstream license notices and document intentional compatibility changes.
+- Use strict TypeScript, NodeNext modules, ES2024, and no emit for root typechecking.
+- Use `nix develop` and `process-compose run dev` from the outer repo root (parent of this workspace) for development with direct terminal attachment; `process-compose up dev` is the interactive PTY/TUI alternative. The flake supplies Bun 1.4.4, Node 26.13.0, and process-compose.
+- Use `process-compose run install` from the outer root for regular installation. It runs `bun install --frozen-lockfile` in `pi-extensions/`; the dev job waits for install success before running `bun run dev` there.
+- From the outer root (`cd ..` from `pi-extensions/`), use `process-compose run check` for static checks, `process-compose run test-plan-mode` for extension tests, and `process-compose run test-tui-kit` for library tests. All three jobs are disabled by default in the `tests` namespace and run without starting `dev`. Keep each frozen install inline in the foreground command, with no `depends_on`: process-compose can return zero when a failed dependency prevents the requested job from starting. Run the jobs sequentially, never concurrently with each other or `dev`, because their builds overlap; do not start the whole namespace concurrently.
+- Run direct workspace scripts from `pi-extensions/`, including `bun run format` for formatting. The test script uses Vitest; never substitute `bun test`, which selects a different test runner.
+- Keep `packageManager: bun@1.4.4` and `bun.lock` (not `package-lock.json`). Use `bun install` in the workspace only for intentional dependency/lockfile updates and review the changes.
+- Preserve the hoisted linker and three-day minimum release age with the local TUI Kit exception. Keep `trustedDependencies` limited to `esbuild`, with the root pin and global override both at `0.28.2` to constrain transitive copies too. Bun's trust list is name-only; review version-specific lifecycle approval when changing the override/pin.
+- Bun manages dependencies/scripts, but Node remains the runtime. Preserve `run.bun = false` and the system shell in `bunfig.toml`; do not use `--bun`.
+- Rebuild TUI Kit before consumer tests and do not run its build concurrently with other checks or tests.
+- Keep shared test support under root `test/` and keep Vitest tests within the configured five-second timeout.
+- Preserve the existing isolation policy when adding tests and initialize `PI_CODING_AGENT_DIR` before extension imports in lifecycle tests.
+- Read the applicable Pi API documentation before changing extension lifecycle, commands, tools, settings, or UI behavior.
+- Revalidate session ownership after asynchronous operations and release owned resources on cancellation, disposal, session replacement, and shutdown.
+- Preserve model-visible request prefixes across ordinary turns and document and test intentional transitions.
+- Sanitize untrusted terminal text at display boundaries and respect effective keybindings, paste behavior, and non-interactive modes.
+- Keep settings writes atomic, preserve unknown fields, and protect invalid files from accidental replacement.
+- Do not edit `node_modules`, publish packages, create release tags, or change npm visibility without explicit approval.
+- Keep changes focused, preserve unrelated user files, and report completed checks and unverified paths.

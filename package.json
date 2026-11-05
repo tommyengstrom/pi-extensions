@@ -1,0 +1,53 @@
+{
+  "name": "pi-extensions",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Personal Pi extension workspace, starting with pi-plan-mode.",
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "workspaces": [
+    "packages/*"
+  ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-plan-mode/src/index.ts"
+    ]
+  },
+  "scripts": {
+    "dev": "bun run build && pi --no-extensions -e ./packages/pi-plan-mode/src/index.ts",
+    "build": "bun run --cwd packages/pi-tui-kit build && bun run --cwd packages/pi-plan-mode build",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "typecheck": "bun run build && bun run --cwd packages/pi-tui-kit typecheck && bun run --cwd packages/pi-plan-mode typecheck && tsc -p tsconfig.test.json",
+    "test": "bun run build && vitest run",
+    "check": "bun run typecheck && biome check . --error-on-warnings && bun run check:boundaries",
+    "check:boundaries": "node ./scripts/check-extension-boundaries.mjs",
+    "benchmark:tui-kit-runtime": "node ./scripts/benchmark-tui-kit-runtime.mjs",
+    "showcase:tui-kit": "node ./packages/pi-tui-kit/scripts/showcase.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/node": "^26.6.5",
+    "esbuild": "0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.12",
+    "esbuild": "0.28.2",
+    "just-bash": {
+      "guarded-fetch": "0.1.6",
+      "sprintf-js": "npm:@lvcabral/sprintf@1.2.2"
+    },
+    "node-domexception": "npm:@profoundlogic/node-domexception@1.0.2",
+    "protobufjs": "7.6.5",
+    "undici@7": "7.30.1",
+    "undici@8": "8.12.3"
+  },
+  "trustedDependencies": [
+    "esbuild"
+  ]
+}

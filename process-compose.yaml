@@ -1,0 +1,46 @@
+version: "0.5"
+
+processes:
+  install:
+    command: bun install --frozen-lockfile
+    working_dir: ./pi-extensions
+    availability:
+      restart: "no"
+
+  dev:
+    command: bun run dev
+    working_dir: ./pi-extensions
+    # `process-compose run dev` gives Pi the terminal directly; `up` uses a PTY.
+    is_interactive: true
+    depends_on:
+      install:
+        condition: process_completed_successfully
+    availability:
+      restart: "no"
+
+  # Opt in to these jobs individually; run sequentially, not alongside dev,
+  # because each job rebuilds shared packages.
+  # Keep install in the foreground: `run` can exit 0 if a dependency fails.
+  check:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run check
+    working_dir: ./pi-extensions
+    availability:
+      restart: "no"
+
+  test-plan-mode:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-plan-mode/test/
+    working_dir: ./pi-extensions
+    availability:
+      restart: "no"
+
+  test-tui-kit:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-tui-kit/test/
+    working_dir: ./pi-extensions
+    availability:
+      restart: "no"

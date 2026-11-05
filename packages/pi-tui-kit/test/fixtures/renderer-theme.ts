@@ -1,0 +1,73 @@
+import { Theme, type ThemeBg, type ThemeColor } from "@earendil-works/pi-coding-agent";
+
+const foregrounds = [
+  "accent",
+  "border",
+  "borderAccent",
+  "borderMuted",
+  "success",
+  "error",
+  "warning",
+  "muted",
+  "dim",
+  "text",
+  "thinkingText",
+  "scrollbarTrack",
+  "scrollbarThumb",
+  "searchMatchText",
+  "userMessageText",
+  "customMessageText",
+  "customMessageLabel",
+  "toolTitle",
+  "toolOutput",
+  "mdHeading",
+  "mdLink",
+  "mdLinkUrl",
+  "mdCode",
+  "mdCodeBlock",
+  "mdCodeBlockBorder",
+  "mdQuote",
+  "mdQuoteBorder",
+  "mdHr",
+  "mdListBullet",
+  "toolDiffAdded",
+  "toolDiffRemoved",
+  "toolDiffContext",
+  "syntaxComment",
+  "syntaxKeyword",
+  "syntaxFunction",
+  "syntaxVariable",
+  "syntaxString",
+  "syntaxNumber",
+  "syntaxType",
+  "syntaxOperator",
+  "syntaxPunctuation",
+  "thinkingOff",
+  "thinkingMinimal",
+  "thinkingLow",
+  "thinkingMedium",
+  "thinkingHigh",
+  "thinkingXhigh",
+  "thinkingMax",
+  "bashMode",
+] satisfies ThemeColor[];
+const backgrounds = [
+  "selectedBg",
+  "searchMatchBg",
+  "userMessageBg",
+  "customMessageBg",
+  "toolPendingBg",
+  "toolSuccessBg",
+  "toolErrorBg",
+] satisfies ThemeBg[];
+
+export function rendererTheme(appearance: "light" | "dark" = "dark", terminalDefault = false) {
+  const fg = terminalDefault ? "" : appearance === "dark" ? "#ddeeff" : "#112233";
+  const bg = terminalDefault ? "" : appearance === "dark" ? "#112233" : "#ddeeff";
+  return new Theme(
+    Object.fromEntries(foregrounds.map((key) => [key, fg])) as Record<ThemeColor, string>,
+    Object.fromEntries(backgrounds.map((key) => [key, bg])) as Record<ThemeBg, string>,
+    "truecolor",
+    { appearance },
+  );
+}

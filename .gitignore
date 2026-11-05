@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+.pi/agent/
+.pi/settings.json
+**/.pi-*-build-test-*/
+**/.pi-*-dist-*/
