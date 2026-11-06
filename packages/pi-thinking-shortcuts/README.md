@@ -11,7 +11,9 @@ The shortcuts stop at the lowest/highest level instead of wrapping. They use the
 
 ## Install or try
 
-From this repository's root:
+Install this extension together with Plan mode using `pi install git:github.com/tommyengstrom/pi-extensions`. No Bun or manual build is required for Git installation; see the [workspace installation guide](../../README.md#install-from-github) for requirements, updates, and pinning.
+
+For local use, from this repository's root:
 
 ```sh
 # Install only this extension from the local checkout:

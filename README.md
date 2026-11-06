@@ -8,7 +8,31 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 - [`packages/pi-thinking-shortcuts`](packages/pi-thinking-shortcuts): Codex-style **Alt+,** / **Alt+.** to decrease/increase thinking effort.
 - [`packages/pi-tui-kit`](packages/pi-tui-kit): the internal UI library used by Plan mode for menus, questionnaires, status widgets, and other terminal interactions.
 
-All packages retain their source, tests, documentation, and licenses. TUI Kit has no further dependencies on packages in this repository. Bun workspaces link it locally; the root build script explicitly builds TUI Kit before Plan mode.
+All packages retain their source, tests, documentation, and licenses. TUI Kit has no further dependencies on packages in this repository. Workspaces link it locally; both the installation and development builds explicitly build TUI Kit before Plan mode.
+
+## Install from GitHub
+
+With Pi 1.5.0 installed, install **both extensions from one reference**:
+
+```sh
+pi install git:github.com/tommyengstrom/pi-extensions
+```
+
+Restart Pi or run `/reload`, then use `/plan` and **Alt+,** / **Alt+.**. Only pushed commits are available through GitHub; local changes in this checkout are not installed by that command. Extensions execute with Pi's permissions, so review and trust the source before installation.
+
+Consumers need Git, npm, a Node version compatible with Pi 1.5.0, and enabled installation scripts—**not Bun**, an `npmCommand` override, or a manual build. Pi's default production npm install runs a Node-only root `postinstall`: it transpiles this workspace's TUI Kit to JavaScript and builds Plan mode's split package runtime. Thinking shortcuts remain source-loaded. Pi supplies its own host packages; they are not installed as physical runtime dependencies here.
+
+Update the installed reference with:
+
+```sh
+pi update git:github.com/tommyengstrom/pi-extensions
+```
+
+Restart or `/reload` afterwards. For optional pinning, install `git:github.com/tommyengstrom/pi-extensions@<tag-or-commit>` (replace the placeholder with a pushed tag or commit). Updates reconcile that pinned ref rather than advancing it; use a different ref to change the version.
+
+If you added `npmCommand: ["bun"]` solely for this repository, it is no longer needed. Review it yourself before removing it: it may serve other packages. Installation does not edit that setting.
+
+Bun's frozen lockfile and minimum-release-age policy below protect **development** installs. npm consumer installs do not inherit those guarantees from `bun.lock`; the declared pins and npm overrides still apply. Installation produces runtime files only, not declarations or typechecking. The normal development build and `prepack` validation remain necessary for independently packaging the typed library.
 
 ## Development
 
@@ -43,11 +67,15 @@ bun run build                 # TUI Kit, Plan mode, then thinking shortcuts
 bun run typecheck             # Build, then typecheck packages and tests
 bun run format                # Apply Biome formatting
 bun run lint                  # Run Biome linting
+bun run test test/install-runtime.test.ts # Root installation contract tests
+node scripts/test-packaging.mjs # Or: bun run test:packaging (network-backed)
 ```
 
 Use `bun run test`, not `bun test` (Bun's different test runner). Do not run builds, checks, or tests concurrently because they rebuild TUI Kit.
 
-For package-directory loading, build first:
+The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.0 host. It checks manifest discovery, both extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
+
+For local development package-directory loading, build first (Git installation does this automatically):
 
 ```sh
 bun run build

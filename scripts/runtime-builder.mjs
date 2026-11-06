@@ -213,7 +213,7 @@ export function createRuntimeBuilder({
     }
   }
 
-  return { buildRuntime, validateEagerGraph, validateGeneratedFiles, publishRuntime };
+  return { buildRuntime, validateEagerGraph, validateGeneratedFiles, publishRuntime, assertSafeOutputDirectory };
 }
 
 function collectEagerOutputs(outputs, entryPath) {

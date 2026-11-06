@@ -8,7 +8,9 @@ Explore a codebase, resolve important questions, and review an implementation-re
 
 This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts are not supported. This fork retains compatibility with its previous path-hashed plan storage and captured workflow locations without moving files. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
 
-From the repository root, run the managed development job:
+Install this fork together with thinking shortcuts using `pi install git:github.com/tommyengstrom/pi-extensions`, then restart or `/reload`. Git installation builds the runtime automatically with Node and npm; Bun and manual preparation are not consumer requirements. See the [workspace installation guide](../../README.md#install-from-github) for updates and pinning.
+
+For local development, from the repository root run the managed job:
 
 ```bash
 process-compose run dev
@@ -20,7 +22,7 @@ To load an already-built checkout from the repository root:
 ./node_modules/.bin/pi --no-extensions -e ./packages/pi-plan-mode
 ```
 
-Load only extensions you trust: they run with Pi's operating-system permissions. See the [workspace guide](../../README.md) for builds and validation. The package loads its generated `dist/index.ts` entrypoint; build an unbuilt checkout before loading the package directory.
+Load only extensions you trust: they run with Pi's operating-system permissions. See the [workspace guide](../../README.md) for builds and validation. The package directory loads its generated `dist/index.ts` entrypoint; build an unbuilt local development checkout before loading that directory. The Git package's root manifest loads both source entrypoints and automatically prepares their runtime dependencies.
 
 ## Quick start
 
