@@ -193,6 +193,8 @@ export interface ReviewScreen<ActionId extends string> {
   /** Copy this original content without confirming or closing the TUI review. */
   copy?: DocumentCopyAction;
   confirm?: ReviewConfirmation<ActionId>;
+  /** Mutually exclusive with confirm; the first action is initially selected. */
+  actions?: readonly ReviewConfirmation<ActionId>[];
   hint?: "back" | "close";
 }
 

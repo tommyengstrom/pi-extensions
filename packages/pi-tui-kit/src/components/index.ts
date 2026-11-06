@@ -64,7 +64,8 @@ export function createMenuScreenComponent<ScreenId extends string, ActionId exte
     options.screen.kind === "choice" ||
     options.screen.kind === "settings" ||
     options.screen.kind === "multiSelect" ||
-    options.screen.kind === "browse";
+    options.screen.kind === "browse" ||
+    (options.screen.kind === "review" && Boolean(options.screen.actions?.length));
   options = { ...options, keybindings: componentKeybindings(options.tui, options.keybindings, capturesViewportInput) };
   let component: MenuScreenComponent;
   switch (options.screen.kind) {

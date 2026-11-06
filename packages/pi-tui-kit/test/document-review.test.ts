@@ -10,6 +10,13 @@ function tuiContext(tui: ReturnType<typeof createTuiHarness>) {
   return createMockContext({ mode: "tui", hasUI: true, custom: tui.custom }).ctx;
 }
 
+const actions = [
+  { id: "fresh", label: "Implement fresh" },
+  { id: "here", label: "Implement here" },
+  { id: "save", label: "Save" },
+  { id: "continue", label: "Continue" },
+];
+
 const formats: Pick<RunDocumentReviewOptions, "content" | "format">[] = [
   { content: "plain\ttext", format: { kind: "text" } },
   { content: "const answer: number = 42;", format: { kind: "code", filePath: "answer.ts" } },
@@ -165,6 +172,102 @@ test("runDocumentReview returns typed RPC cancellation, unsupported, validation,
   assert.deepEqual(await runDocumentReview(staleCtx, { title: "Review", content: "body", isCurrent: () => current }), {
     kind: "stale",
   });
+});
+
+test("multi-action review opens without settling and returns each explicitly confirmed stable ID", async () => {
+  for (const [index, action] of actions.entries()) {
+    const tui = createTuiHarness();
+    let settled = false;
+    const running = runDocumentReview(tuiContext(tui), { title: "Review", content: "Plan", actions });
+    void running.then(() => {
+      settled = true;
+    });
+    await tui.waitForOpen();
+    const frame = stripVTControlCharacters(tui.render().join("\n"));
+    assert.match(frame, /Plan/u);
+    for (const action of actions) assert.ok(frame.includes(action.label));
+    assert.equal(settled, false);
+    for (let i = 0; i < index; i++) tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    assert.deepEqual(await running, { kind: "selected", actionId: action.id });
+  }
+});
+
+test("RPC multi-action labels remain unique against paging and cancellation controls", async () => {
+  const rpc = createRpcHarness([
+    { kind: "select", options: ["Next", "Back", "Next [2]", "Back [2]"], response: "Next [2]" },
+    { kind: "select", options: ["Next", "Back", "Previous", "Back [2]"], response: "Previous" },
+    { kind: "select", response: "Next" },
+  ]);
+  const ctx = createMockContext({ mode: "rpc", hasUI: true, select: rpc.ui.select }).ctx;
+  assert.deepEqual(
+    await runDocumentReview(ctx, {
+      title: "Review",
+      content: "one\ntwo",
+      viewportSize: 1,
+      actions: [
+        { id: "next-action", label: "Next" },
+        { id: "back-action", label: "Back" },
+      ],
+    }),
+    { kind: "selected", actionId: "next-action" },
+  );
+  assert.equal(rpc.dialogs.length, 3);
+  rpc.assertConsumed();
+});
+
+test("multi-action configuration rejects empty, duplicate, invisible and ambiguous controls", async () => {
+  const ctx = createMockContext({ mode: "print", hasUI: false }).ctx;
+  for (const invalid of [
+    { actions: [] },
+    { actions: [{ id: " ", label: "Apply" }] },
+    { actions: [{ id: "a", label: "\u0001" }] },
+    {
+      actions: [
+        { id: "a", label: "One" },
+        { id: "a", label: "Two" },
+      ],
+    },
+    { actions, confirmation: { label: "Apply" } },
+  ]) {
+    assert.equal((await runDocumentReview(ctx, { title: "Review", content: "body", ...invalid })).kind, "error");
+  }
+});
+
+test("multi-action review ignores pasted commands, preserves search precedence and releases owned interactions", async () => {
+  for (const ending of ["cancel", "abort", "dispose", "stale"] as const) {
+    const tui = createTuiHarness();
+    const controller = new AbortController();
+    let current = true;
+    const running = runDocumentReview(tuiContext(tui), {
+      title: "Review",
+      content: "needle\nother\nneedle",
+      actions,
+      enableSearch: true,
+      signal: controller.signal,
+      isCurrent: () => current,
+    });
+    await tui.waitForOpen();
+    tui.render();
+    tui.send("\u001b[200~");
+    tui.press("tui.select.confirm");
+    tui.press("tui.select.down");
+    tui.send("\u001b[201~");
+    assert.match(stripVTControlCharacters(tui.render().join("\n")), /> Implement fresh/u);
+    tui.send(" ");
+    tui.type("needle");
+    tui.press("tui.select.confirm"); // next search match, never an action
+    assert.match(stripVTControlCharacters(tui.render().join("\n")), /2\/2/u);
+    tui.send("\u001b[200~\r\u001b[201~");
+    tui.press("tui.select.cancel");
+    if (ending === "abort") controller.abort();
+    else if (ending === "dispose") tui.dispose();
+    else {
+      if (ending === "stale") current = false;
+      tui.press("tui.select.cancel");
+    }
+    assert.deepEqual(await running, ending === "cancel" ? { kind: "cancelled", reason: "back" } : { kind: "stale" });
+  }
 });
 
 test("runDocumentReview prepares enabled Mermaid documents before opening safely", async () => {

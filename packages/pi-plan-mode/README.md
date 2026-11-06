@@ -91,12 +91,14 @@ Every successful completion publishes a new numbered Markdown revision without o
 
 ## Review and implementation
 
-Document review shows the complete plan, its revision, and its path. Confirm review to open these actions:
+Document review shows the complete plan, its revision, path, and any change reason, with these actions immediately beneath the scrollable plan:
 
 - **Implement in fresh session** — always the first/default action, never remembered from a previous choice. Transfers the full reviewed plan, not planning messages, tool results, or summaries. The new session links to the source as its parent only if the source has a persisted session file.
 - **Implement here** — explicitly keeps the current conversation and starts implementation with the reviewed plan after leaving Plan mode.
 - **Save for later** — leaves Plan mode without starting a model turn. The revision is already on disk.
 - **Continue planning** — resumes planning from the reviewed revision in the same series.
+
+Opening review never starts implementation. Use the configured Up/Down keys to select an action and the confirmation key (normally Enter) to execute it. Page Up/Page Down and Home/End scroll the document; the mouse wheel works over the plan. Space opens search, where input and search navigation take precedence over actions; close search before choosing an action. Actions stay outside the document viewport. Small terminals compact metadata and hints first, then show a reachable action window with the selection visible. RPC shows the document page and all four actions together, alongside paging and Close. Escape leaves the plan ready. Automatic review, `/plan`, and saved-revision review use this same screen.
 
 The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan.
 

@@ -44,44 +44,18 @@ export async function reviewPlan(
     format: { kind: "markdown" },
     viewportSize: "adaptive",
     enableSearch: true,
-    confirmation: { label: "Choose an action" },
+    // Never remember a previous launch choice: fresh is always first/default.
+    actions: [
+      { id: "fresh", label: "Implement in fresh session" },
+      { id: "here", label: "Implement here" },
+      { id: "save", label: "Save for later" },
+      { id: "continue", label: "Continue planning" },
+    ],
     hint: "close",
     signal: lifecycle.signal,
     isCurrent: () => lifecycle.isCurrent(),
   });
-  if (!current(lifecycle) || reviewed.kind !== "confirmed") return undefined;
-
-  let chosen: ReviewAction | undefined;
-  const menu = defineMenu<undefined, "actions", "choose", ExtensionContext>({
-    start: "actions",
-    screens: {
-      actions: () => ({
-        kind: "actions",
-        title: "Plan reviewed — choose an action",
-        lines: [`Path: ${terminalText(revision.path)}`],
-        // Never remember a previous launch choice: fresh is always first/default.
-        items: [
-          { id: "fresh", label: "Implement in fresh session", action: "choose" },
-          { id: "here", label: "Implement here", action: "choose" },
-          { id: "save", label: "Save for later", action: "choose" },
-          { id: "continue", label: "Continue planning", action: "choose" },
-        ],
-        hint: "close",
-      }),
-    },
-    actions: {
-      choose: ({ itemId }) => {
-        if (current(lifecycle)) chosen = itemId as ReviewAction;
-        return { kind: "close" };
-      },
-    },
-  });
-  const result = await runMenu(ctx, menu, {
-    getState: () => undefined,
-    signal: lifecycle.signal,
-    isCurrent: () => lifecycle.isCurrent(),
-  });
-  return current(lifecycle) && result.kind === "closed" ? chosen : undefined;
+  return current(lifecycle) && reviewed.kind === "selected" ? (reviewed.actionId as ReviewAction) : undefined;
 }
 
 /** Browse a supplied filesystem snapshot; no index or selection is persisted. */

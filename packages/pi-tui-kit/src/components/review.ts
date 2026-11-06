@@ -40,8 +40,14 @@ export type ReviewOptions<ScreenId extends string, ActionId extends string> = Me
 export function createReviewComponent<ScreenId extends string, ActionId extends string>(
   options: ReviewOptions<ScreenId, ActionId>,
 ): MenuScreenComponent {
-  options = { ...options, keybindings: componentKeybindings(options.tui, options.keybindings) };
+  const capturesViewportInput = Boolean(options.screen.actions?.length);
+  options = { ...options, keybindings: componentKeybindings(options.tui, options.keybindings, capturesViewportInput) };
   let scrollOffset = 0;
+  let selectedAction = 0;
+  let pasting = false;
+  const actions = options.screen.actions ?? [];
+  const hasActions = actions.length > 0;
+  const canConfirm = hasActions || Boolean(options.screen.confirm);
   let lastMaximumScroll = 0;
   let lastViewportSize = reviewViewportSize(options.screen);
   let lastTerminalRows = options.tui.terminal.rows;
@@ -64,13 +70,19 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
   const search = options.screen.enableSearch ? new DocumentSearchController() : undefined;
   const searchActivationAvailable = Boolean(
     search &&
-      componentKeyAvailable(options.tui, DOCUMENT_SEARCH_ACTIVATE_KEY) &&
-      documentSearchActivationAvailable(options.keybindings, Boolean(options.screen.confirm)),
+      componentKeyAvailable(options.tui, DOCUMENT_SEARCH_ACTIVATE_KEY, capturesViewportInput) &&
+      !(
+        hasActions &&
+        (options.keybindings.matches(" ", "tui.editor.cursorLineStart") ||
+          options.keybindings.matches(" ", "tui.editor.cursorLineEnd"))
+      ) &&
+      documentSearchActivationAvailable(options.keybindings, canConfirm),
   );
 
   const copy = createDocumentCopy({
     ...options,
-    includeConfirm: Boolean(options.screen.confirm),
+    includeConfirm: canConfirm,
+    configuredDocumentBoundaries: hasActions,
     searchEnabled: searchActivationAvailable,
     document: () =>
       options.screen.copy
@@ -92,6 +104,7 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
   };
 
   const component: MenuScreenComponent & Partial<Focusable> = {
+    ...(capturesViewportInput ? { capturesViewportInput: true } : {}),
     render(width) {
       if (!Number.isFinite(width) || width <= 0) {
         mouseLayout = undefined;
@@ -130,6 +143,7 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
             ? undefined
             : Math.min(reviewViewportSize(options.screen), allLines.length),
         scrollOffset,
+        selectedAction,
         theme: options.theme,
         keybindings: options.keybindings,
       };
@@ -206,21 +220,34 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
         }
         return;
       }
+      // Bracketed paste is never action input, including fragmented payload chunks.
+      const wasPasting = pasting;
+      if (data.includes("\u001b[200~")) pasting = true;
+      const pasted = wasPasting || pasting;
+      if (data.includes("\u001b[201~")) pasting = false;
+      if (pasted) return;
       if (matchesKey(data, Key.ctrl("c"))) finish({ kind: "close" });
       else if (options.keybindings.matches(data, "tui.select.cancel")) {
         finish({ kind: options.screen.hint ?? "back" });
       } else if (options.keybindings.matches(data, "tui.select.up")) {
-        moveTo(scrollOffset - 1);
+        if (hasActions) moveAction(-1);
+        else moveTo(scrollOffset - 1);
       } else if (options.keybindings.matches(data, "tui.select.down")) {
-        moveTo(scrollOffset + 1);
+        if (hasActions) moveAction(1);
+        else moveTo(scrollOffset + 1);
       } else if (options.keybindings.matches(data, "tui.select.pageUp")) {
         moveTo(scrollOffset - lastViewportSize);
       } else if (options.keybindings.matches(data, "tui.select.pageDown")) {
         moveTo(scrollOffset + lastViewportSize);
-      } else if (matchesKey(data, Key.home)) moveTo(0);
-      else if (matchesKey(data, Key.end)) moveTo(lastMaximumScroll);
-      else if (options.screen.confirm && options.keybindings.matches(data, "tui.select.confirm")) {
-        finish({ kind: "activate", itemId: options.screen.confirm.id });
+      } else if (
+        hasActions ? options.keybindings.matches(data, "tui.editor.cursorLineStart") : matchesKey(data, Key.home)
+      )
+        moveTo(0);
+      else if (hasActions ? options.keybindings.matches(data, "tui.editor.cursorLineEnd") : matchesKey(data, Key.end))
+        moveTo(lastMaximumScroll);
+      else if (canConfirm && options.keybindings.matches(data, "tui.select.confirm")) {
+        const action = hasActions ? actions[selectedAction] : options.screen.confirm;
+        if (action) finish({ kind: "activate", itemId: action.id });
       } else if (search && searchActivationAvailable && matchesKey(data, DOCUMENT_SEARCH_ACTIVATE_KEY)) {
         search.activate(lastLines, lastSoftWrapAfter, lastIgnoreLeadingWhitespace, lastSearchSources, scrollOffset);
         options.tui.requestRender();
@@ -270,6 +297,11 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
     return { handled: true, render: previous !== scrollOffset };
   }
 
+  function moveAction(delta: number) {
+    selectedAction = (selectedAction + delta + actions.length) % actions.length;
+    options.tui.requestRender();
+  }
+
   return component;
 }
 
@@ -284,6 +316,7 @@ interface AdaptiveReviewFrameOptions<ActionId extends string> {
   terminalRows: number;
   maximumViewportSize?: number;
   scrollOffset: number;
+  selectedAction: number;
   theme: MenuScreenComponentOptions<string, ActionId>["theme"];
   keybindings: MenuKeybindings;
 }
@@ -310,12 +343,29 @@ function renderAdaptiveReviewFrame<ActionId extends string>(
   options: AdaptiveReviewFrameOptions<ActionId>,
 ): AdaptiveReviewFrame {
   const totalRows = componentRows(options.terminalRows);
-  const framed = totalRows >= MIN_FRAMED_ROWS;
+  const actions = options.screen.actions ?? [];
+  const framed = totalRows >= MIN_FRAMED_ROWS + actions.length;
   const availableRows = framed ? totalRows - 2 : totalRows;
-  const searchRows = options.searchLine === undefined ? 0 : 1;
-  const documentRows = Math.max(0, availableRows - searchRows);
+  const searchRows = options.searchLine === undefined ? 0 : Math.min(1, availableRows);
+  // Compact metadata and hints before reducing actions; at tiny heights keep the
+  // selected row in a sliding action window and leave a document row if possible.
+  const actionRows = Math.min(
+    actions.length,
+    Math.max(0, availableRows - searchRows - Number(availableRows - searchRows > 1)),
+  );
+  const actionStart = Math.max(0, Math.min(options.selectedAction - actionRows + 1, actions.length - actionRows));
+  const actionLines = actions.slice(actionStart, actionStart + actionRows).map((action, index) => {
+    const selected = actionStart + index === options.selectedAction;
+    const label = `${selected ? "> " : "  "}${safeMenuText(action.label)}`;
+    return selected ? options.theme.fg("accent", label) : label;
+  });
+  const documentRows = Math.max(0, availableRows - searchRows - actionRows);
   const destination = options.screen.hint ?? "back";
-  const confirmAction = options.screen.confirm ? safeMenuText(options.screen.confirm.label) : "";
+  const confirmAction = actions.length
+    ? "select action"
+    : options.screen.confirm
+      ? safeMenuText(options.screen.confirm.label)
+      : "";
   const fullHeader = [
     ...wrapTextWithAnsi(
       options.theme.fg("accent", options.theme.bold(safeMenuText(options.screen.title))),
@@ -332,6 +382,7 @@ function renderAdaptiveReviewFrame<ActionId extends string>(
     options.searchEnabled,
     options.searchActive,
     options.copyHint,
+    actions.length > 0,
   );
   const fullHint = wrapTextWithAnsi(options.theme.fg("dim", hintText), options.width).map((line) =>
     truncateToWidth(line, options.width, ""),
@@ -346,6 +397,7 @@ function renderAdaptiveReviewFrame<ActionId extends string>(
       options.searchEnabled,
       options.searchActive,
       options.copyHint,
+      actions.length > 0,
     ),
   );
 
@@ -383,6 +435,7 @@ function renderAdaptiveReviewFrame<ActionId extends string>(
     ...(chrome.separator ? [""] : []),
     ...visible,
     ...position,
+    ...actionLines,
     ...chrome.hint,
   ].map((line) => truncateToWidth(line, options.width, ""));
   const lines = framed
@@ -490,6 +543,7 @@ function reviewHint(
   searchEnabled: boolean,
   searchActive: boolean,
   copyHint: string,
+  hasActions: boolean,
 ) {
   if (searchActive) {
     const next = reviewBindingText(keybindings, "tui.altScreen.searchNext");
@@ -502,7 +556,9 @@ function reviewHint(
       "ctrl+c close",
     ].join(" · ");
   }
-  const base = menuHint(keybindings, destination, confirmAction);
+  const base = hasActions
+    ? combinedReviewHints(keybindings, destination).join(" · ")
+    : menuHint(keybindings, destination, confirmAction);
   const search = searchEnabled ? DOCUMENT_SEARCH_ACTIVATE_KEY : "";
   return [base, ...(search ? [`${search} search`] : []), copyHint].filter(Boolean).join(" · ");
 }
@@ -515,12 +571,23 @@ function compactReviewHint(
   searchEnabled: boolean,
   searchActive: boolean,
   copyHint: string,
+  hasActions: boolean,
 ) {
   if (searchActive) {
     const close = reviewBindingText(keybindings, "tui.altScreen.searchClose");
     const next = reviewBindingText(keybindings, "tui.altScreen.searchNext");
     return fitCompactHintSegments(
       [...(close ? [`${close} close search`] : []), ...(next ? [`${next} next`] : []), "ctrl+c close"],
+      width,
+    );
+  }
+  if (hasActions) {
+    return fitCompactHintSegments(
+      [
+        ...combinedReviewHints(keybindings, destination),
+        ...(searchEnabled ? [`${DOCUMENT_SEARCH_ACTIVATE_KEY} search`] : []),
+        ...(copyHint ? [copyHint] : []),
+      ],
       width,
     );
   }
@@ -540,6 +607,24 @@ function compactReviewHint(
     ],
     width,
   );
+}
+
+function combinedReviewHints(keybindings: MenuKeybindings, destination: "back" | "close"): string[] {
+  const group = (bindings: Parameters<MenuKeybindings["getKeys"]>[0][], label: string) => {
+    const keys = bindings
+      .map((binding) => reviewBindingText(keybindings, binding))
+      .filter(Boolean)
+      .join("/");
+    return keys ? [`${keys} ${label}`] : [];
+  };
+  return [
+    ...group(["tui.select.cancel"], destination),
+    ...(destination === "back" || !keybindings.getKeys("tui.select.cancel").includes("ctrl+c") ? ["ctrl+c close"] : []),
+    ...group(["tui.select.confirm"], "select action"),
+    ...group(["tui.select.up", "tui.select.down"], "actions"),
+    ...group(["tui.select.pageUp", "tui.select.pageDown"], "scroll"),
+    ...group(["tui.editor.cursorLineStart", "tui.editor.cursorLineEnd"], "top/bottom"),
+  ];
 }
 
 function keepRowVisible(offset: number, row: number, viewportRows: number) {

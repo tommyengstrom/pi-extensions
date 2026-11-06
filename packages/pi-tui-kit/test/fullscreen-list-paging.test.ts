@@ -4,6 +4,7 @@ import { test } from "vitest";
 import { plainTuiText } from "../../../test/tui-text.js";
 import { createMenuScreenComponent } from "../src/components/index.js";
 import { type CustomInteractionComponent, runCustomInteraction } from "../src/custom-interaction.js";
+import { runDocumentReview } from "../src/document-review.js";
 import { runLiveChoice } from "../src/live-choice.js";
 import { runThinkingSelector } from "../src/pi-selectors.js";
 import type { MenuScreen } from "../src/types.js";
@@ -107,6 +108,33 @@ for (const mode of ["regular", "fullscreen"] as const) {
         if (mode === "fullscreen") assert.ok(fixture.scroll.scrollTop < before);
       });
     }
+
+    test(`${mode} combined review captures ${remapped ? "configured" : "default"} paging without selecting an action`, async (t) => {
+      const fixture = createRendererHost(mode, rendererTheme(), {
+        bindings: remapped ? { "tui.select.pageDown": "ctrl+v", "tui.altScreen.pageDown": "ctrl+v" } : {},
+      });
+      t.onTestFinished(() => fixture.stop());
+      const running = runDocumentReview(fixture.ctx, {
+        title: "Review",
+        content: items.map((item) => item.label).join("\n"),
+        viewportSize: 3,
+        actions: [
+          { id: "fresh", label: "Fresh" },
+          { id: "here", label: "Here" },
+        ],
+      });
+      await fixture.waitForOpen();
+      assert.equal(fixture.component.capturesViewportInput, true);
+      const before = fixture.scroll.scrollTop;
+      fixture.component.render(100);
+      fixture.send(remapped ? "\u0016" : "\u001b[6~");
+      const text = plainTuiText(fixture.component.render(100).join("\n"));
+      assert.match(text, /Item 3/u);
+      assert.doesNotMatch(text, /Item 0/u);
+      assert.equal(fixture.scroll.scrollTop, before);
+      fixture.send("\r");
+      assert.deepEqual(await running, { kind: "selected", actionId: "fresh" });
+    });
 
     test(`${mode} native selector preserves ${remapped ? "configured" : "default"} paging through both wrappers`, async (t) => {
       const fixture = createRendererHost(mode, rendererTheme(), {

@@ -70,8 +70,11 @@ export async function invokeMenuInteraction<
         );
       }
       if (screen.kind === "review") {
-        if (!screen.confirm || screen.confirm.id !== interaction.itemId) return rejected();
-        return invokeAction(ctx, definition.actions[screen.confirm.action], state, signal, screen.confirm.id, runtime);
+        const action = (screen.actions ?? (screen.confirm ? [screen.confirm] : [])).find(
+          (candidate) => candidate.id === interaction.itemId,
+        );
+        if (!action) return rejected();
+        return invokeAction(ctx, definition.actions[action.action], state, signal, action.id, runtime);
       }
       if (screen.kind === "multiSelect") {
         const item = screen.actions?.find((candidate) => candidate.id === interaction.itemId);

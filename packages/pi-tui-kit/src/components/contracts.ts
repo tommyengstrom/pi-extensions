@@ -7,6 +7,8 @@ const MENU_BINDINGS = [
   "tui.select.down",
   "tui.select.pageUp",
   "tui.select.pageDown",
+  "tui.editor.cursorLineStart",
+  "tui.editor.cursorLineEnd",
   "tui.select.confirm",
   "tui.select.cancel",
   "tui.input.submit",

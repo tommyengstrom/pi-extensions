@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { validateReviewActions } from "./review-actions.js";
 import {
   type ActionMenuItem,
   MAX_REVIEW_VIEWPORT_SIZE,
@@ -93,14 +94,11 @@ function validateScreen<State, ScreenId extends string, ActionId extends string,
         `Menu review viewport size must be "adaptive" or a positive integer no greater than ${MAX_REVIEW_VIEWPORT_SIZE}`,
       );
     }
-    if (screen.confirm) {
-      if (!screen.confirm.id.trim()) {
-        throw new Error("Menu review confirmation id must not be empty");
-      }
-      if (!screen.confirm.label.trim()) {
-        throw new Error("Menu review confirmation label must not be empty");
-      }
-      assertAction(definition, `review screen ${screen.title}`, screen.confirm.action);
+    const error = validateReviewActions(screen.confirm, screen.actions);
+    if (error) throw error;
+    for (const action of screen.actions ?? (screen.confirm ? [screen.confirm] : [])) {
+      if (!action.id.trim()) throw new Error("Menu review confirmation id must not be empty");
+      assertAction(definition, `review screen ${screen.title}`, action.action);
     }
     return;
   }

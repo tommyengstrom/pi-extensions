@@ -310,11 +310,19 @@ Before opening a TUI Markdown review with an enabled top-level Mermaid fence, it
 Mermaid preparation remains internal; callers receive no renderer or component factory.
 
 TUI Escape and Ctrl+C return typed `cancelled` results with Back and Close reasons.
-When `confirmation` is omitted, no action can confirm the document; optional Copy stays in the same view.
+When both `confirmation` and `actions` are omitted, the review is read-only; optional Copy stays in the same view.
 RPC uses the authoritative sanitized document pages, optional confirmation, and signal-aware `select()` dialogs; TUI-only search is ignored.
 Print and JSON return `unsupported`.
 Owner abort, stale ownership, external disposal, invalid options, and failures remain distinct `stale` or `error` results.
-The caller owns every confirmed side effect and must revalidate domain state before applying it.
+The caller owns every confirmed or selected side effect and must revalidate domain state before applying it.
+
+For multiple immediate actions, replace `confirmation` with `actions: [{ id: "apply", label: "Apply" }, { id: "save", label: "Save for later" }]`. The result is `{ kind: "selected", actionId: "apply" }` (or the other selected stable ID). `DocumentReviewAction` is exported from the document-review entrypoint and the Kit root. Actions must be nonempty, with unique nonblank IDs and displayable labels. Supplying both `confirmation` and `actions` is an error. The existing single-confirmation `confirmed` result is unchanged.
+
+Declarative `ReviewScreen` accepts the same `actions` with an additional `action` handler ID per entry, just like `confirm`. Dispatch passes the original stable entry ID as `itemId`, not its display label. Both RPC adapters include all actions on every document page and disambiguate labels that collide with each other or Previous/Next/Back/Close controls. Paging never dispatches an action.
+
+In multi-action TUI reviews, the first action is initially selected on each opening. Configured `tui.select.up/down` select actions without scrolling the document; `tui.select.confirm` explicitly selects the highlighted action. `tui.select.pageUp/pageDown` scroll the document, and `tui.editor.cursorLineStart/cursorLineEnd` (normally Home/End) jump to its top/bottom. Mouse wheel scrolling is limited to document rows. Actions are pinned outside the document viewport; adaptive layout compacts metadata and hints before reducing the visible action window, keeping the selected action reachable and visible at tiny sizes. Reviews without multiple actions retain their original scrolling keys.
+
+Space opens enabled document search when that key is available. While active, search input and next/previous/close bindings take precedence and cannot execute an action; pasted content never selects an action. Hints reflect effective bindings. Close search before confirming an action. Cancellation, resize, disposal, and ownership behavior are shared with single-confirmation review.
 
 ### Full-source document copy
 

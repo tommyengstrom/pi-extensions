@@ -18,6 +18,7 @@ export {
   runCustomInteraction,
 } from "./custom-interaction.js";
 export {
+  type DocumentReviewAction,
   type DocumentReviewConfirmation,
   type RunDocumentReviewOptions,
   type RunDocumentReviewResult,

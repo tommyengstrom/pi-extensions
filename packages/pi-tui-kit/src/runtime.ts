@@ -283,9 +283,18 @@ async function runDialogMenu<State, ScreenId extends string, ActionId extends st
         let finished = false;
         while (!finished) {
           const choices = uniqueReviewChoices([
+            ...(screen.actions ?? []).map((action) => ({
+              kind: "action" as const,
+              label: safeMenuText(action.label),
+              itemId: action.id,
+            })),
             ...(pageIndex > 0 ? [{ kind: "previous" as const, label: "Previous" }] : []),
             ...(pageIndex < pages.length - 1 ? [{ kind: "next" as const, label: "Next" }] : []),
-            ...(screen.confirm ? [{ kind: "confirm" as const, label: safeMenuText(screen.confirm.label) }] : []),
+            ...(screen.confirm ? [screen.confirm] : []).map((action) => ({
+              kind: "action" as const,
+              label: safeMenuText(action.label),
+              itemId: action.id,
+            })),
             { kind: "exit" as const, label: dialogExitChoice(screen) },
           ]);
           const pageTitle = [
@@ -308,8 +317,8 @@ async function runDialogMenu<State, ScreenId extends string, ActionId extends st
           } else if (selected.kind === "previous") pageIndex = Math.max(0, pageIndex - 1);
           else if (selected.kind === "next") {
             pageIndex = Math.min(pages.length - 1, pageIndex + 1);
-          } else if (screen.confirm) {
-            const outcome = await interact({ kind: "activate", itemId: screen.confirm.id });
+          } else if (selected.kind === "action") {
+            const outcome = await interact({ kind: "activate", itemId: selected.itemId });
             if (outcome.stale) return { kind: "stale" };
             if (outcome.accepted) {
               navigator.apply(outcome.transition);
@@ -416,10 +425,9 @@ function dialogTitle<ScreenId extends string, ActionId extends string>(screen: M
 
 type DialogRow = { kind: "interaction"; interaction: MenuInteraction; label: string } | { kind: "exit"; label: string };
 
-interface ReviewDialogChoice {
-  kind: "previous" | "next" | "confirm" | "exit";
-  label: string;
-}
+type ReviewDialogChoice =
+  | { kind: "previous" | "next" | "exit"; label: string }
+  | { kind: "action"; label: string; itemId: string };
 
 type BrowseDialogChoice =
   | {

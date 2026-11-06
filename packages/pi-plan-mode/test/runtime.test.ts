@@ -571,12 +571,10 @@ test("real-runtime TUI smoke: automatic document review, dismissal, reopening, t
     assert.equal(stateOf(session).kind, "ready");
     const reopened = session.prompt("/plan");
     await tui.waitForOpen();
-    tui.press("tui.select.confirm");
-    await tui.waitForOpen();
     const actions = tui.render().join("\n");
     assert.match(actions, /Implement in fresh session/);
     assert.match(actions, /Implement here/);
-    assert.equal(f.requests.length, 1, "document confirmation is not implementation approval");
+    assert.equal(f.requests.length, 1, "opening review is not implementation approval");
     tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     await reopened;

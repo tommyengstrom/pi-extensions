@@ -375,6 +375,14 @@ function testingKeybindings(override?: TuiHarnessOptions["keybindings"]) {
           return ["enter"];
         case "tui.select.cancel":
           return ["escape", "ctrl+c"];
+        case "tui.editor.cursorLineStart":
+          return ["home", "ctrl+a"];
+        case "tui.editor.cursorLineEnd":
+          return ["end", "ctrl+e"];
+        case "tui.altScreen.searchNext":
+          return ["enter", "ctrl+g"];
+        case "tui.altScreen.searchClose":
+          return ["escape"];
         default:
           return [];
       }
@@ -406,7 +414,14 @@ function bindingKey(binding: string) {
     case "tui.input.submit":
       return Key.enter;
     case "tui.select.cancel":
+    case "tui.altScreen.searchClose":
       return Key.escape;
+    case "tui.editor.cursorLineStart":
+      return Key.home;
+    case "tui.editor.cursorLineEnd":
+      return Key.end;
+    case "tui.altScreen.searchNext":
+      return Key.enter;
     default:
       return undefined;
   }

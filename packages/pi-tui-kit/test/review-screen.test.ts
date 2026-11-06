@@ -7,7 +7,8 @@ import { plainTuiText as stripVTControlCharacters } from "../../../test/tui-text
 import { formatDocumentLines } from "../src/components/document-formatting.js";
 import { createMenuScreenComponent } from "../src/components/index.js";
 import { defineMenu, type ReviewScreen, runMenu } from "../src/index.js";
-import { createTuiHarness } from "../src/testing/index.js";
+import { resolveMenuScreen } from "../src/model.js";
+import { createRpcHarness, createTuiHarness } from "../src/testing/index.js";
 
 initTheme("dark", false);
 
@@ -1152,6 +1153,153 @@ test("search-disabled review keeps its prior component and disposal behavior", (
   harness.component.dispose?.();
   harness.component.handleInput("q");
   assert.deepEqual(harness.events, []);
+});
+
+const combinedScreen: ReviewScreen<ActionId> = {
+  ...reviewScreen,
+  confirm: undefined,
+  actions: ["Fresh", "Here", "Save", "Continue"].map((label) => ({ id: `raw-${label}`, label, action: "apply" })),
+  content: Array.from({ length: 40 }, (_, index) => `row ${index + 1}`).join("\n"),
+  viewportSize: "adaptive",
+  enableSearch: true,
+};
+
+test("combined review separates remapped action keys from document navigation and mouse regions after resize", () => {
+  const bindings: ReviewKeybindings = {
+    matches(data, binding) {
+      if (binding === "tui.editor.cursorLineStart") return data === "a";
+      if (binding === "tui.editor.cursorLineEnd") return data === "z";
+      return reviewTestKeybindings.matches(data, binding);
+    },
+    getKeys(binding) {
+      if (binding === "tui.editor.cursorLineStart") return ["a"];
+      if (binding === "tui.editor.cursorLineEnd") return ["z"];
+      return reviewTestKeybindings.getKeys(binding);
+    },
+  };
+  const h = reviewComponentHarness(combinedScreen, false, 24, undefined, bindings);
+  const before = plainLines(h.component, 100).filter((line) => line.startsWith("row "));
+  h.component.handleInput("j");
+  assert.deepEqual(
+    plainLines(h.component, 100).filter((line) => line.startsWith("row ")),
+    before,
+  );
+  assert.match(plainRender(h.component, 100), /> Here/u);
+  assert.match(plainRender(h.component, 100), /k\/j actions.*u\/d scroll.*a\/z top\/bottom/u);
+  h.component.handleInput("d");
+  assert.doesNotMatch(plainRender(h.component, 100), /^row 1$/mu);
+  h.component.handleInput("z");
+  assert.match(plainRender(h.component, 100), /row 40/u);
+  h.component.handleInput("a");
+  assert.match(plainRender(h.component, 100), /^row 1$/mu);
+  assert.deepEqual(h.events, []);
+  h.setTerminalRows(14);
+  let frame = plainLines(h.component, 40);
+  const actionRow = frame.findIndex((line) => line.includes("> Here"));
+  assert.equal(reviewMouse(h.component, frame, { type: "wheel", x: 1, y: actionRow, wheelDelta: 1 }, 40), undefined);
+  const documentRow = frame.indexOf("row 1");
+  assert.ok(documentRow >= 0);
+  reviewMouse(h.component, frame, { type: "wheel", x: 1, y: documentRow, wheelDelta: 1 }, 40);
+  assert.doesNotMatch(plainRender(h.component, 40), /^row 1$/mu);
+  h.component.handleInput(" ");
+  h.component.handleInput("rw 20");
+  h.setTerminalRows(22);
+  frame = plainLines(h.component, 60);
+  const searchRow = frame.findIndex((line) => line.includes("Find:"));
+  assert.ok(searchRow >= 0);
+  reviewMouse(h.component, frame, { type: "press", x: 9, y: searchRow }, 60);
+  h.component.handleInput("o");
+  assert.match(plainRender(h.component, 60), /Find:.*row 20.*1\/1/u);
+  h.component.handleInput("l"); // confirmation key is query input during search
+  assert.deepEqual(h.events, []);
+  h.component.handleInput("x");
+  h.component.handleInput("l");
+  assert.deepEqual(h.events, [{ kind: "activate", itemId: "raw-Here" }]);
+});
+
+test("combined review keeps every action reachable and selected row visible at tiny sizes", () => {
+  const h = reviewComponentHarness(combinedScreen);
+  for (const rows of [4, 5, 6, 8, 12, 24]) {
+    h.setTerminalRows(rows);
+    for (const width of [1, 8, 40, 100]) {
+      for (const action of combinedScreen.actions ?? []) {
+        const frame = plainLines(h.component, width);
+        assert.ok(frame.length <= rows - 3, `${rows} rows at ${width} columns`);
+        assert.ok(frame.every((line) => visibleWidth(line) <= width));
+        assert.ok(frame.some((line) => line.startsWith(">")));
+        if (width >= 40) assert.ok(frame.some((line) => line.includes(`> ${action.label}`)));
+        h.component.handleInput("j");
+      }
+    }
+  }
+  assert.deepEqual(h.events, []);
+});
+
+test("declarative multi-action review dispatches stable IDs in TUI and RPC", async () => {
+  for (const mode of ["tui", "rpc"] as const) {
+    const tui = createTuiHarness();
+    const rpc = createRpcHarness([
+      { kind: "select", options: ["Next", "Back", "Next [2]", "Back [2]"], response: "Next [2]" },
+      { kind: "select", response: "Back" },
+    ]);
+    const ctx = createMockContext({
+      mode,
+      hasUI: true,
+      ...(mode === "tui" ? { custom: tui.custom } : { select: rpc.ui.select }),
+    }).ctx;
+    const invoked: string[] = [];
+    const menu = defineMenu<undefined, ScreenId, ActionId>({
+      start: "review",
+      screens: {
+        review: () => ({
+          ...combinedScreen,
+          actions: [
+            { id: "next-action", label: "Next", action: "apply" },
+            { id: "back-action", label: "Back", action: "apply" },
+          ],
+        }),
+      },
+      actions: {
+        apply: ({ itemId }) => {
+          invoked.push(itemId);
+          return { kind: "close" };
+        },
+      },
+    });
+    const running = runMenu(ctx, menu, { getState: () => undefined });
+    if (mode === "tui") {
+      await tui.waitForOpen();
+      tui.press("tui.select.down");
+      tui.press("tui.select.confirm");
+    }
+    assert.deepEqual(await running, { kind: "closed", reason: "close" });
+    assert.deepEqual(invoked, ["back-action"]);
+    if (mode === "rpc") rpc.assertConsumed();
+  }
+});
+
+test("declarative reviews validate action IDs, labels, handlers and exclusive confirmation", () => {
+  for (const screen of [
+    { ...combinedScreen, actions: [] },
+    { ...combinedScreen, confirm: reviewScreen.confirm },
+    { ...combinedScreen, actions: [{ id: "", label: "Apply", action: "apply" }] },
+    { ...combinedScreen, actions: [{ id: "a", label: "\u0001", action: "apply" }] },
+    { ...combinedScreen, actions: [{ id: "a", label: "Apply", action: "missing" }] },
+    {
+      ...combinedScreen,
+      actions: [
+        { id: "duplicate", label: "One", action: "apply" },
+        { id: "duplicate", label: "Two", action: "apply" },
+      ],
+    },
+  ]) {
+    const menu = defineMenu<undefined, ScreenId, string>({
+      start: "review",
+      screens: { review: () => screen },
+      actions: { apply: () => ({ kind: "close" }) },
+    });
+    assert.throws(() => resolveMenuScreen(menu, "review", undefined));
+  }
 });
 
 function reviewComponentHarness(

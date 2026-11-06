@@ -4,6 +4,7 @@ import { safeMenuText } from "./components/rendering.js";
 import { createReviewComponent, reviewDialogPages } from "./components/review.js";
 import { runCustomInteraction } from "./custom-interaction.js";
 import { callErrorReporter, notifyInteractionError } from "./interaction-error.js";
+import { type DocumentReviewAction, validateReviewActions } from "./review-actions.js";
 import {
   type DocumentCopyAction,
   MAX_REVIEW_VIEWPORT_SIZE,
@@ -13,10 +14,14 @@ import {
   type ReviewScreen,
 } from "./types.js";
 
+export type { DocumentReviewAction } from "./review-actions.js";
 export type { DocumentCopyAction, DocumentCopyContext } from "./types.js";
 
 type ExtensionMode = MenuContext["mode"];
-type DocumentReviewValue = { kind: "confirmed" } | { kind: "cancelled"; reason: MenuCloseReason };
+type DocumentReviewValue =
+  | { kind: "confirmed" }
+  | { kind: "selected"; actionId: string }
+  | { kind: "cancelled"; reason: MenuCloseReason };
 
 export interface DocumentReviewConfirmation {
   label: string;
@@ -33,6 +38,8 @@ export interface RunDocumentReviewOptions<Context extends MenuContext = Extensio
   /** Copy the original content in place in TUI mode only. */
   copy?: DocumentCopyAction;
   confirmation?: DocumentReviewConfirmation;
+  /** Mutually exclusive with confirmation; returns the explicitly selected stable ID. */
+  actions?: readonly DocumentReviewAction[];
   hint?: MenuCloseReason;
   signal?: AbortSignal;
   isCurrent?(): boolean;
@@ -41,8 +48,7 @@ export interface RunDocumentReviewOptions<Context extends MenuContext = Extensio
 }
 
 export type RunDocumentReviewResult =
-  | { kind: "confirmed" }
-  | { kind: "cancelled"; reason: MenuCloseReason }
+  | DocumentReviewValue
   | { kind: "stale" }
   | { kind: "unsupported"; mode: ExtensionMode }
   | { kind: "error"; error: unknown };
@@ -94,8 +100,9 @@ async function runTuiDocumentReview<Context extends MenuContext>(
         signal,
         isCurrent: options.isCurrent,
         onEvent: (event) => {
-          if (event.kind === "activate") complete({ kind: "confirmed" });
-          else complete({ kind: "cancelled", reason: event.kind });
+          if (event.kind === "activate") {
+            complete(options.actions ? { kind: "selected", actionId: event.itemId } : { kind: "confirmed" });
+          } else complete({ kind: "cancelled", reason: event.kind });
         },
       }),
   });
@@ -111,6 +118,11 @@ async function runRpcDocumentReview<Context extends MenuContext>(
   let pageIndex = 0;
   for (;;) {
     const choices = uniqueChoices([
+      ...(screen.actions ?? []).map((action) => ({
+        kind: "action" as const,
+        label: safeMenuText(action.label),
+        actionId: action.id,
+      })),
       ...(pageIndex > 0 ? [{ kind: "previous" as const, label: "Previous" }] : []),
       ...(pageIndex < pages.length - 1 ? [{ kind: "next" as const, label: "Next" }] : []),
       ...(screen.confirm ? [{ kind: "confirm" as const, label: safeMenuText(screen.confirm.label) }] : []),
@@ -146,6 +158,7 @@ async function runRpcDocumentReview<Context extends MenuContext>(
     }
     if (selected.kind === "cancel") return { kind: "cancelled", reason: screen.hint ?? "back" };
     if (selected.kind === "confirm") return { kind: "confirmed" };
+    if (selected.kind === "action") return { kind: "selected", actionId: selected.actionId };
     if (selected.kind === "previous") pageIndex = Math.max(0, pageIndex - 1);
     else pageIndex = Math.min(pages.length - 1, pageIndex + 1);
   }
@@ -164,13 +177,16 @@ function reviewScreen<Context extends MenuContext>(
     enableSearch: options.enableSearch,
     copy: options.copy,
     hint: options.hint,
+    actions: options.actions?.map((action) => ({ ...action, action: "confirm" as const })),
     ...(options.confirmation
       ? { confirm: { id: "confirm", label: options.confirmation.label, action: "confirm" as const } }
       : {}),
   };
 }
 
-type RpcChoice = { kind: "previous" | "next" | "confirm" | "cancel"; label: string };
+type RpcChoice =
+  | { kind: "previous" | "next" | "confirm" | "cancel"; label: string }
+  | { kind: "action"; label: string; actionId: string };
 
 function uniqueChoices(choices: readonly RpcChoice[]): RpcChoice[] {
   const used = new Set<string>();
@@ -203,10 +219,7 @@ function validateOptions<Context extends MenuContext>(options: RunDocumentReview
       `Document review viewportSize must be "adaptive" or a positive integer no greater than ${MAX_REVIEW_VIEWPORT_SIZE}`,
     );
   }
-  if (options.confirmation && !safeMenuText(options.confirmation.label)) {
-    return new Error("Document review confirmation label must be displayable");
-  }
-  return undefined;
+  return validateReviewActions(options.confirmation, options.actions);
 }
 
 async function documentReviewError<Context extends MenuContext>(

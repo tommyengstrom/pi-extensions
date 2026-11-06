@@ -50,7 +50,7 @@ function frame(tui: ReturnType<typeof createTuiHarness>): string {
   return stripVTControlCharacters(tui.render().join("\n"));
 }
 
-test("review shows Markdown and path before offering actions; fresh is always first and requires confirmation", async () => {
+test("review shows Markdown, metadata and all actions immediately; fresh is always first and requires confirmation", async () => {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const tui = createTuiHarness({ rows: 32 });
     const running = reviewPlan(
@@ -67,12 +67,10 @@ test("review shows Markdown and path before offering actions; fresh is always fi
     assert.match(frame(tui), /Full plan/u);
     assert.match(frame(tui), /everything/u);
     assert.match(frame(tui), /\/plans\/alpha-v2\.md/u);
-    assert.doesNotMatch(frame(tui), /Implement here/u);
+    assert.match(frame(tui), /Revision: 2/u);
     assert.equal(settled, false);
-    tui.press("tui.select.confirm");
-    await tui.waitForOpen();
     const actions = frame(tui);
-    assert.match(actions, /[→›] Implement in fresh session/u);
+    assert.match(actions, /> Implement in fresh session/u);
     assert.ok(actions.indexOf("Implement in fresh session") < actions.indexOf("Implement here"));
     assert.ok(actions.indexOf("Implement here") < actions.indexOf("Save for later"));
     assert.match(actions, /Continue planning/u);
@@ -101,29 +99,22 @@ test("review has the whole document available for scrolling and remains width-sa
   assert.equal(await running, undefined);
 });
 
-test("Escape from either review stage returns no action", async () => {
-  for (const stage of ["document", "actions"]) {
+test("Escape from any selected review action returns no action", async () => {
+  for (const index of [0, 1, 2, 3]) {
     const tui = createTuiHarness();
     const running = reviewPlan(tuiContext(tui), "Plan", revision, owner().lifecycle);
     await tui.waitForOpen();
-    if (stage === "actions") {
-      tui.press("tui.select.confirm");
-      await tui.waitForOpen();
-    }
+    for (let i = 0; i < index; i++) tui.press("tui.select.down");
     tui.press("tui.select.cancel");
     assert.equal(await running, undefined);
   }
 });
 
-test("RPC review paginates the full source before the explicit action menu", async () => {
+test("RPC review offers all actions with the first document page and preserves pagination", async () => {
+  const actions = ["Implement in fresh session", "Implement here", "Save for later", "Continue planning"];
   const rpc = createRpcHarness([
-    { kind: "select", response: "Next" },
-    { kind: "select", response: "Choose an action" },
-    {
-      kind: "select",
-      options: ["Implement in fresh session", "Implement here", "Save for later", "Continue planning"],
-      response: "Save for later",
-    },
+    { kind: "select", options: [...actions, "Next", "Close"], response: "Next" },
+    { kind: "select", options: [...actions, "Previous", "Close"], response: "Save for later" },
   ]);
   const plan = Array.from({ length: 10 }, (_, index) => `Line ${index + 1}`).join("\n");
   assert.equal(await reviewPlan(rpcContext(rpc), plan, revision, owner().lifecycle), "save");
@@ -136,13 +127,11 @@ test("RPC action results are explicit, including continue and cancellation", asy
   for (const [label, expected] of [
     ["Implement in fresh session", "fresh"],
     ["Implement here", "here"],
+    ["Save for later", "save"],
     ["Continue planning", "continue"],
     [undefined, undefined],
   ] as const) {
-    const rpc = createRpcHarness([
-      { kind: "select", response: "Choose an action" },
-      { kind: "select", response: label },
-    ]);
+    const rpc = createRpcHarness([{ kind: "select", response: label }]);
     assert.equal(await reviewPlan(rpcContext(rpc), "Plan", revision, owner().lifecycle), expected);
     rpc.assertConsumed();
   }
@@ -346,7 +335,7 @@ test("stale RPC responses cannot advance review or return tool selections", asyn
       select: async () => {
         calls += 1;
         session.replace();
-        return operation === "review" ? "Choose an action" : "Apply tool selection";
+        return operation === "review" ? "Implement here" : "Apply tool selection";
       },
     }).ctx;
     const result =

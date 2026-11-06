@@ -24,6 +24,7 @@ interface DocumentCopyOptions {
   document(): CopyDocument | undefined;
   includeConfirm: boolean;
   searchEnabled: boolean;
+  configuredDocumentBoundaries?: boolean;
 }
 
 const STANDARD_BINDINGS = [
@@ -67,8 +68,11 @@ export function createDocumentCopy(options: DocumentCopyOptions) {
   const keys = () => {
     const claimed = [
       "ctrl+c",
-      "home",
-      "end",
+      ...(options.configuredDocumentBoundaries
+        ? (["tui.editor.cursorLineStart", "tui.editor.cursorLineEnd"] as const).flatMap((binding) =>
+            options.keybindings.getKeys(binding).flatMap((key) => canonicalKeyId(key) ?? []),
+          )
+        : ["home", "end"]),
       ...(options.searchEnabled ? ["space"] : []),
       ...[...STANDARD_BINDINGS, ...(options.includeConfirm ? (["tui.select.confirm"] as const) : [])].flatMap(
         (binding) => options.keybindings.getKeys(binding).flatMap((key) => canonicalKeyId(key) ?? []),
