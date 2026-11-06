@@ -2,7 +2,7 @@
   "name": "pi-extensions",
   "version": "0.0.0",
   "private": true,
-  "description": "Personal Pi extension workspace, starting with pi-plan-mode.",
+  "description": "Personal Pi extension workspace with Plan mode and thinking shortcuts.",
   "type": "module",
   "packageManager": "bun@1.4.4",
   "workspaces": [
@@ -10,15 +10,16 @@
   ],
   "pi": {
     "extensions": [
-      "./packages/pi-plan-mode/src/index.ts"
+      "./packages/pi-plan-mode/src/index.ts",
+      "./packages/pi-thinking-shortcuts/src/index.ts"
     ]
   },
   "scripts": {
-    "dev": "bun run build && pi --no-extensions -e ./packages/pi-plan-mode/src/index.ts",
-    "build": "bun run --cwd packages/pi-tui-kit build && bun run --cwd packages/pi-plan-mode build",
+    "dev": "bun run build && pi --no-extensions -e ./packages/pi-plan-mode/src/index.ts -e ./packages/pi-thinking-shortcuts/src/index.ts",
+    "build": "bun run --cwd packages/pi-tui-kit build && bun run --cwd packages/pi-plan-mode build && bun run --cwd packages/pi-thinking-shortcuts build",
     "format": "biome format --write .",
     "lint": "biome lint .",
-    "typecheck": "bun run build && bun run --cwd packages/pi-tui-kit typecheck && bun run --cwd packages/pi-plan-mode typecheck && tsc -p tsconfig.test.json",
+    "typecheck": "bun run build && bun run --cwd packages/pi-tui-kit typecheck && bun run --cwd packages/pi-plan-mode typecheck && bun run --cwd packages/pi-thinking-shortcuts typecheck && tsc -p tsconfig.test.json",
     "test": "bun run build && vitest run",
     "check": "bun run typecheck && biome check . --error-on-warnings && bun run check:boundaries",
     "check:boundaries": "node ./scripts/check-extension-boundaries.mjs",

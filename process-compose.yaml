@@ -37,6 +37,14 @@ processes:
     availability:
       restart: "no"
 
+  test-thinking-shortcuts:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-thinking-shortcuts/test/
+    working_dir: .
+    availability:
+      restart: "no"
+
   test-tui-kit:
     namespace: tests
     disabled: true

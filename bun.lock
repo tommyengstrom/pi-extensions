@@ -32,6 +32,14 @@
         "@earendil-works/pi-tui": "*",
       },
     },
+    "packages/pi-thinking-shortcuts": {
+      "name": "pi-thinking-shortcuts",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+      },
+    },
     "packages/pi-tui-kit": {
       "name": "@narumitw/pi-tui-kit",
       "version": "0.69.0",
@@ -480,6 +488,8 @@
     "partial-json": ["partial-json@0.1.7", "", {}, ""],
 
     "path-key": ["path-key@3.1.1", "", {}, ""],
+
+    "pi-thinking-shortcuts": ["pi-thinking-shortcuts@workspace:packages/pi-thinking-shortcuts"],
 
     "picocolors": ["picocolors@1.1.1", "", {}, ""],
 
