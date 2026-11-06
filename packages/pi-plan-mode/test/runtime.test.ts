@@ -76,7 +76,17 @@ async function fixture(
     assert.equal(options?.apiKey, "offline-test-key", "main and checker requests must use the parent credential");
     requests.push(structuredClone(context.messages));
     const stream = createAssistantMessageEventStream();
-    const calls = replies.shift();
+    const checking = JSON.stringify(context.messages).includes("Assess implementation adherence.");
+    const calls = checking
+      ? [
+          {
+            type: "toolCall" as const,
+            id: "report",
+            name: "submit_adherence_report",
+            arguments: { status: "ok", motivation: "Requirement accounted for. See `src/example.ts:1`." },
+          },
+        ]
+      : replies.shift();
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -103,24 +113,7 @@ async function fixture(
         stream.push({ type: "toolcall_end", contentIndex, toolCall: call, partial: message });
       }
     } else {
-      const checking = JSON.stringify(context.messages).includes("Assess implementation adherence.");
-      const text = checking
-        ? JSON.stringify({
-            status: "adherent",
-            summary: "Requirement accounted for.",
-            requirements: [
-              {
-                requirement: "Implement the change",
-                revision: "1",
-                status: "implemented",
-                evidence: "src/example.ts:1",
-              },
-            ],
-            changes: [],
-            deviations: [],
-            limitations: [],
-          })
-        : "Offline response.";
+      const text = "Offline response.";
       message.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: message });
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
@@ -369,8 +362,9 @@ test("real completion runs one isolated checker and terminates without a main-ag
     assert.equal(JSON.stringify(childRequest).includes("PRIVATE PLANNING CONTENT"), false);
     assert.ok(JSON.stringify(childRequest).includes("Keep the material requirements unchanged."));
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.status, "adherent");
-    assert.deepEqual(toolNames(childRequest), ["find", "grep", "ls", "read"]);
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.status, "ok");
+    assert.deepEqual(toolNames(childRequest), ["find", "grep", "ls", "read", "submit_adherence_report"]);
+    assert.equal(session.getActiveToolNames().includes("submit_adherence_report"), false);
     assert.equal(session.getActiveToolNames().includes("plan_mode_implementation_complete"), false);
     await session.prompt("UNRELATED AFTER COMPLETION");
     await session.prompt("/plan resume");

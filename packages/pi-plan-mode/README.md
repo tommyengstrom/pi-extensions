@@ -139,6 +139,8 @@ Omit `tools` for strict defaults; `[]` means planning helpers only. The former `
 
 Verification settings are read for the next check. Omit `verification.model` to use the current model, or set `{ "provider": "provider-id", "id": "model-id" }`. Automatic checks incur an additional model run; set `verification.automatic` to `false` to opt out.
 
+Checks return a simple verdict—**OK** (green), **Minor issues** (yellow), or **Issues** (red)—and the checker's free-form Markdown motivation. The final report uses provider-enforced strict JSON Schema tool arguments; unsupported providers fail visibly. Execution failures remain separate from verdicts, and recovered inspection errors do not automatically downgrade the assessment.
+
 The checker compares the exact approved baseline and its implementation revisions against repository evidence. It receives scoped implementation user messages upfront and can inspect the implementation transcript to identify user-requested changes and reasons for deviations. This content goes to the selected checker provider. It is **not a general code review**, and findings never trigger an automatic repair loop. See [adherence checks](./docs/adherence-checks.md) for transcript scope, limitations, and tool compatibility.
 
 Two optional user-wide Markdown files customize planning (`getAgentDir()` respects `PI_CODING_AGENT_DIR`):

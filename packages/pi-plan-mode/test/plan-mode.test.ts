@@ -985,14 +985,8 @@ test("handoff sends the reviewed snapshot even when the file changes during revi
 const adherenceResult: VerificationResult = {
   model: { provider: "offline", id: "checker" },
   report: {
-    status: "adherent",
-    summary: "Implemented.",
-    requirements: [
-      { requirement: "Keep material decisions", revision: "1", status: "implemented", evidence: "src/example.ts:1" },
-    ],
-    changes: [],
-    deviations: [],
-    limitations: [],
+    status: "ok",
+    motivation: "Implemented. See `src/example.ts:1`.",
   },
 };
 const implementationOf = (f: Awaited<ReturnType<typeof fixture>>) =>
@@ -1030,7 +1024,7 @@ test("reasonless implementation updates preserve baseline, restore, and verify b
   assert.equal(checked.length, 1);
   assert.equal(checked[0].implementation.revisions.length, 2);
   assert.equal(implementationOf(f)?.phase, "completed");
-  assert.equal(implementationOf(f)?.lastCheck?.status, "adherent");
+  assert.equal(implementationOf(f)?.lastCheck?.status, "ok");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
   await assert.rejects(f.execute("plan_mode_implementation_complete", {}), /not active/);
   await f.command("resume");
@@ -1315,7 +1309,7 @@ test("implementation edits preserve the baseline, clear checks/completion, resto
   await f.execute("plan_mode_implementation_complete", {});
   assert.equal(checked.length, 1);
   assert.equal(checked[0].implementation.revisions.length, 3);
-  assert.equal(implementationOf(f)?.lastCheck?.status, "adherent");
+  assert.equal(implementationOf(f)?.lastCheck?.status, "ok");
 });
 
 test.each(["planning", "implementing"] as const)(

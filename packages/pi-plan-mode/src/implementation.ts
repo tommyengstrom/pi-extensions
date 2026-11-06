@@ -289,11 +289,14 @@ export function registerImplementation(
     }
   }
 
-  pi.registerMessageRenderer(VERIFICATION_MESSAGE, (message) =>
-    renderVerificationResult({
-      content: typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
-      details: message.details,
-    }),
+  pi.registerMessageRenderer(VERIFICATION_MESSAGE, (message, _options, theme) =>
+    renderVerificationResult(
+      {
+        content: typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
+        details: message.details,
+      },
+      theme,
+    ),
   );
 
   function revisionOperation(ctx: ExtensionContext, signal?: AbortSignal) {
@@ -399,7 +402,7 @@ export function registerImplementation(
     description:
       "Signal that tracked implementation and planned verification are finished. Call ALONE. Runs a fresh adherence check unless disabled in settings; does not automatically fix findings.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    renderResult: renderVerificationResult,
+    renderResult: (result, _options, theme) => renderVerificationResult(result, theme),
     async execute(_id, _params, signal, _update, ctx) {
       const source = requireImplementation(ctx);
       const manager = ctx.sessionManager;

@@ -62,7 +62,9 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
       (state.completion !== undefined && typeof state.completion !== "string") ||
       (state.lastCheck !== undefined &&
         (!record(state.lastCheck) ||
-          !["adherent", "deviations_found", "inconclusive", "failed"].includes(String(state.lastCheck.status)) ||
+          !["ok", "minor_issues", "issues", "adherent", "deviations_found", "inconclusive", "failed"].includes(
+            String(state.lastCheck.status),
+          ) ||
           typeof state.lastCheck.timestamp !== "string" ||
           typeof state.lastCheck.revisionHash !== "string" ||
           !/^[a-f0-9]{64}$/.test(state.lastCheck.revisionHash))) ||

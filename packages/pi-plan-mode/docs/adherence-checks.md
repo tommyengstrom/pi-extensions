@@ -10,13 +10,17 @@ The baseline is exactly the revision reviewed for implementation. Every subseque
 
 Reports distinguish:
 
-- **Adherent** — recorded requirements and user changes are accounted for, with sufficient evidence.
-- **Deviations found** — implementation differences, unsupported scope changes, or missing plan updates.
-- **Inconclusive** — insufficient evidence or inspection limitations.
+- **OK** (`ok`, green) — no actionable adherence issues found.
+- **Minor issues** (`minor_issues`, yellow) — limited gaps, concerns, or nonblocking uncertainty.
+- **Issues** (`issues`, red) — material missing requirements, contradictions, unauthorized changes, or inability to make a reliable assessment. The motivation distinguishes inability to verify from a proven implementation defect.
 
 Execution failures, cancellation, missing/tampered history, and malformed model output are not passing checks. General style, correctness, and security review are outside scope unless a finding directly establishes plan nonadherence. A reason alone does not authorize a scope change. A user-requested change implemented without updating the plan is a plan-update failure, not necessarily agent drift.
 
-The report includes file/location evidence, revision references, user-message citations, recorded reasons when available, authorization evidence, and limitations. Reasons are optional: absence alone is not a deviation, and the checker must not invent one. It is an observation of the working tree at check time—not a permanent guarantee. It never starts an automatic repair loop.
+The report has exactly two fields: `status` and `motivation`. The motivation is free-form Markdown, displayed without rewriting its assessment or requiring particular headings. The checker explains its reasoning, cites relevant files and user requests where useful, and reports meaningful uncertainty. Reasons are optional: absence alone is not a deviation, and the checker must not invent one. A recovered tool failure does not automatically change the verdict. The report is an observation of the working tree at check time—not a permanent guarantee. It never starts an automatic repair loop.
+
+The checker submits its result through the private `submit_adherence_report` tool, alone at top level. Its parameters use provider-side JSON Schema constrained sampling with `strict: require`; providers/models that cannot honor this fail visibly rather than silently falling back to prompt-only JSON. Local validation checks structure, not the relationship between the verdict and Markdown prose. Valid submissions terminate the checker; invalid submissions can be corrected within the existing run limits. Assistant prose is never accepted as a substitute. The tool exists only in the checker, not in the main session or the configurable inspection-tool selection.
+
+TUI report headings use semantic success/warning/error colors. RPC and print/JSON retain the explicit status and full Markdown motivation without terminal color codes. Old saved check statuses remain restorable and historical reports retain their text fallback.
 
 ## Completion and further changes
 
@@ -34,7 +38,7 @@ TUI manual checks show a cancellable dialog and progress status. RPC uses suppor
 
 Checker-run failures report the stage, provider/model, turns started, permitted tool calls attempted, last assistant stop reason, and last inspection/failed tool when available. Provider error details are retained as bounded, terminal-safe text in the error recorded by the check; the full child conversation is still not persisted. These diagnostics distinguish caller cancellation, a provider-aborted response, missing responses, the 60-turn and 200-tool-call limits, and invalid reports. Tool-source loading failures identify the extension and its load error.
 
-Malformed report diagnostics give the validation failure and response length without copying report or transcript excerpts. Invalid output that ends at the model's output-token limit points to choosing a checker model with more output capacity. Fix the reported provider/tool configuration issue or choose another checker model in `/plan settings`, then retry `/plan verify`. A failed check is not an implementation-deviation finding.
+A checker that ends without an accepted report submission fails explicitly; diagnostics do not copy report or transcript excerpts. A run that ends at the model's output-token limit points to choosing a checker model with more output capacity. Fix the reported provider/tool configuration issue or choose another checker model in `/plan settings`, then retry `/plan verify`. A failed check is not an implementation-deviation finding.
 
 ## Fresh checker and transcript boundary
 

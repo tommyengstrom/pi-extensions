@@ -24,16 +24,14 @@ const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentToo
 );
 const { createMockContext } = await import("./support.js");
 const { createImplementation, snapshot } = await import("../src/implementation-state.js");
-const { runVerification, parseVerificationReport } = await import("../src/verification.js");
+const { runVerification, parseVerificationReport, renderVerificationResult, renderVerificationReport } = await import(
+  "../src/verification.js"
+);
 const { implementationTranscript } = await import("../src/implementation-transcript.js");
 
 const report: VerificationReport = {
-  status: "adherent",
-  summary: "The requirement is implemented.",
-  requirements: [{ requirement: "Use blue", revision: "2", status: "implemented", evidence: "color.ts:1" }],
-  changes: [],
-  deviations: [],
-  limitations: [],
+  status: "ok",
+  motivation: "The requirement is implemented.\n\nSee `color.ts:1`.",
 };
 
 async function fixture(
@@ -48,6 +46,7 @@ async function fixture(
     repeatTools?: boolean;
     toolsPerTurn?: number;
     reportText?: string;
+    verdict?: VerificationReport;
   } = {},
 ) {
   const cwd = join(root, `project-${Math.random()}`);
@@ -82,6 +81,7 @@ async function fixture(
     const tool =
       options.repeatTools ||
       (requests.length === 1 && options.stopReason !== "error" && options.stopReason !== "aborted");
+    const submit = !tool && !options.invalid && !options.stopReason && options.reportText === undefined;
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -97,8 +97,17 @@ async function fixture(
               arguments: options.badTool ? { path: join(cwd, "should-not-exist"), content: "bad" } : { path },
             }),
           )
-        : [{ type: "text", text: options.reportText ?? (options.invalid ? "not JSON" : JSON.stringify(report)) }],
-      stopReason: tool ? "toolUse" : (options.stopReason ?? "stop"),
+        : submit
+          ? [
+              {
+                type: "toolCall",
+                id: "report",
+                name: "submit_adherence_report",
+                arguments: { ...(options.verdict ?? report) },
+              },
+            ]
+          : [{ type: "text", text: options.reportText ?? (options.invalid ? "not JSON" : JSON.stringify(report)) }],
+      stopReason: tool || submit ? "toolUse" : (options.stopReason ?? "stop"),
       errorMessage: options.errorMessage,
       timestamp: Date.now(),
       usage: {
@@ -118,7 +127,7 @@ async function fixture(
     else
       stream.push({
         type: "done",
-        reason: tool ? "toolUse" : options.stopReason === "length" ? "length" : "stop",
+        reason: tool || submit ? "toolUse" : options.stopReason === "length" ? "length" : "stop",
         message,
       });
     stream.end();
@@ -190,7 +199,7 @@ async function fixture(
 test("real fresh SDK checker delegates current provider, loads project instructions and reads transcript on demand", async () => {
   const f = await fixture();
   const result = await runVerification(f);
-  assert.equal(result.report.status, "adherent");
+  assert.equal(result.report.status, "ok");
   assert.equal(result.model.provider, "plan-check-offline");
   assert.equal(result.usage?.totalTokens, 4);
   assert.equal(f.requests.length, 2);
@@ -207,11 +216,46 @@ test("real fresh SDK checker delegates current provider, loads project instructi
     getCurrentTools(f.requests[0])
       .map((tool) => tool.name)
       .sort(),
-    ["find", "grep", "ls", "read"],
+    ["find", "grep", "ls", "read", "submit_adherence_report"],
   );
+  const submission = getCurrentTools(f.requests[0]).find((tool) => tool.name === "submit_adherence_report");
+  assert.deepEqual(submission?.constrainedSampling, { type: "json_schema", strict: "require" });
+  assert.deepEqual(submission?.parameters, {
+    type: "object",
+    additionalProperties: false,
+    required: ["status", "motivation"],
+    properties: {
+      status: { type: "string", enum: ["ok", "minor_issues", "issues"] },
+      motivation: { type: "string", description: "Your assessment and supporting evidence in Markdown." },
+    },
+  });
   assert.ok(JSON.stringify(f.requests[1]).includes("TRANSCRIPT ONLY RATIONALE"));
   await assert.rejects(stat(f.artifacts[0]), /ENOENT/);
   assert.equal(await readFile(join(f.cwd, "color.ts"), "utf8"), 'export const color = "blue";');
+});
+
+test("all verdicts are accepted without rewriting motivation or severity", async () => {
+  for (const status of ["ok", "minor_issues", "issues"] as const) {
+    const verdict = {
+      status,
+      motivation: "## Assessment\n\nA recovered tool failure. Meaningful caveats explained here.\n",
+    };
+    const f = await fixture({ verdict, badTool: true });
+    const result = await runVerification(f);
+    assert.deepEqual(result.report, verdict);
+  }
+});
+
+test("invalid and batched report submissions are rejected before a valid standalone submission", async () => {
+  for (const toolsPerTurn of [1, 2]) {
+    const f = await fixture({ firstTool: "submit_adherence_report", toolsPerTurn });
+    const result = await runVerification(f);
+    assert.deepEqual(result.report, report);
+    assert.equal(f.requests.length, 2);
+    const results = f.requests[1].filter((message) => message.role === "toolResult");
+    assert.ok(results.length > 0);
+    assert.ok(results.every((message) => message.role === "toolResult" && message.isError));
+  }
 });
 
 test("checker receives meaningful reasonless revisions without invented rationale or unchanged labels", async () => {
@@ -243,8 +287,7 @@ test("checker receives meaningful reasonless revisions without invented rational
   );
   f.implementation.revisions = [baseline, updated, clarified];
   const result = await runVerification(f);
-  assert.equal(result.report.status, "adherent");
-  assert.deepEqual(result.report.limitations, []);
+  assert.deepEqual(result.report, report);
   const user = f.requests[0].find((message) => message.role === "user");
   assert.ok(user);
   const prompt =
@@ -282,7 +325,7 @@ test("delegation resolves parent credentials again after the authentication pref
   });
   try {
     const result = await runVerification(f);
-    assert.equal(result.report.status, "adherent");
+    assert.equal(result.report.status, "ok");
     assert.deepEqual(
       f.requestAuth.map((auth) => auth.apiKey),
       ["refreshed-offline-key", "refreshed-offline-key"],
@@ -292,10 +335,10 @@ test("delegation resolves parent credentials again after the authentication pref
   }
 });
 
-test("unselected mutation tools cannot execute and errors cannot produce an adherent verdict", async () => {
+test("unselected mutation tools cannot execute and the checker owns its assessment of recovered errors", async () => {
   const f = await fixture({ badTool: true });
   const result = await runVerification(f);
-  assert.equal(result.report.status, "inconclusive");
+  assert.equal(result.report.status, "ok");
   await assert.rejects(stat(join(f.cwd, "should-not-exist")), /ENOENT/);
 });
 
@@ -389,19 +432,18 @@ test("turn and tool-call limits report the limit instead of an incidental abort 
   }
 });
 
-test("report failures distinguish empty, invalid JSON, schema, and output-token truncation without leaking text", async () => {
+test("assistant text is never accepted as a report and diagnostics do not leak it", async () => {
   for (const [options, expected] of [
-    [{ reportText: "" }, /returned no report text/],
-    [{ reportText: "PRIVATE_TRANSCRIPT_EVIDENCE not JSON" }, /did not return valid JSON/],
-    [{ reportText: '{"summary":"PRIVATE_TRANSCRIPT_EVIDENCE"}' }, /Invalid adherence report schema/],
+    [{ reportText: "" }, /without an accepted submit_adherence_report/],
+    [{ reportText: "PRIVATE_TRANSCRIPT_EVIDENCE not JSON" }, /without an accepted submit_adherence_report/],
+    [{ reportText: JSON.stringify(report) }, /without an accepted submit_adherence_report/],
     [{ stopReason: "length", reportText: '{"summary":"PRIVATE_TRANSCRIPT_EVIDENCE' }, /output-token limit/],
   ] as const) {
     const f = await fixture(options);
     await assert.rejects(runVerification(f), (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /validating checker report/);
+      assert.match(error.message, /collecting checker report/);
       assert.match(error.message, expected);
-      assert.match(error.message, /Report length: \d+ characters/);
       assert.ok(!error.message.includes("PRIVATE_TRANSCRIPT_EVIDENCE"));
       return true;
     });
@@ -465,7 +507,7 @@ test("reconstructed model-only orchestrators retain deferred callees and nested 
       { name: "inspect_deferred", source: "extension", path: extension, exposure: "deferred" },
     );
     const result = await runVerification(f);
-    assert.equal(result.report.status, forbidden ? "inconclusive" : "adherent");
+    assert.equal(result.report.status, "ok");
     const declared = getCurrentTools(f.requests[0]).map((tool) => tool.name);
     assert.ok(declared.includes("inspect_router"));
     assert.equal(declared.includes("inspect_deferred"), false);
@@ -502,28 +544,87 @@ test("the checker excludes loaded plan editors from direct and nested calls thro
       exposure: "direct",
     });
     const result = await runVerification(f);
-    assert.equal(result.report.status, "inconclusive");
+    assert.equal(result.report.status, "ok");
     assert.ok(getCurrentTools(f.requests[0]).some((tool) => tool.name === "inspect_router"));
     assert.ok(!getCurrentTools(f.requests[0]).some((tool) => tool.name === "plan_mode_edit"));
     await assert.rejects(stat(sentinel), /ENOENT/);
   }
 });
 
-test("report validation rejects contradictory passes and distinguishes plan-update failures", () => {
-  assert.throws(
-    () => parseVerificationReport(JSON.stringify({ ...report, limitations: ["Missing history"] })),
-    /adherent report/,
+test("inspection tools cannot submit a nested report", async () => {
+  const f = await fixture({ firstTool: "inspect_router" });
+  const extension = join(f.cwd, "nested-report.ts");
+  await writeFile(
+    extension,
+    `export default function(pi) {
+    pi.registerTool({ name: "inspect_router", label: "Router", description: "Inspect",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      async execute(id, args, signal, update, ctx) {
+        const outcome = await ctx.executeTool("submit_adherence_report", { status: "issues", motivation: "Nested report must not be accepted" }, {signal});
+        return { ...outcome.result, isError: outcome.isError };
+      }
+    });
+  }`,
   );
-  const deviation = {
-    deviation: "Unrecorded user change",
-    kind: "plan_update",
-    rationale: "User requested blue",
-    authorization: "request",
-    evidence: "color.ts:1",
-  };
-  assert.equal(
-    parseVerificationReport(JSON.stringify({ ...report, status: "deviations_found", deviations: [deviation] }))
-      .deviations[0].kind,
-    "plan_update",
-  );
+  f.implementation.toolIdentities.push({
+    name: "inspect_router",
+    source: "extension",
+    path: extension,
+    exposure: "direct",
+  });
+  const result = await runVerification(f);
+  assert.deepEqual(result.report, report);
+  assert.ok(JSON.stringify(f.requests[1]).includes("Submit the report alone as a top-level tool call"));
+});
+
+test("report rendering colors verdicts and preserves motivation, with safe legacy fallback", async () => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  for (const [status, color] of [
+    ["ok", "success"],
+    ["minor_issues", "warning"],
+    ["issues", "error"],
+  ] as const) {
+    const motivation = "# Evidence\n\n**Keep this explanation**\n\n- `color.ts:1`\n";
+    const result = { report: { status, motivation }, model: { provider: "offline", id: "checker" } };
+    const colors: string[] = [];
+    const component = renderVerificationResult(
+      { content: [], details: result },
+      {
+        fg(role, text) {
+          colors.push(role);
+          return text;
+        },
+      },
+    );
+    assert.deepEqual(colors, [color]);
+    const lines = component.render(100).join("\n");
+    assert.match(lines, /Keep this explanation/);
+    assert.match(lines, /color.ts:1/);
+    assert.ok(renderVerificationReport(result).includes(motivation));
+    assert.equal(result.report.motivation, motivation);
+  }
+  const legacy = renderVerificationResult({
+    content: [{ type: "text", text: "Legacy report remains readable" }],
+    details: { report: { status: "adherent" }, model: { provider: "old", id: "old" } },
+  });
+  assert.match(legacy.render(100).join("\n"), /Legacy report remains readable/);
+});
+
+test("report validation checks only the two-field structure and preserves arbitrary Markdown", () => {
+  for (const status of ["ok", "minor_issues", "issues"]) {
+    const value = {
+      status,
+      motivation: "# Assessment\n\nA recovered grep failure is not a defect.\n\n- **Evidence**: `file.ts:1`\n",
+    };
+    assert.deepEqual(parseVerificationReport(JSON.stringify(value)), value);
+  }
+  for (const value of [
+    {},
+    { ...report, status: "adherent" },
+    { ...report, motivation: 42 },
+    { ...report, limitations: [] },
+  ]) {
+    assert.throws(() => parseVerificationReport(JSON.stringify(value)), /Invalid adherence report/);
+  }
 });
