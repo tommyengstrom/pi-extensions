@@ -57,7 +57,7 @@ There is no direct `implement` route, and no `show`, `export`, or `off` aliases.
 
 ## Keyboard toggle
 
-**Ctrl+Alt+P** toggles directly between planning and normal mode while the agent is idle with no queued messages. Entering behaves like `/plan start`; leaving restores the previous tools without opening review, sending a prompt, or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved revision rather than starting a new workflow.
+**Alt+M** toggles directly between planning and normal mode while the agent is idle with no queued messages. Entering behaves like `/plan start`; leaving restores the previous tools without opening review, sending a prompt, or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved revision rather than starting a new workflow.
 
 Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
 
@@ -67,9 +67,9 @@ Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
 }
 ```
 
-Set `togglePlan` to `null` to disable the shortcut; remove the override to restore **Ctrl+Alt+P**. Run `/reload` or restart Pi after changing it, then check `/hotkeys`. There is no shortcut settings-menu editor or watcher.
+Set `togglePlan` to `null` to disable the shortcut; remove the override to restore **Alt+M**. Run `/reload` or restart Pi after changing it, then check `/hotkeys`. There is no shortcut settings-menu editor or watcher.
 
-**Shift+Tab requires an extra step:** Pi reserves it for `app.thinking.cycle`. Merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json` (preserving other bindings), or move that action to another key, then reload. The default Ctrl+Alt+P needs no global binding changes, though your own bindings or other extensions can still conflict; Pi's conflict diagnostics apply.
+**Shift+Tab requires an extra step:** Pi reserves it for `app.thinking.cycle`. Merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json` (preserving other bindings), or move that action to another key, then reload. The default Alt+M needs no global binding changes, though your own bindings or other extensions can still conflict; Pi's conflict diagnostics apply.
 
 **Ctrl+M is rejected:** terminal control codes alias it to Enter, and Pi's matcher can intercept ordinary prompt submission. Reasoning-effort controls are independent and are not provided by this package. Dialogs retain their own navigation keys; RPC and print/JSON users should use commands.
 

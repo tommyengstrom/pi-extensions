@@ -304,13 +304,15 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
   try {
     const runner = f.runtime.session.extensionRunner;
     const shortcuts = runner.getShortcuts(bindings);
-    const toggle = shortcuts.get("ctrl+alt+p");
+    const toggle = shortcuts.get("alt+m");
     assert.ok(toggle);
     assert.match(toggle.description ?? "", /planning and normal/);
     assert.equal(shortcuts.size, 1);
-    for (const enter of ["\r", "\n", "\u001b[13u"]) assert.equal(matchesKey(enter, "ctrl+alt+p"), false);
-    assert.equal(matchesKey("\u001b[200~pasted\u001b[112;7u\u001b[201~", "ctrl+alt+p"), false);
-    assert.equal(matchesKey("\u001b[112;7u", "ctrl+alt+p"), true);
+    for (const enter of ["\r", "\n", "\u001b[13u"]) assert.equal(matchesKey(enter, "alt+m"), false);
+    assert.equal(matchesKey("\u001b[200~pasted\u001b[109;3u\u001b[201~", "alt+m"), false);
+    assert.equal(matchesKey("\u001b[109;3u", "alt+m"), true);
+    assert.equal(matchesKey("\u001bm", "alt+m"), true);
+    assert.equal(matchesKey("\u001b\r", "alt+m"), false);
     const context = { ...runner.createContext(), mode: "tui" as const };
     const previousTools = f.runtime.session.getActiveToolNames();
     await toggle.handler(context);
@@ -320,7 +322,7 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
     assert.deepEqual(f.runtime.session.getActiveToolNames(), previousTools);
     assert.equal(f.requests.length, 0);
     // A user's reserved binding wins over the extension default.
-    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "ctrl+alt+p" }).size, 0);
+    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "alt+m" }).size, 0);
   } finally {
     await f.dispose();
   }

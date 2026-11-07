@@ -15,7 +15,7 @@
 
 ### Keyboard toggle
 
-- Enable Ctrl+Alt+P by default to toggle directly between planning and normal mode while idle. Leaving restores tools without starting implementation or deleting saved plans.
+- Enable Alt+M by default to toggle directly between planning and normal mode while idle. Leaving restores tools without starting implementation or deleting saved plans.
 - Add file-based `shortcuts.togglePlan` configuration: a key string rebinds it, `null` disables it, and omission restores the default. Changes require `/reload` or restart. Retired top-level shortcut fields remain ignored; Ctrl+M is rejected because it aliases Enter. Shift+Tab requires unbinding or remapping Pi's reserved thinking-cycle action.
 
 ### Breaking changes

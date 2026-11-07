@@ -18,7 +18,7 @@ These are the only supported settings:
 ```json
 {
   "tools": ["read", "grep", "find", "ls"],
-  "shortcuts": { "togglePlan": "ctrl+alt+p" },
+  "shortcuts": { "togglePlan": "alt+m" },
   "verification": {
     "automatic": true,
     "model": { "provider": "provider-id", "id": "model-id" }
@@ -30,7 +30,7 @@ These are the only supported settings:
 | --- | --- | --- |
 | `plansDirectory` | Omitted | Legacy browsing hint only; retained values identify old relative subdirectories. Never changes the location of new series. |
 | `tools` | Omitted | Exact names of explicitly trusted planning tools. Omission uses canonical inspection defaults; `[]` permits only the required helpers. |
-| `shortcuts.togglePlan` | `"ctrl+alt+p"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload. |
+| `shortcuts.togglePlan` | `"alt+m"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload. |
 | `verification.automatic` | `true` | Run a fresh adherence check on explicit implementation completion. Explicit `false` is preserved. |
 | `verification.model` | Omitted | Use the current main-session model at check time, or an explicit `{ provider, id }`. |
 
@@ -42,13 +42,13 @@ Missing settings return defaults without creating a file. There is no watcher: n
 
 ## Keyboard toggle
 
-Ctrl+Alt+P is enabled by default. It enters planning like `/plan start`, or leaves planning (including a ready plan) and restores the previous tools. It never opens review or starts implementation, sends no model message, and preserves your editor draft and saved files. Leaving ends the current workflow; use `/plan saved` to continue a saved revision. Busy agents, queued messages, and open Plan commands prevent toggling rather than scheduling it for later.
+Alt+M is enabled by default. It enters planning like `/plan start`, or leaves planning (including a ready plan) and restores the previous tools. It never opens review or starts implementation, sends no model message, and preserves your editor draft and saved files. Leaving ends the current workflow; use `/plan saved` to continue a saved revision. Busy agents, queued messages, and open Plan commands prevent toggling rather than scheduling it for later.
 
 `shortcuts.togglePlan` accepts Pi key syntax, normalized for case, modifier order, and key aliases. Set it to another key string to rebind, `null` to disable, or remove it to restore the default. This setting is file-only and loaded once during extension initialization: run `/reload` or restart after editing, and inspect `/hotkeys`. Other settings retain their existing read timing. An invalid startup settings file leaves commands/tools registered but disables shortcut registration and reports the error when a UI is available; correct the file and reload.
 
 The default does not conflict with standard Pi bindings. Custom bindings and other extensions can conflict; Pi decides precedence and reports conflicts. This package never edits global keybindings or bypasses reserved actions.
 
-To choose Shift+Tab, set `"shortcuts": { "togglePlan": "shift+tab" }` in this file, and merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json`, preserving unrelated fields. Alternatively remap the native cycle action. Without that step Pi rejects the extension shortcut because Shift+Tab is reserved. No global change is needed for Ctrl+Alt+P.
+To choose Shift+Tab, set `"shortcuts": { "togglePlan": "shift+tab" }` in this file, and merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json`, preserving unrelated fields. Alternatively remap the native cycle action. Without that step Pi rejects the extension shortcut because Shift+Tab is reserved. No global change is needed for Alt+M.
 
 Ctrl+M is rejected because it aliases Enter and Pi's matcher can consume normal prompt submission. Reasoning-effort controls are separate and not provided here. Dialog navigation and paste continue through Pi's native input handling; RPC and noninteractive modes use commands.
 

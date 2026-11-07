@@ -12,7 +12,7 @@ export interface VerificationSettings {
   model?: { provider: string; id: string };
 }
 
-export const DEFAULT_TOGGLE_SHORTCUT: KeyId = "ctrl+alt+p";
+export const DEFAULT_TOGGLE_SHORTCUT: KeyId = "alt+m";
 
 export interface PlanModeSettings {
   /** Omission uses the default binding; null disables it. Loaded once per extension instance. */
