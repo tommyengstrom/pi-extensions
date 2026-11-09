@@ -10,7 +10,7 @@
 
 The required question/completion/edit helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. See [tool selection and trust](./settings.md#tool-selection-and-trust).
 
-`/plan settings` edits future-workflow defaults, not the current selection. Its choices are default tools, reset to strict inspection tools, automatic adherence checks, and the checker model. New plan storage has a fixed layout.
+`/plan settings` edits future-workflow defaults, not the current selection. Its choices are default tools, reset to strict inspection tools, automatic adherence checks, the checker model, and independent progress model/reasoning (including defaults/reset). New plan storage has a fixed layout.
 
 ## Complete, then review
 
@@ -56,6 +56,12 @@ Question/completion helpers are active only in planning; edit is active in plann
 `plan_mode_implementation_complete` must be called alone. It closes implementation tracking and runs a fresh adherence check automatically unless disabled in settings. Ordinary prose and agent pauses do not trigger checks. Findings are reported directly, without automatic fixes or another main-agent response.
 
 Use `/plan verify` for another check of this session's recorded implementation. Use `/plan resume` **before sending further fixes or plan changes** after completion or exit: it opens a new tracked segment without including intervening unrelated conversation. `/plan cancel` cancels a check even while its command is open. See [adherence checks](./adherence-checks.md) for evidence scope and limitations.
+
+## Observe reported progress
+
+`/plan progress` toggles the inline panel during tracked implementation, even while the agent is running, messages are queued, or another Plan command is open. It does not acquire the shared command gate; other commands retain their idle restrictions. The idle menu offers **Show plan progress**. Opening without active tracking explains how to implement a reviewed plan or `/plan resume`. TUI and RPC are supported; print/JSON refuse.
+
+Observation runs only while enabled. Each changed-evidence assessment costs a separate provider request, with a 30-second minimum between starts and only one child at a time. Summaries are bounded, transcript-only reported progress, not independent verification. Close to cancel immediately; errors stop retries until close/reopen. Completion retains a stopped label and last summary, while session/branch changes, exit, reload and shutdown clear it. Resuming never reopens it. `/plan cancel` still cancels only adherence verification. See [live reported progress](../README.md#live-reported-progress) for privacy and evidence boundaries, and [settings](./settings.md) for model defaults and availability.
 
 ## Save, browse, and continue
 

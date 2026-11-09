@@ -12,12 +12,23 @@ export interface VerificationSettings {
   model?: { provider: string; id: string };
 }
 
+export const PROGRESS_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export interface ProgressSettings {
+  model: { provider: string; id: string };
+  thinkingLevel: (typeof PROGRESS_LEVELS)[number];
+}
+export const DEFAULT_PROGRESS: ProgressSettings = {
+  model: { provider: "openai", id: "gpt-6-luna" },
+  thinkingLevel: "low",
+};
+
 export const DEFAULT_TOGGLE_SHORTCUT: KeyId = "alt+m";
 
 export interface PlanModeSettings {
   /** Omission uses the default binding; null disables it. Loaded once per extension instance. */
   shortcuts?: { togglePlan?: KeyId | null };
   verification?: VerificationSettings;
+  progress?: Partial<ProgressSettings>;
   /** Retained only to discover legacy plans; never redirects new series. */
   plansDirectory?: string;
   /** Omitted means canonical read-only built-ins; an empty list means helpers only. */
@@ -40,6 +51,7 @@ export async function readPlanModeSettings(path = planModeSettingsPath()): Promi
 
 export async function updatePlanModeSettings(
   patch: {
+    progress?: { model?: ProgressSettings["model"] | null; thinkingLevel?: ProgressSettings["thinkingLevel"] | null };
     plansDirectory?: string;
     tools?: readonly string[] | null;
     verification?: { automatic?: boolean; model?: VerificationSettings["model"] | null };
@@ -50,6 +62,7 @@ export async function updatePlanModeSettings(
   const { signal } = options;
   // Capture inputs before waiting behind another editor's update.
   const plansDirectory = patch.plansDirectory;
+  const progress = patch.progress ? structuredClone(patch.progress) : undefined;
   const verification = patch.verification ? structuredClone(patch.verification) : undefined;
   const tools =
     patch.tools === undefined || patch.tools === null ? patch.tools : parseSettings({ tools: patch.tools }).tools;
@@ -59,6 +72,11 @@ export async function updatePlanModeSettings(
     if (plansDirectory !== undefined) document.plansDirectory = plansDirectory;
     if (tools === null) delete document.tools;
     else if (tools !== undefined) document.tools = tools;
+    if (progress) {
+      const next = { ...(document.progress as SettingsDocument | undefined), ...progress };
+      for (const key of ["model", "thinkingLevel"] as const) if (next[key] === null) delete next[key];
+      document.progress = next;
+    }
     if (verification) {
       const previous = document.verification as Record<string, unknown> | undefined;
       const next = { ...previous, ...verification };
@@ -128,6 +146,22 @@ function parseSettings(value: unknown): PlanModeSettings {
       )
         throw new Error("Invalid verification.model: provider and id are required");
       settings.verification.model = { provider: fields.provider, id: fields.id };
+    }
+  }
+  if (Object.hasOwn(document, "progress")) {
+    const value = document.progress;
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("Invalid progress settings: expected an object");
+    const fields = value as SettingsDocument;
+    settings.progress = {};
+    if (Object.hasOwn(fields, "model")) {
+      // Reuse the exact model identifier validation without coupling defaults.
+      settings.progress.model = parseSettings({ verification: { model: fields.model } }).verification?.model;
+    }
+    if (Object.hasOwn(fields, "thinkingLevel")) {
+      if (!PROGRESS_LEVELS.includes(fields.thinkingLevel as ProgressSettings["thinkingLevel"]))
+        throw new Error("Invalid progress.thinkingLevel");
+      settings.progress.thinkingLevel = fields.thinkingLevel as ProgressSettings["thinkingLevel"];
     }
   }
   if (Object.hasOwn(document, "tools")) {

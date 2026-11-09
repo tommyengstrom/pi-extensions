@@ -12,6 +12,8 @@ The menu offers:
 - **Reset to strict inspection tools** — remove the override and use canonical built-in defaults.
 - **Automatic adherence checks** — on by default; off disables the completion-triggered checker.
 - **Adherence checker model** — select a provider/model or reset to the current main-session model.
+- **Progress model** — independently choose the observer model or reset to `openai/gpt-6-luna`.
+- **Progress reasoning** — choose a Pi thinking level or reset to `low`.
 
 These are the only supported settings:
 
@@ -22,6 +24,10 @@ These are the only supported settings:
   "verification": {
     "automatic": true,
     "model": { "provider": "provider-id", "id": "model-id" }
+  },
+  "progress": {
+    "model": { "provider": "openai", "id": "gpt-6-luna" },
+    "thinkingLevel": "low"
   }
 }
 ```
@@ -33,6 +39,11 @@ These are the only supported settings:
 | `shortcuts.togglePlan` | `"alt+m"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload. |
 | `verification.automatic` | `true` | Run a fresh adherence check on explicit implementation completion. Explicit `false` is preserved. |
 | `verification.model` | Omitted | Use the current main-session model at check time, or an explicit `{ provider, id }`. |
+
+| `progress.model` | `{ "provider": "openai", "id": "gpt-6-luna" }` | Independent transcript observer chat model; never falls back. |
+| `progress.thinkingLevel` | `"low"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, constrained to advertised model capabilities. |
+
+Progress settings are resolved for each assessment while `/plan progress` is open. Remove either override (or use its menu default option) to reset it. They do not alter the main model or adherence checker. Effective reasoning constraints are shown in the panel. The supplied default is a desired identifier, not an availability guarantee. It must resolve as a chat model; a catalog/configuration exposing only a classifier with that identifier cannot produce this summary. Select an available chat model if necessary. Missing model/credentials, unsupported extension-only providers, and invalid settings produce a panel error and stop automatic retries; close and reopen after correcting them. The 30-second minimum assessment interval is not configurable. See [live progress](../README.md#live-reported-progress) for cost, privacy, evidence limitations and cancellation semantics.
 
 Verification defaults are read at completion/check time, so menu changes affect the next check without restarting tracking. Missing models or authentication fail visibly, never silently switch providers. The checker inherits the current thinking preference, clamped to its model's capabilities. Its model selection does not change the main session's model.
 
@@ -50,7 +61,7 @@ The default does not conflict with standard Pi bindings. Custom bindings and oth
 
 To choose Shift+Tab, set `"shortcuts": { "togglePlan": "shift+tab" }` in this file, and merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json`, preserving unrelated fields. Alternatively remap the native cycle action. Without that step Pi rejects the extension shortcut because Shift+Tab is reserved. No global change is needed for Alt+M.
 
-Ctrl+M is rejected because it aliases Enter and Pi's matcher can consume normal prompt submission. Reasoning-effort controls are separate and not provided here. Dialog navigation and paste continue through Pi's native input handling; RPC and noninteractive modes use commands.
+Ctrl+M is rejected because it aliases Enter and Pi's matcher can consume normal prompt submission. Main-agent reasoning-effort controls are separate; the progress-reasoning setting affects only the observer. Dialog navigation and paste continue through Pi's native input handling; RPC and noninteractive modes use commands.
 
 ## Plan storage and legacy locations
 
@@ -98,7 +109,7 @@ Settings reads are bounded to 64 KiB and require valid UTF-8 and a JSON object. 
 
 Updates reread and validate the existing document, preserve unknown fields, and publish atomically through a temporary file. Updates are ordered within one Pi process, but there is no cross-process settings lock. An invalid existing document is not overwritten to repair it implicitly.
 
-`tools`, `verification`, and `shortcuts.togglePlan` configure current behavior; `plansDirectory` has only the legacy-discovery role described above. Retired top-level thinking, model, shortcut (including `toggleShortcut`), reinjection, shell, and export keys are not interpreted. Unknown fields remain in the document. The unrelated old `plan-mode.json` filename is not read; compatibility with this fork's previous storage does not migrate settings from that file.
+`tools`, `verification`, `progress`, and `shortcuts.togglePlan` configure current behavior; `plansDirectory` has only the legacy-discovery role described above. Retired top-level thinking, model, shortcut (including `toggleShortcut`), reinjection, shell, and export keys are not interpreted. Unknown fields remain in the document. The unrelated old `plan-mode.json` filename is not read; compatibility with this fork's previous storage does not migrate settings from that file.
 
 ## Plan style and user instructions
 

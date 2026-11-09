@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEditToolDefinition } from "@earendil-works/pi-coding-agent";
-import { afterEach, test } from "vitest";
+import { createEditToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { afterEach, test, vi } from "vitest";
 import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import planMode from "../src/plan-mode.js";
 import { createPlanStore, type PlanRevision, type PlanStore, planHash } from "../src/plan-store.js";
 import { readPlanModeBasePrompt } from "../src/planning-instructions.js";
+import type { ProgressRunner } from "../src/progress-runner.js";
 import { buildPlanModePrompt, DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
 import { DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
@@ -33,6 +34,7 @@ async function fixture(
     basePrompt?: string;
     automatic?: boolean;
     verify?: (input: VerificationInput) => Promise<VerificationResult>;
+    progressRunner?: ProgressRunner;
     wrapStore?: (store: PlanStore) => PlanStore;
   } = {},
 ) {
@@ -82,6 +84,7 @@ async function fixture(
     readInstructions: () => instructions,
     readBasePrompt: () => readPlanModeBasePrompt(join(agentDir, "pi-plan-mode-prompt.md")),
     verify: config.verify,
+    progressRunner: config.progressRunner,
     createStore: async (
       directory: string,
       location?: Parameters<typeof createPlanStore>[1],
@@ -991,6 +994,110 @@ const adherenceResult: VerificationResult = {
 };
 const implementationOf = (f: Awaited<ReturnType<typeof fixture>>) =>
   restoreImplementation(f.entries.map((entry) => ({ type: "custom", ...entry })));
+
+test("busy progress toggle bypasses command gate without weakening other guards; completion and tree clean up", async () => {
+  const requests: Parameters<ProgressRunner>[0][] = [];
+  const pending = Promise.withResolvers<string>();
+  const f = await fixture({
+    progressRunner: async (request) => {
+      requests.push(request);
+      return pending.promise;
+    },
+    automatic: false,
+  });
+  await ready(f);
+  f.choose("here");
+  await f.command("");
+  Object.assign(f.ctx, {
+    isIdle: () => false,
+    hasPendingMessages: () => true,
+    modelRegistry: { find: () => ({ reasoning: false, contextWindow: 128000 }) },
+  });
+  vi.useFakeTimers();
+  try {
+    await f.command("progress");
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(requests.length, 1);
+    assert.ok(Array.isArray(f.widgets.get("plan-progress")));
+    await f.command("start");
+    assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+    await f.emit("before_agent_start", promptEvent());
+    await f.emit("input", { text: "next work", source: "rpc" });
+    assert.equal(requests[0].signal.aborted, false);
+    await f.command("cancel");
+    assert.equal(requests[0].signal.aborted, false);
+    await f.command("progress");
+    assert.equal(requests[0].signal.aborted, true);
+    assert.equal(f.widgets.get("plan-progress"), undefined);
+    pending.resolve("- Reported work");
+    await vi.advanceTimersByTimeAsync(0);
+    await f.command("progress");
+    await vi.advanceTimersByTimeAsync(0);
+    await f.execute("plan_mode_implementation_complete", {});
+    assert.match(String(f.widgets.get("plan-progress")), /completed tracking; not verified/);
+    await f.emit("session_tree");
+    assert.equal(f.widgets.get("plan-progress"), undefined);
+  } finally {
+    vi.useRealTimers();
+    await f.emit("session_shutdown");
+  }
+});
+
+test("progress opens and closes while adherence checking holds the shared command gate", async () => {
+  const checking = Promise.withResolvers<VerificationResult>();
+  const started = Promise.withResolvers<void>();
+  let assessments = 0;
+  const f = await fixture({
+    verify: async () => {
+      started.resolve();
+      return checking.promise;
+    },
+    progressRunner: async () => {
+      assessments++;
+      return "- Reported work";
+    },
+  });
+  await ready(f);
+  f.choose("here");
+  await f.command("");
+  const ctx = f.ctx as ExtensionContext;
+  Object.assign(ctx.ui, {
+    select: async (_title: string, _options: string[], options: { signal: AbortSignal }) =>
+      new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(undefined), { once: true })),
+  });
+  Object.assign(ctx, { modelRegistry: { find: () => ({ reasoning: false, contextWindow: 128000 }) } });
+  const verification = f.command("verify");
+  await started.promise;
+  vi.useFakeTimers();
+  try {
+    await f.command("progress");
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(assessments, 1);
+    await f.command("settings");
+    assert.match(f.notifications.at(-1)?.message ?? "", /already open/);
+    await f.command("progress");
+    assert.equal(f.widgets.get("plan-progress"), undefined);
+    checking.resolve(structuredClone(adherenceResult));
+    await verification;
+  } finally {
+    vi.useRealTimers();
+    await f.emit("session_shutdown");
+  }
+});
+
+test("progress refuses non-interactive mode and absent implementation without inference", async () => {
+  const f = await fixture({
+    progressRunner: async () => {
+      throw new Error("must not run");
+    },
+  });
+  await f.command("progress");
+  assert.match(f.notifications.at(-1)?.message ?? "", /No active tracked implementation/);
+  for (const mode of ["print", "json"]) {
+    Object.assign(f.ctx, { mode, hasUI: false });
+    await assert.rejects(async () => f.command("progress"), /TUI or RPC/);
+  }
+});
 
 test("reasonless implementation updates preserve baseline, restore, and verify by default", async () => {
   const checked: VerificationInput[] = [];

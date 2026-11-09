@@ -603,13 +603,17 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         "Reset to strict inspection tools",
         "Automatic adherence checks",
         "Adherence checker model",
+        "Progress model",
+        "Progress reasoning",
       ],
       { signal: current.signal },
     );
     if (!choice || !current.isCurrent()) return;
     idle(ctx);
     if (choice === "Default planning tools") return tools(ctx, true);
-    if (choice === "Automatic adherence checks" || choice === "Adherence checker model")
+    if (
+      ["Automatic adherence checks", "Adherence checker model", "Progress model", "Progress reasoning"].includes(choice)
+    )
       return implementation.settings(ctx, choice, current.signal);
     if (choice === "Reset to strict inspection tools") {
       await updatePlanModeSettings({ tools: null }, { signal: current.signal });
@@ -620,10 +624,20 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   pi.registerCommand("plan", {
     description: "Plan, review numbered revisions, or implement in a fresh session",
     getArgumentCompletions: (prefix) =>
-      ["start", "saved", "tools", "settings", "finalize", "save", "exit", "verify", "resume", "cancel"]
+      ["start", "saved", "tools", "settings", "finalize", "save", "exit", "verify", "resume", "cancel", "progress"]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
+      // Observation is allowed during streaming/queued input and never owns the command gate.
+      if (args.trim().toLowerCase() === "progress") {
+        try {
+          implementation.progress(ctx);
+        } catch (error) {
+          if (!ctx.hasUI) throw error;
+          ctx.ui.notify(terminalText(errorMessage(error)), "error");
+        }
+        return;
+      }
       const internal = /^__review(?:\s|$)/i.test(args.trim());
       if (internal) {
         const request = pendingReview;
@@ -707,6 +721,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
               ? [
                   "Start planning",
                   "Saved plans",
+                  ...(implementation.active(ctx) ? ["Show plan progress"] : []),
                   ...(implementation.state ? ["Verify implementation", "Resume implementation"] : []),
                   "Tools",
                   "Settings",
@@ -715,6 +730,10 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             { signal: current.signal },
           );
           if (!current.isCurrent() || !choice) return;
+          if (choice === "Show plan progress") {
+            implementation.progress(ctx);
+            return;
+          }
           idle(ctx);
           if (choice === "Start planning") await enter(ctx);
           else if (choice === "Saved plans") await browse(ctx);

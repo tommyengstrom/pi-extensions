@@ -15,7 +15,15 @@ import {
 } from "./implementation-state.js";
 import { implementationTranscript } from "./implementation-transcript.js";
 import { createPlanStore, type PlanRevision, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
-import { type PlanModeSettings, readPlanModeSettings, updatePlanModeSettings } from "./settings.js";
+import { createProgressController, progressSnapshot } from "./progress.js";
+import type { ProgressRunner } from "./progress-runner.js";
+import {
+  DEFAULT_PROGRESS,
+  type PlanModeSettings,
+  PROGRESS_LEVELS,
+  readPlanModeSettings,
+  updatePlanModeSettings,
+} from "./settings.js";
 import { PLAN_HELPER_NAMES, resolvePlanTools, standaloneToolCall } from "./tool-policy.js";
 import {
   renderVerificationResult,
@@ -28,6 +36,7 @@ import {
 
 export interface ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
+  progressRunner?: ProgressRunner;
   createStore?: typeof createPlanStore;
   verify?(input: VerificationInput): Promise<VerificationResult>;
 }
@@ -55,6 +64,25 @@ export function registerImplementation(
   const readSettings = dependencies.readSettings ?? readPlanModeSettings;
   const makeStore = dependencies.createStore ?? createPlanStore;
   const verify = dependencies.verify ?? runVerification;
+  const progress = createProgressController({
+    readSettings,
+    runner: dependencies.progressRunner,
+    snapshot: (ctx) =>
+      owner === ctx.sessionManager && state && !planningActive(ctx) ? progressSnapshot(ctx, state) : undefined,
+  });
+  // Defer snapshots until persisted message/boundary updates are visible.
+  pi.on("turn_end", () => {
+    progress.mark();
+  });
+  pi.on("agent_settled", () => {
+    progress.mark();
+  });
+  pi.on("session_compact", () => {
+    progress.mark();
+  });
+  pi.on("message_end", () => {
+    progress.mark();
+  });
 
   function cancel() {
     generation++;
@@ -73,6 +101,7 @@ export function registerImplementation(
   function commit(next: ImplementationState) {
     pi.appendEntry(IMPLEMENTATION_ENTRY, next);
     state = next;
+    progress.mark();
   }
   function active(ctx: ExtensionContext) {
     return owner === ctx.sessionManager && state?.phase === "implementing" && !planningActive(ctx);
@@ -89,12 +118,14 @@ export function registerImplementation(
     pi.setActiveTools(active(ctx) ? [...tools, ...IMPLEMENTATION_HELPERS] : tools);
   }
   function detach(ctx: ExtensionContext) {
+    progress.close();
     cancel();
     if (state && state.phase !== "detached") commit({ ...state, phase: "detached" });
     activate(ctx);
     status(ctx);
   }
   function begin(next: ImplementationState, ctx: ExtensionContext) {
+    progress.close();
     cancel();
     owner = ctx.sessionManager;
     commit(next);
@@ -102,6 +133,7 @@ export function registerImplementation(
     status(ctx);
   }
   function rollback(previous: ImplementationState | undefined, ctx: ExtensionContext) {
+    progress.close();
     cancel();
     pi.appendEntry(IMPLEMENTATION_ENTRY, previous ?? null);
     state = previous;
@@ -109,6 +141,7 @@ export function registerImplementation(
     status(ctx);
   }
   async function restore(ctx: ExtensionContext) {
+    progress.close();
     cancel();
     const manager = ctx.sessionManager;
     owner = manager;
@@ -131,12 +164,17 @@ export function registerImplementation(
   }
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.on("session_shutdown", (_event, ctx) => {
-    if (owner !== ctx.sessionManager) return;
-    cancel();
-    pi.setActiveTools(pi.getActiveTools().filter((name) => !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE)));
-    if (ctx.hasUI) ctx.ui.setStatus("plan-implementation", undefined);
-    owner = undefined;
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const disposed = progress.dispose();
+    if (owner === ctx.sessionManager) {
+      cancel();
+      pi.setActiveTools(
+        pi.getActiveTools().filter((name) => !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE)),
+      );
+      if (ctx.hasUI) ctx.ui.setStatus("plan-implementation", undefined);
+      owner = undefined;
+    }
+    await disposed;
   });
   pi.on("before_agent_start", (event, ctx) => {
     cancel();
@@ -457,6 +495,7 @@ export function registerImplementation(
       return !!operation;
     },
     active,
+    progress: progress.toggle,
     async edit(ctx: ExtensionToolContext, input: PlanEditInput, signal?: AbortSignal) {
       const operation = revisionOperation(ctx, signal);
       const store = await ownedStore(ctx, operation.source);
@@ -547,7 +586,35 @@ export function registerImplementation(
     async settings(ctx: ExtensionContext, choice: string, signal: AbortSignal) {
       const settings = await readSettings();
       signal.throwIfAborted();
-      if (choice === "Automatic adherence checks") {
+      if (choice === "Progress reasoning") {
+        const answer = await ctx.ui.select(
+          "Progress reasoning (constrained to model capabilities)",
+          ["Default (low)", ...PROGRESS_LEVELS],
+          { signal },
+        );
+        if (answer && !signal.aborted)
+          await updatePlanModeSettings(
+            {
+              progress: {
+                thinkingLevel: answer === "Default (low)" ? null : (answer as (typeof PROGRESS_LEVELS)[number]),
+              },
+            },
+            { signal },
+          );
+      } else if (choice === "Progress model") {
+        const available = ctx.modelRegistry.getAvailable();
+        const options = [
+          `Default (${DEFAULT_PROGRESS.model.provider}/${DEFAULT_PROGRESS.model.id})`,
+          ...available.map((model, index) => `${index + 1}. ${sanitizeTerminalText(`${model.provider}/${model.id}`)}`),
+        ];
+        const answer = await ctx.ui.select("Progress observer model", options, { signal });
+        if (!answer || signal.aborted) return;
+        const selected = available[options.indexOf(answer) - 1];
+        await updatePlanModeSettings(
+          { progress: { model: selected ? { provider: selected.provider, id: selected.id } : null } },
+          { signal },
+        );
+      } else if (choice === "Automatic adherence checks") {
         const answer = await ctx.ui.select("Automatic adherence checking", ["On (default)", "Off"], { signal });
         if (answer && !signal.aborted)
           await updatePlanModeSettings({ verification: { automatic: answer === "On (default)" } }, { signal });

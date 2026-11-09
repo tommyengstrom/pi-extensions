@@ -43,7 +43,8 @@ By default, plans are decision briefs for an equally capable implementer who can
 | `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
 | `/plan saved` | Browse the current project's saved series and revisions outside an active workflow. |
 | `/plan tools` | Choose tools and start, or change the current workflow's tools while the agent is idle. |
-| `/plan settings` | Set tool defaults, the checker model, or automatic adherence checking. |
+| `/plan settings` | Set tool defaults, checker options, or independent progress model/reasoning. |
+| `/plan progress` | Toggle reported progress above the editor, including while the agent is busy. |
 | `/plan verify` | Check the current session's tracked implementation with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or exit, before sending fixes. |
 | `/plan cancel` | Cancel an in-progress adherence check. |
@@ -51,7 +52,7 @@ By default, plans are decision briefs for an equally capable implementer who can
 | `/plan save` | Leave a completed workflow with its already-saved revision available for later. |
 | `/plan exit` | Leave Plan mode and restore the previous active tools; saved files remain. |
 
-Commands require an idle agent with no queued messages, except `/plan cancel`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
+Commands require an idle agent with no queued messages, except `/plan cancel` and `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
 
 There is no direct `implement` route, and no `show`, `export`, or `off` aliases. Implementation is selected only after document review. Exact subcommand arguments choose routes; other text is a planning request, so `/plan start a migration` is a prompt. See [command workflows](./docs/command-workflows.md).
 
@@ -71,7 +72,7 @@ Set `togglePlan` to `null` to disable the shortcut; remove the override to resto
 
 **Shift+Tab requires an extra step:** Pi reserves it for `app.thinking.cycle`. Merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json` (preserving other bindings), or move that action to another key, then reload. The default Alt+M needs no global binding changes, though your own bindings or other extensions can still conflict; Pi's conflict diagnostics apply.
 
-**Ctrl+M is rejected:** terminal control codes alias it to Enter, and Pi's matcher can intercept ordinary prompt submission. Reasoning-effort controls are independent and are not provided by this package. Dialogs retain their own navigation keys; RPC and print/JSON users should use commands.
+**Ctrl+M is rejected:** terminal control codes alias it to Enter, and Pi's matcher can intercept ordinary prompt submission. Main-agent reasoning-effort controls are independent; the progress-reasoning setting affects only the observer. Dialogs retain their own navigation keys; RPC and print/JSON users should use commands.
 
 ## Saved plans and revisions
 
@@ -105,6 +106,18 @@ Opening review never starts implementation. Use the configured Up/Down keys to s
 The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan.
 
 A successful handoff ends restricted planning in the source session and establishes branch-aware implementation tracking in the destination; the saved revision remains available through `/plan saved`. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
+
+## Live reported progress
+
+During tracked implementation, `/plan progress` toggles a compact panel above the editor; the idle `/plan` menu also offers **Show plan progress**. TUI and RPC use the same string-array widget. In RPC, explicitly enabling the panel counts as visibility even if the client ignores widgets. Print/JSON commands refuse without launching an observer.
+
+Opening assesses immediately, then only changed recorded implementation evidence or a plan revision triggers another assessment, at least 30 seconds between starts. One short-lived Pi subprocess runs at a time. The previous summary remains visible while updating; the panel shows its snapshot time and revision, not a live verification result. Closing cancels work immediately. Errors stop automatic retries: correct configuration, then close and reopen. Completion stops observation and retains the last summary labeled **completed tracking; not verified**. Session replacement, branch navigation, reload/shutdown, or leaving implementation clears it. Resume never reopens it automatically. `/plan cancel` affects adherence checking only.
+
+**Cost and privacy:** each assessment is a separate provider request. The complete current plan, bounded recent branch-scoped implementation transcript, and fallible previous summary go to the selected progress provider. Planning, abandoned branches, other implementations, and prior adherence reports are excluded by the existing transcript exporter; context edits/provenance boundaries are preserved. Omitted history and unavailable evidence are marked. A plan too large for the conservative budget fails rather than being silently cut. Observer output is neither injected into the implementing agent nor persisted as implementation evidence.
+
+This is **reported progress**, not repository inspection: assistant claims and recorded test/tool results do not establish current repository state. The observer has no tools, extensions, MCP, skills, prompt templates, discovered context files or themes, uses an in-memory session, and receives evidence over stdin. Disabling tools is **not an OS sandbox**; ordinary inherited provider configuration/credential mechanisms still apply. Extension-only providers cannot be recreated and fail rather than enabling extensions.
+
+Defaults are independent `progress.model: { "provider": "openai", "id": "gpt-6-luna" }` and `progress.thinkingLevel: "low"`. Use `/plan settings` to choose/reset them; changes apply to the next assessment, never to the main agent or checker. Missing credentials or unsupported models fail without fallback. The identifier must resolve as a chat model: catalogs/configurations that only expose it as a classifier require selecting another supported progress model. Advertised reasoning constraints are shown in the panel. See [settings](./docs/settings.md).
 
 ## Tools and trust
 

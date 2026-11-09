@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
-import { readPlanModeSettings, updatePlanModeSettings } from "../src/settings.js";
+import { DEFAULT_PROGRESS, readPlanModeSettings, updatePlanModeSettings } from "../src/settings.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -14,6 +14,43 @@ async function path() {
   roots.push(root);
   return join(root, "settings.json");
 }
+
+test("progress defaults and independent overrides/reset preserve unknown fields", async () => {
+  const settingsPath = await path();
+  assert.deepEqual(DEFAULT_PROGRESS, { model: { provider: "openai", id: "gpt-6-luna" }, thinkingLevel: "low" });
+  await writeFile(
+    settingsPath,
+    JSON.stringify({
+      future: true,
+      progress: { future: 42 },
+      verification: { model: { provider: "other", id: "checker" } },
+    }),
+  );
+  await updatePlanModeSettings(
+    { progress: { model: { provider: "custom", id: "observer" }, thinkingLevel: "high" } },
+    { settingsPath },
+  );
+  assert.deepEqual((await readPlanModeSettings(settingsPath)).progress, {
+    model: { provider: "custom", id: "observer" },
+    thinkingLevel: "high",
+  });
+  await updatePlanModeSettings({ progress: { model: null, thinkingLevel: null } }, { settingsPath });
+  const raw = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.deepEqual(raw.progress, { future: 42 });
+  assert.equal(raw.future, true);
+  assert.deepEqual(raw.verification.model, { provider: "other", id: "checker" });
+});
+
+test.each([{ thinkingLevel: "ultra" }, { thinkingLevel: null }, { model: {} }, { model: null }, []])(
+  "invalid progress settings cannot be overwritten: %j",
+  async (progress) => {
+    const settingsPath = await path();
+    const contents = JSON.stringify({ progress });
+    await writeFile(settingsPath, contents);
+    await assert.rejects(updatePlanModeSettings({ progress: { model: null } }, { settingsPath }), /Invalid/);
+    assert.equal(await readFile(settingsPath, "utf8"), contents);
+  },
+);
 
 test("verification defaults on for missing file, object or flag; explicit false survives updates", async () => {
   const settingsPath = await path();
