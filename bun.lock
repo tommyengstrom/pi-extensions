@@ -17,6 +17,13 @@
         "vitest": "^5.0.5",
       },
     },
+    "packages/pi-artifacts": {
+      "name": "pi-artifacts",
+      "version": "0.0.0",
+      "peerDependencies": {
+        "@earendil-works/pi-coding-agent": "*",
+      },
+    },
     "packages/pi-plan-mode": {
       "name": "@narumitw/pi-plan-mode",
       "version": "0.59.6",
@@ -490,6 +497,8 @@
     "partial-json": ["partial-json@0.1.7", "", {}, ""],
 
     "path-key": ["path-key@3.1.1", "", {}, ""],
+
+    "pi-artifacts": ["pi-artifacts@workspace:packages/pi-artifacts"],
 
     "pi-thinking-shortcuts": ["pi-thinking-shortcuts@workspace:packages/pi-thinking-shortcuts"],
 

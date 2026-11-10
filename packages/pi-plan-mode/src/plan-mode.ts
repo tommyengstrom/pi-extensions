@@ -18,7 +18,13 @@ import {
   type PlanStore,
   storedPlanStorage,
 } from "./plan-store.js";
-import { readPlanModeBasePrompt, readPlanModeInstructions } from "./planning-instructions.js";
+import {
+  openPlanModePrompt,
+  planModePromptPath,
+  readPlanModeBasePrompt,
+  readPlanModeInstructions,
+  savePlanModePrompt,
+} from "./planning-instructions.js";
 import { buildPlanModePrompt } from "./prompt.js";
 import {
   answerPlanModeQuestions,
@@ -57,7 +63,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   let commandOpen = false;
   let shortcutStartupError: string | undefined;
   let pendingReview:
-    | { token: string; path: string; current: ReturnType<typeof lifecycle>; queued: boolean }
+    | {
+        token: string;
+        path: string;
+        current: ReturnType<typeof lifecycle>;
+        queued: boolean;
+      }
     | undefined;
   const readSettings = dependencies.readSettings ?? readPlanModeSettings;
   const makeStore = dependencies.createStore ?? createPlanStore;
@@ -146,7 +157,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
 
   async function enter(
     ctx: ExtensionContext,
-    options: { tools?: string[]; series?: string; parent?: PlanRevision; storage?: PlanStorage } = {},
+    options: {
+      tools?: string[];
+      series?: string;
+      parent?: PlanRevision;
+      storage?: PlanStorage;
+    } = {},
   ) {
     idle(ctx);
     if (state.kind !== "idle") return lifecycle(ctx);
@@ -245,7 +261,10 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           : "");
       event.systemPromptOptions.selectedTools = planTools(state.workflow).active;
       if (state.kind === "ready" && event.messageType !== "custom") {
-        commit({ kind: "planning", workflow: { ...state.workflow, parent: state.revision } });
+        commit({
+          kind: "planning",
+          workflow: { ...state.workflow, parent: state.revision },
+        });
         updateStatus(ctx);
       }
     } else {
@@ -283,7 +302,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
     request.queued = true;
     try {
-      pi.sendUserMessage(`/${command.name} __review ${request.token}`, { expandPromptTemplates: true });
+      pi.sendUserMessage(`/${command.name} __review ${request.token}`, {
+        expandPromptTemplates: true,
+      });
     } catch {
       pendingReview = undefined;
       notify(ctx, "Plan ready. Open /plan to review and choose implementation.", "warning");
@@ -324,7 +345,10 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       (event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME || event.toolName === PLAN_MODE_EDIT_TOOL_NAME) &&
       (event.parentToolCallId !== undefined || !standaloneToolCall(ctx, event.toolName))
     )
-      return { block: true, reason: "Planning saves must be called alone as a top-level tool, not nested or batched." };
+      return {
+        block: true,
+        reason: "Planning saves must be called alone as a top-level tool, not nested or batched.",
+      };
   });
 
   pi.registerTool({
@@ -362,7 +386,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const combined = AbortSignal.any(
       [current.signal, signal, ctx.signal].filter((value): value is AbortSignal => !!value),
     );
-    return { source, signal: combined, isCurrent: () => current.isCurrent() && state === source && !combined.aborted };
+    return {
+      source,
+      signal: combined,
+      isCurrent: () => current.isCurrent() && state === source && !combined.aborted,
+    };
   }
 
   async function publishPlan(
@@ -386,19 +414,36 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     try {
       commit({
         kind: "ready",
-        workflow: { ...source.workflow, storage: store.storage, series: revision.series, parent: revision },
+        workflow: {
+          ...source.workflow,
+          storage: store.storage,
+          series: revision.series,
+          parent: revision,
+        },
         revision,
       });
     } catch (error) {
       // Retain the published series for a retry, without claiming that readiness was persisted.
-      state = { ...source, workflow: { ...source.workflow, storage: store.storage, series: revision.series } };
+      state = {
+        ...source,
+        workflow: {
+          ...source.workflow,
+          storage: store.storage,
+          series: revision.series,
+        },
+      };
       throw new Error(
         `Plan saved at ${revision.path}, but ready state could not be persisted. Exit Plan mode, then reopen it through /plan saved. ${errorMessage(error)}`,
       );
     }
     invalidate();
     if (ctx.hasUI) {
-      pendingReview = { token: randomUUID(), path: revision.path, current: lifecycle(ctx), queued: false };
+      pendingReview = {
+        token: randomUUID(),
+        path: revision.path,
+        current: lifecycle(ctx),
+        queued: false,
+      };
     }
     updateStatus(ctx);
     return revision;
@@ -418,7 +463,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       const parsed = normalizePlanModeCompletion(params);
       if (!parsed.ok) throw new Error(parsed.error);
       const store = await storeFor(ctx, operation.source.workflow);
-      const revision = await publishPlan(ctx, operation, store, parsed.plan, { reason: parsed.reason });
+      const revision = await publishPlan(ctx, operation, store, parsed.plan, {
+        reason: parsed.reason,
+      });
       return planModeCompleted(parsed.plan, revision.path);
     },
   });
@@ -447,7 +494,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       if (!operation.isCurrent()) throw new Error("Plan edit cancelled because the session changed.");
       const plan = await store.read(parent);
       const edited = await applyPlanEdits(ctx, params, parent, plan, operation.signal);
-      const revision = await publishPlan(ctx, operation, store, edited.plan, { parentPlan: plan });
+      const revision = await publishPlan(ctx, operation, store, edited.plan, {
+        parentPlan: plan,
+      });
       return planModeEdited(revision, parent.path, edited, true);
     },
   });
@@ -472,12 +521,21 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     } else if (action === "continue") {
       let continued: ReturnType<typeof lifecycle> | undefined;
       if (state.kind === "idle")
-        continued = await enter(ctx, { series: selected.series, parent: selected, storage: storage.storage });
+        continued = await enter(ctx, {
+          series: selected.series,
+          parent: selected,
+          storage: storage.storage,
+        });
       else {
         transition(
           {
             kind: "planning",
-            workflow: { ...state.workflow, storage: storage.storage, series: selected.series, parent: selected },
+            workflow: {
+              ...state.workflow,
+              storage: storage.storage,
+              series: selected.series,
+              parent: selected,
+            },
           },
           ctx,
         );
@@ -550,13 +608,22 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const stores = [store];
     for (const directory of new Set(["plans", ...(settings.plansDirectory ? [settings.plansDirectory] : [])])) {
       try {
-        stores.push(await makeStore(ctx.cwd, directory, undefined, { existingOnly: true }));
+        stores.push(
+          await makeStore(ctx.cwd, directory, undefined, {
+            existingOnly: true,
+          }),
+        );
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
       if (!current.isCurrent()) return;
     }
-    const listings = await Promise.all(stores.map(async (storage) => ({ storage, revisions: await storage.list() })));
+    const listings = await Promise.all(
+      stores.map(async (storage) => ({
+        storage,
+        revisions: await storage.list(),
+      })),
+    );
     const revisions = listings.flatMap((listing) => listing.revisions);
     const ui = await loadUi();
     if (!current.isCurrent()) return;
@@ -594,12 +661,24 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
   }
 
+  async function editPlanningPrompt(ctx: ExtensionContext) {
+    const current = lifecycle(ctx);
+    const path = planModePromptPath();
+    const original = openPlanModePrompt(path);
+    const text = await ctx.ui.editor(`Planning prompt: ${terminalText(path)}`, original);
+    if (!current.isCurrent() || text === undefined) return;
+    idle(ctx);
+    savePlanModePrompt(text, original, path);
+    notify(ctx, "Planning prompt saved for new workflows. Existing workflows retain their prompt snapshot.");
+  }
+
   async function settingsMenu(ctx: ExtensionContext) {
     const current = lifecycle(ctx);
     const choice = await ctx.ui.select(
       "Plan settings",
       [
         "Default planning tools",
+        "Edit planning prompt",
         "Reset to strict inspection tools",
         "Automatic adherence checks",
         "Adherence checker model",
@@ -611,6 +690,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!choice || !current.isCurrent()) return;
     idle(ctx);
     if (choice === "Default planning tools") return tools(ctx, true);
+    if (choice === "Edit planning prompt") return editPlanningPrompt(ctx);
     if (
       ["Automatic adherence checks", "Adherence checker model", "Progress model", "Progress reasoning"].includes(choice)
     )
@@ -624,7 +704,20 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   pi.registerCommand("plan", {
     description: "Plan, review numbered revisions, or implement in a fresh session",
     getArgumentCompletions: (prefix) =>
-      ["start", "saved", "tools", "settings", "finalize", "save", "exit", "verify", "resume", "cancel", "progress"]
+      [
+        "start",
+        "saved",
+        "tools",
+        "settings",
+        "prompt",
+        "finalize",
+        "save",
+        "exit",
+        "verify",
+        "resume",
+        "cancel",
+        "progress",
+      ]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
@@ -694,9 +787,13 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           await enter(ctx);
           return;
         }
-        if (["tools", "settings", "saved", ""].includes(command)) {
+        if (["tools", "settings", "prompt", "saved", ""].includes(command)) {
           if (!ctx.hasUI)
             throw new Error("This Plan menu requires TUI or RPC mode. Use /plan start or /plan <request>.");
+          if (command === "prompt") {
+            await editPlanningPrompt(ctx);
+            return;
+          }
           if (command === "tools") {
             await tools(ctx);
             return;

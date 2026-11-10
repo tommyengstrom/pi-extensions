@@ -29,6 +29,14 @@ processes:
     availability:
       restart: "no"
 
+  test-artifacts:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-artifacts/test/
+    working_dir: .
+    availability:
+      restart: "no"
+
   test-plan-mode:
     namespace: tests
     disabled: true

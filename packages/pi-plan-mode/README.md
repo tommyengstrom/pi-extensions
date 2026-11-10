@@ -36,21 +36,22 @@ By default, plans are decision briefs for an equally capable implementer who can
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `/plan` | Open the planning menu, or review the completed plan. |
-| `/plan start` | Enter Plan mode without sending a model message. |
-| `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
-| `/plan saved` | Browse the current project's saved series and revisions outside an active workflow. |
-| `/plan tools` | Choose tools and start, or change the current workflow's tools while the agent is idle. |
-| `/plan settings` | Set tool defaults, checker options, or independent progress model/reasoning. |
-| `/plan progress` | Toggle reported progress above the editor, including while the agent is busy. |
-| `/plan verify` | Check the current session's tracked implementation with a fresh agent. |
-| `/plan resume` | Resume implementation tracking after completion or exit, before sending fixes. |
-| `/plan cancel` | Cancel an in-progress adherence check. |
+| Command          | Purpose                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `/plan`          | Open the planning menu, or review the completed plan.                                        |
+| `/plan start`    | Enter Plan mode without sending a model message.                                             |
+| `/plan <prompt>` | Start with a request, or send a follow-up to the active planner.                             |
+| `/plan saved`    | Browse the current project's saved series and revisions outside an active workflow.          |
+| `/plan tools`    | Choose tools and start, or change the current workflow's tools while the agent is idle.      |
+| `/plan settings` | Set tool defaults, checker options, or independent progress model/reasoning.                 |
+| `/plan prompt`   | Edit the user planning prompt; create it from the default if missing.                        |
+| `/plan progress` | Toggle reported progress above the editor, including while the agent is busy.                |
+| `/plan verify`   | Check the current session's tracked implementation with a fresh agent.                       |
+| `/plan resume`   | Resume implementation tracking after completion or exit, before sending fixes.               |
+| `/plan cancel`   | Cancel an in-progress adherence check.                                                       |
 | `/plan finalize` | Ask the active planner to resolve a remaining material question or submit the complete plan. |
-| `/plan save` | Leave a completed workflow with its already-saved revision available for later. |
-| `/plan exit` | Leave Plan mode and restore the previous active tools; saved files remain. |
+| `/plan save`     | Leave a completed workflow with its already-saved revision available for later.              |
+| `/plan exit`     | Leave Plan mode and restore the previous active tools; saved files remain.                   |
 
 Commands require an idle agent with no queued messages, except `/plan cancel` and `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
 
@@ -165,7 +166,7 @@ Two optional user-wide Markdown files customize planning (`getAgentDir()` respec
 
 A replacement removes built-in methodology, safety prose, question/completion instructions, and the estimate convention. Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions. Only the extension's `pi_plan_mode` section is replaced—not Pi's overall system prompt, project instructions, or tool declarations. Runtime tool permissions, completion validation, and explicit implementation approval remain enforced; trusted tools are still not sandboxed.
 
-Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, revisions, session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy sessions without a base snapshot fall back once to the current built-in prompt plus their captured guidance, never today's replacement. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. No files are auto-created, and there is no watcher, prompt menu, or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
+Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, revisions, session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy sessions without a base snapshot fall back once to the current built-in prompt plus their captured guidance, never today's replacement. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. Use `/plan prompt` or **Settings → Edit planning prompt** to open the replacement in Pi's editor (TUI or RPC). Missing files are created from the built-in default; existing files, including blank files, are preserved. Submitting saves atomically; cancelling leaves the file unchanged (a newly created template remains). Edits apply only to new workflows. There is no watcher or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
 
 ## License
 

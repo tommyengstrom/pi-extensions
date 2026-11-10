@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, test, vi } from "vitest";
 import {
   MAX_PLAN_MODE_INSTRUCTIONS_BYTES,
+  openPlanModePrompt,
   planModeInstructionsPath,
   planModePromptPath,
   readPlanModeInstructions as readGuidance,
   readPlanModeBasePrompt,
+  savePlanModePrompt,
 } from "../src/planning-instructions.js";
 import { DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
 
@@ -20,9 +22,31 @@ const agentDir = vi.hoisted(() =>
 vi.mock("@earendil-works/pi-coding-agent", () => ({ getAgentDir: agentDir }));
 
 // Keep real temporary-file I/O, while allowing deterministic read failures and stat/read races.
-vi.mock("node:fs", async (importOriginal) => ({ ...(await importOriginal<typeof import("node:fs")>()) }));
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+}));
 
 afterEach(() => vi.restoreAllMocks());
+
+test("prompt editing seeds missing files, preserves existing text, and saves safely", () => {
+  const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-prompt-edit-"));
+  const path = join(directory, "nested", "prompt.md");
+  try {
+    assert.equal(openPlanModePrompt(path), DEFAULT_PLAN_MODE_PROMPT);
+    savePlanModePrompt("  custom guidance\n", DEFAULT_PLAN_MODE_PROMPT, path);
+    assert.equal(openPlanModePrompt(path), "  custom guidance\n");
+    assert.throws(() => savePlanModePrompt("overwrite", DEFAULT_PLAN_MODE_PROMPT, path), /changed on disk/);
+    assert.throws(() => savePlanModePrompt("x".repeat(65537), "  custom guidance\n", path), /64 KiB/);
+    assert.equal(fs.readFileSync(path, "utf8"), "  custom guidance\n");
+    fs.writeFileSync(path, "");
+    assert.equal(openPlanModePrompt(path), "");
+    fs.writeFileSync(path, Buffer.from([0xff]));
+    assert.throws(() => openPlanModePrompt(path), /valid UTF-8/);
+    assert.deepEqual(fs.readFileSync(path), Buffer.from([0xff]));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 describe.each([
   {
@@ -136,7 +160,9 @@ describe.each([
     withInstructionsFile((path) => {
       fs.writeFileSync(path, "Guidance");
       vi.spyOn(fs, "openSync").mockImplementationOnce(() => {
-        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        throw Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        });
       });
       assert.throws(() => readPlanModeInstructions(path), /Unable to read Plan-mode .*EACCES/);
     });

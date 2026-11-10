@@ -32,13 +32,13 @@ These are the only supported settings:
 }
 ```
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `plansDirectory` | Omitted | Legacy browsing hint only; retained values identify old relative subdirectories. Never changes the location of new series. |
-| `tools` | Omitted | Exact names of explicitly trusted planning tools. Omission uses canonical inspection defaults; `[]` permits only the required helpers. |
-| `shortcuts.togglePlan` | `"alt+m"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload. |
-| `verification.automatic` | `true` | Run a fresh adherence check on explicit implementation completion. Explicit `false` is preserved. |
-| `verification.model` | Omitted | Use the current main-session model at check time, or an explicit `{ provider, id }`. |
+| Key                      | Default   | Meaning                                                                                                                                |
+| ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `plansDirectory`         | Omitted   | Legacy browsing hint only; retained values identify old relative subdirectories. Never changes the location of new series.             |
+| `tools`                  | Omitted   | Exact names of explicitly trusted planning tools. Omission uses canonical inspection defaults; `[]` permits only the required helpers. |
+| `shortcuts.togglePlan`   | `"alt+m"` | Toggle planning/normal mode. A Pi key string replaces the default; `null` disables it. Requires reload.                                |
+| `verification.automatic` | `true`    | Run a fresh adherence check on explicit implementation completion. Explicit `false` is preserved.                                      |
+| `verification.model`     | Omitted   | Use the current main-session model at check time, or an explicit `{ provider, id }`.                                                   |
 
 | `progress.model` | `{ "provider": "openai", "id": "gpt-6-luna" }` | Independent transcript observer chat model; never falls back. |
 | `progress.thinkingLevel` | `"low"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, constrained to advertised model capabilities. |
@@ -117,12 +117,12 @@ By default, every completed implementation plan should include a short approxima
 
 Two optional files under `getAgentDir()` (normally `~/.pi/agent`, respecting `PI_CODING_AGENT_DIR`) control the planning text:
 
-| File | Role |
-| --- | --- |
+| File                     | Role                                                                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `pi-plan-mode-prompt.md` | Nonblank content replaces the entire built-in extension planning prompt. Missing or whitespace-only selects the built-in default. |
-| `pi-plan-mode.md` | Appends optional guidance to whichever base prompt was selected. Missing or blank adds nothing. |
+| `pi-plan-mode.md`        | Appends optional guidance to whichever base prompt was selected. Missing or blank adds nothing.                                   |
 
-Both are plain UTF-8 Markdown, not JSON, with a **64 KiB per-file** limit and regular-file checks. Reads are bounded; invalid UTF-8, oversized/nonregular files, and read errors block activation with the offending path rather than silently falling back. Markdown is not expanded; only surrounding whitespace is trimmed. Files are not auto-created. There is no watcher, built-in editor, prompt settings menu, or project-local override.
+Both are plain UTF-8 Markdown, not JSON, with a **64 KiB per-file** limit and regular-file checks. Reads are bounded; invalid UTF-8, oversized/nonregular files, and read errors block activation with the offending path rather than silently falling back. Markdown is not expanded; only surrounding whitespace is trimmed. Ordinary reads never create files. `/plan prompt` (also **Settings → Edit planning prompt**) opens the replacement in Pi's editor in TUI or RPC mode, creating a missing file from the built-in default first. Existing blank files remain blank. Submit to save atomically, or cancel to leave the file unchanged; a newly created template remains on cancellation. Invalid files are not overwritten, and edits detected on disk while the editor is open block saving. Changes affect new workflows only. There is no watcher or project-local override.
 
 ### Appended guidance
 

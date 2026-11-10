@@ -1,5 +1,16 @@
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
 
@@ -23,7 +34,41 @@ export function readPlanModeInstructions(path = planModeInstructionsPath()): str
   return readOptionalMarkdown(path, "instructions");
 }
 
-function readOptionalMarkdown(path: string, role: string): string {
+/** Explicit editing creates only missing files; even existing blank files are preserved. */
+export function openPlanModePrompt(path = planModePromptPath()): string {
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, DEFAULT_PLAN_MODE_PROMPT, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  return readOptionalMarkdown(path, "prompt", false);
+}
+
+/** Validate before atomic replacement, and refuse edits made while the dialog was open. */
+export function savePlanModePrompt(text: string, original: string, path = planModePromptPath()): void {
+  if (Buffer.byteLength(text, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)
+    throw new Error("Planning prompt exceeds the 64 KiB limit.");
+  if (readOptionalMarkdown(path, "prompt", false) !== original)
+    throw new Error("Planning prompt changed on disk. Reopen /plan prompt before saving.");
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function readOptionalMarkdown(path: string, role: string, trim = true): string {
   let descriptor: number | undefined;
   try {
     // Nonblocking open lets fstat reject FIFOs without waiting for a writer.
@@ -47,7 +92,8 @@ function readOptionalMarkdown(path: string, role: string): string {
     }
 
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length)).trim();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
+      return trim ? text.trim() : text;
     } catch (error) {
       throw new Error("file must contain valid UTF-8", { cause: error });
     }
