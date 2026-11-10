@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
+import { artifactGuidance } from "./artifacts.js";
 import { normalizePlanModeCompletion, PLAN_MODE_COMPLETE_PARAMS, renderPlanModeCompletion } from "./completion-tool.js";
 import { applyPlanEdits, PLAN_MODE_EDIT_TOOL_NAME, type PlanEditInput, planModeEdited } from "./edit-tool.js";
 import {
@@ -48,7 +49,7 @@ export function implementationInstructions(state: ImplementationState): string {
   return `# Tracked plan implementation
 Implement the approved plan, preserving unchanged requirements. At the start of this run the recorded plan was revision ${latest.revision.revision} at ${latest.revision.path} (SHA-256 ${latest.hash}). Successful plan_mode_edit or plan_mode_update results supersede this reference immediately. After compaction, or whenever the current revision is uncertain, call plan_mode_implementation_status to recover the authoritative current plan before continuing. Do not assume an older path is still current.
 When the user requests a plan change, including a steering/follow-up request, record it BEFORE implementing the change. Prefer ${PLAN_MODE_EDIT_TOOL_NAME} for localized revisions, using {path, edits: [{oldText, newText}]} against the current revision. It preserves the source and returns a diff and a new revision path; use that path for subsequent edits. For broad replacements, call ${UPDATE} with the COMPLETE replacement plan. Reasons are optional; do not invent one. A clarification without a change needs no revision. Saving a user-requested revision continues implementation without ending the turn or requiring another review dialog. Seek user agreement before an agent-discovered material scope change; never invent approval or rewrite the plan just to hide drift.
-When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal. A fresh adherence checker runs by default, with the plans, implementation user requests and access to the implementation transcript. Its report does not authorize automatic fixes. Do not start a repair loop.`;
+When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal. A fresh adherence checker runs by default, with the plans, implementation user requests and access to the implementation transcript. Its report does not authorize automatic fixes. Do not start a repair loop.${artifactGuidance(latest.revision.artifacts)}`;
 }
 
 /** Separate lifetime from restricted planning: implementation never gets planning's tool gate. */

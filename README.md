@@ -5,6 +5,7 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 ## Packages
 
 - [`packages/pi-plan-mode`](packages/pi-plan-mode): read-only `/plan` collaboration mode.
+- [`packages/pi-artifacts`](packages/pi-artifacts): background text artifact agents with confined native writes and persistent feedback conversations.
 - [`packages/pi-thinking-shortcuts`](packages/pi-thinking-shortcuts): Codex-style **Alt+,** / **Alt+.** to decrease/increase thinking effort.
 - [`packages/pi-tui-kit`](packages/pi-tui-kit): the internal UI library used by Plan mode for menus, questionnaires, status widgets, and other terminal interactions.
 
@@ -12,7 +13,7 @@ All packages retain their source, tests, documentation, and licenses. TUI Kit ha
 
 ## Install from GitHub
 
-With Pi 1.5.0 installed, install **both extensions from one reference**:
+With Pi 1.5.0 installed, install **all three extensions from one reference**:
 
 ```sh
 pi install git:github.com/tommyengstrom/pi-extensions
@@ -20,7 +21,7 @@ pi install git:github.com/tommyengstrom/pi-extensions
 
 Restart Pi or run `/reload`, then use `/plan` and **Alt+,** / **Alt+.**. Only pushed commits are available through GitHub; local changes in this checkout are not installed by that command. Extensions execute with Pi's permissions, so review and trust the source before installation.
 
-Consumers need Git, npm, a Node version compatible with Pi 1.5.0, and enabled installation scripts—**not Bun**, an `npmCommand` override, or a manual build. Pi's default production npm install runs a Node-only root `postinstall`: it transpiles this workspace's TUI Kit to JavaScript and builds Plan mode's split package runtime. Thinking shortcuts remain source-loaded. Pi supplies its own host packages; they are not installed as physical runtime dependencies here.
+Consumers need Git, npm, a Node version compatible with Pi 1.5.0, and enabled installation scripts—**not Bun**, an `npmCommand` override, or a manual build. Pi's default production npm install runs a Node-only root `postinstall`: it transpiles this workspace's TUI Kit to JavaScript and builds Plan mode's split package runtime. Artifacts and thinking shortcuts remain source-loaded. Artifacts require Node's built-in `node:sqlite` support (available in the workspace's Node 26). Pi supplies its own host packages; they are not installed as physical runtime dependencies here.
 
 Update the installed reference with:
 
@@ -45,7 +46,7 @@ process-compose run dev
 
 The flake supplies Bun 1.4.4, Node 26.13.0, and process-compose. `process-compose run dev` attaches Pi directly to the terminal; `process-compose up dev` is the interactive PTY/TUI alternative. The dev job waits for a successful `install` job, which runs `bun install --frozen-lockfile` in this workspace. Use `process-compose run install` from the repository root for installation only.
 
-The dev job runs `bun run dev` here: it builds TUI Kit, then Plan mode, typechecks the source-loaded thinking shortcuts, and starts Pi with only the two local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
+The dev job runs `bun run dev` here: it builds TUI Kit, typechecks artifacts, then builds Plan mode and typechecks thinking shortcuts, and starts Pi with only the three local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
 
 This workspace declares `packageManager: bun@1.4.4` and uses `bun.lock`, not `package-lock.json`. `bunfig.toml` configures a hoisted linker, a three-day minimum release age (excluding the local TUI Kit package), and `run.bun = false` with the system shell. Node remains the runtime; do not use `--bun`. Only `esbuild` is trusted for dependency lifecycle scripts. The root pins it and globally overrides all copies, including transitive ones, to `0.28.2`; this preserves version-specific approval despite Bun's name-only `trustedDependencies`. Review lifecycle approval when changing that version. For intentional dependency/lockfile updates, run `bun install` here and review the resulting changes; regular installs use the frozen process-compose job.
 
@@ -54,6 +55,7 @@ Run checks from the **repository root**:
 ```sh
 process-compose run check           # Builds/static checks, no tests
 process-compose run test-plan-mode  # Plan mode extension tests
+process-compose run test-artifacts  # Artifact extension tests
 process-compose run test-tui-kit    # TUI Kit library tests
 process-compose run test-thinking-shortcuts # Thinking shortcut extension tests
 ```
@@ -63,7 +65,7 @@ These jobs belong to the `tests` namespace and are disabled by default; each com
 Other scripts, also run from the **repository root**:
 
 ```sh
-bun run build                 # TUI Kit, Plan mode, then thinking shortcuts
+bun run build                 # TUI Kit, artifacts, Plan mode, then thinking shortcuts
 bun run typecheck             # Build, then typecheck packages and tests
 bun run format                # Apply Biome formatting
 bun run lint                  # Run Biome linting
@@ -73,7 +75,7 @@ node scripts/test-packaging.mjs # Or: bun run test:packaging (network-backed)
 
 Use `bun run test`, not `bun test` (Bun's different test runner). Do not run builds, checks, or tests concurrently because they rebuild TUI Kit.
 
-The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.0 host. It checks manifest discovery, both extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
+The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.0 host. It checks manifest discovery, all three extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
 
 For local development package-directory loading, build first (Git installation does this automatically):
 

@@ -118,7 +118,7 @@ try {
 
   for (const phase of ["cold", "repeat", "update-cleanup"]) {
     if (phase === "update-cleanup") {
-      for (const packageName of ["pi-tui-kit", "pi-plan-mode", "pi-thinking-shortcuts"]) {
+      for (const packageName of ["pi-tui-kit", "pi-plan-mode", "pi-artifacts", "pi-thinking-shortcuts"]) {
         for (const name of ["dist", "node_modules"]) {
           await rm(join(candidate, "packages", packageName, name), { recursive: true, force: true });
         }

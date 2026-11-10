@@ -2,7 +2,7 @@
   "name": "pi-extensions",
   "version": "0.0.0",
   "private": true,
-  "description": "Personal Pi extension workspace with Plan mode and thinking shortcuts.",
+  "description": "Personal Pi extension workspace with Plan mode, scoped artifacts, and thinking shortcuts.",
   "type": "module",
   "packageManager": "bun@1.4.4",
   "workspaces": [
@@ -11,13 +11,14 @@
   "pi": {
     "extensions": [
       "./packages/pi-plan-mode/src/index.ts",
+      "./packages/pi-artifacts/src/index.ts",
       "./packages/pi-thinking-shortcuts/src/index.ts"
     ]
   },
   "scripts": {
     "postinstall": "node ./scripts/build-install-runtime.mjs",
     "test:packaging": "node ./scripts/test-packaging.mjs",
-    "dev": "bun run build && pi --no-extensions -e ./packages/pi-plan-mode/src/index.ts -e ./packages/pi-thinking-shortcuts/src/index.ts",
+    "dev": "bun run build && pi --no-extensions -e ./packages/pi-plan-mode/src/index.ts -e ./packages/pi-artifacts/src/index.ts -e ./packages/pi-thinking-shortcuts/src/index.ts",
     "build": "bun run --cwd packages/pi-tui-kit build && bun run --cwd packages/pi-artifacts build && bun run --cwd packages/pi-plan-mode build && bun run --cwd packages/pi-thinking-shortcuts build",
     "format": "biome format --write .",
     "lint": "biome lint .",
@@ -33,9 +34,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.3",
-    "@earendil-works/pi-ai": "1.5.0",
-    "@earendil-works/pi-coding-agent": "1.5.0",
-    "@earendil-works/pi-tui": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.1",
+    "@earendil-works/pi-coding-agent": "1.5.1",
+    "@earendil-works/pi-tui": "1.5.1",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"

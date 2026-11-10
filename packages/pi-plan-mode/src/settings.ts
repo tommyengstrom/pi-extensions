@@ -29,6 +29,8 @@ export interface PlanModeSettings {
   shortcuts?: { togglePlan?: KeyId | null };
   verification?: VerificationSettings;
   progress?: Partial<ProgressSettings>;
+  /** Independent naming request; omission follows the configured progress model. */
+  naming?: { model?: ProgressSettings["model"] };
   /** Retained only to discover legacy plans; never redirects new series. */
   plansDirectory?: string;
   /** Omitted means canonical read-only built-ins; an empty list means helpers only. */
@@ -52,6 +54,7 @@ export async function readPlanModeSettings(path = planModeSettingsPath()): Promi
 export async function updatePlanModeSettings(
   patch: {
     progress?: { model?: ProgressSettings["model"] | null; thinkingLevel?: ProgressSettings["thinkingLevel"] | null };
+    naming?: { model?: ProgressSettings["model"] | null };
     plansDirectory?: string;
     tools?: readonly string[] | null;
     verification?: { automatic?: boolean; model?: VerificationSettings["model"] | null };
@@ -64,6 +67,7 @@ export async function updatePlanModeSettings(
   const plansDirectory = patch.plansDirectory;
   const progress = patch.progress ? structuredClone(patch.progress) : undefined;
   const verification = patch.verification ? structuredClone(patch.verification) : undefined;
+  const naming = patch.naming ? structuredClone(patch.naming) : undefined;
   const tools =
     patch.tools === undefined || patch.tools === null ? patch.tools : parseSettings({ tools: patch.tools }).tools;
   return enqueueMutation(settingsPath, async () => {
@@ -76,6 +80,11 @@ export async function updatePlanModeSettings(
       const next = { ...(document.progress as SettingsDocument | undefined), ...progress };
       for (const key of ["model", "thinkingLevel"] as const) if (next[key] === null) delete next[key];
       document.progress = next;
+    }
+    if (naming) {
+      const next = { ...(document.naming as SettingsDocument | undefined), ...naming };
+      if (next.model === null) delete next.model;
+      document.naming = next;
     }
     if (verification) {
       const previous = document.verification as Record<string, unknown> | undefined;
@@ -163,6 +172,15 @@ function parseSettings(value: unknown): PlanModeSettings {
         throw new Error("Invalid progress.thinkingLevel");
       settings.progress.thinkingLevel = fields.thinkingLevel as ProgressSettings["thinkingLevel"];
     }
+  }
+  if (Object.hasOwn(document, "naming")) {
+    const value = document.naming;
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("Invalid naming settings: expected an object");
+    const fields = value as SettingsDocument;
+    settings.naming = {};
+    if (Object.hasOwn(fields, "model"))
+      settings.naming.model = parseSettings({ verification: { model: fields.model } }).verification?.model;
   }
   if (Object.hasOwn(document, "tools")) {
     const tools = document.tools;

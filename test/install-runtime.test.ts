@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { loadInstallBuilder, withInstallOutputs } from "./install-runtime-support.js";
 
-test("Git manifest supplies a Node-only production build and discovers both source extensions", async () => {
+test("Git manifest supplies a Node-only production build and discovers all three source extensions", async () => {
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(manifest.dependencies.esbuild, "0.28.2");
   assert.equal(manifest.devDependencies.esbuild, undefined);
@@ -13,6 +13,7 @@ test("Git manifest supplies a Node-only production build and discovers both sour
   assert.equal(manifest.scripts.postinstall, "node ./scripts/build-install-runtime.mjs");
   assert.deepEqual(manifest.pi.extensions, [
     "./packages/pi-plan-mode/src/index.ts",
+    "./packages/pi-artifacts/src/index.ts",
     "./packages/pi-thinking-shortcuts/src/index.ts",
   ]);
   for (const path of manifest.pi.extensions) await access(path);

@@ -30,6 +30,8 @@ function createInlineHost() {
     defaultEditor: {},
     keybindings: getKeybindings(),
     extensionDialogs: [],
+    // Pi 1.5.1 resets overlays as well as inline dialogs. This fixture mounts no overlays.
+    extensionOverlays: new Map(),
     editorContainer: { clear: noop, addChild: noop },
     programStatus: {
       setBlocked(_source: string, status: Blocked) {

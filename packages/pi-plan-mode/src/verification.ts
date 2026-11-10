@@ -19,6 +19,7 @@ import {
 import { Container, Text } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { Type } from "typebox";
+import { ARTIFACT_TOOLS } from "./artifacts.js";
 import { renderPlanModeCompletion } from "./completion-tool.js";
 import { IMPLEMENTATION_HELPERS, type ImplementationState, record, type ToolIdentity } from "./implementation-state.js";
 import { type TranscriptSnapshot, writeTranscriptArtifact } from "./implementation-transcript.js";
@@ -64,11 +65,13 @@ Choose ok when the implementation follows the approved plan with no actionable a
 Write your motivation freely in Markdown: explain the assessment, cite relevant repository locations and user requests where useful, and state meaningful uncertainty honestly. No specific headings or checklist structure are required. A recovered inspection-tool failure is not itself an implementation issue. Limited nonblocking uncertainty belongs under minor_issues; inability to make a reliable assessment belongs under issues, clearly described as inability to verify rather than a proven implementation defect.`;
 
 export function toolIdentities(all: readonly ToolInfo[], names: readonly string[]): ToolIdentity[] {
-  return names.map((name) => {
-    const tool = all.find((tool) => tool.name === name);
-    if (!tool || tool.exposure === "hidden") throw new Error(`Verification tool unavailable: ${name}`);
-    return { name, source: tool.sourceInfo.source, path: tool.sourceInfo.path, exposure: tool.exposure };
-  });
+  return names
+    .filter((name) => !ARTIFACT_TOOLS.includes(name))
+    .map((name) => {
+      const tool = all.find((tool) => tool.name === name);
+      if (!tool || tool.exposure === "hidden") throw new Error(`Verification tool unavailable: ${name}`);
+      return { name, source: tool.sourceInfo.source, path: tool.sourceInfo.path, exposure: tool.exposure };
+    });
 }
 
 function sameTool(expected: ToolIdentity, actual: ToolInfo | undefined): boolean {
@@ -182,8 +185,8 @@ export async function runVerification(input: VerificationInput): Promise<Verific
     throw new Error(
       `Verification authentication failed for ${diagnosticText(`${selected.provider}/${selected.id}`)}: ${diagnosticText(auth.error)}. Check the provider credentials or choose a checker model in /plan settings.`,
     );
-  const identities = implementation.toolIdentities;
-  const forbidden = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS]);
+  const identities = implementation.toolIdentities.filter((tool) => !ARTIFACT_TOOLS.includes(tool.name));
+  const forbidden = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS, ...ARTIFACT_TOOLS]);
   const allowed = new Set(identities.map((tool) => tool.name).filter((name) => !forbidden.has(name)));
   // Full transcript access is mandatory. Do not assume arbitrary tool annotations imply file access.
   if (!allowed.has("read"))

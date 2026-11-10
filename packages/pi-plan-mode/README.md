@@ -8,7 +8,7 @@ Explore a codebase, resolve important questions, and review an implementation-re
 
 This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts are not supported. This fork retains compatibility with its previous path-hashed plan storage and captured workflow locations without moving files. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
 
-Install this fork together with thinking shortcuts using `pi install git:github.com/tommyengstrom/pi-extensions`, then restart or `/reload`. Git installation builds the runtime automatically with Node and npm; Bun and manual preparation are not consumer requirements. See the [workspace installation guide](../../README.md#install-from-github) for updates and pinning.
+Install this fork together with artifacts and thinking shortcuts using `pi install git:github.com/tommyengstrom/pi-extensions`, then restart or `/reload`. Git installation builds the runtime automatically with Node and npm; Bun and manual preparation are not consumer requirements. See the [workspace installation guide](../../README.md#install-from-github) for updates and pinning.
 
 For local development, from the repository root run the managed job:
 
@@ -22,7 +22,7 @@ To load an already-built checkout from the repository root:
 ./node_modules/.bin/pi --no-extensions -e ./packages/pi-plan-mode
 ```
 
-Load only extensions you trust: they run with Pi's operating-system permissions. See the [workspace guide](../../README.md) for builds and validation. The package directory loads its generated `dist/index.ts` entrypoint; build an unbuilt local development checkout before loading that directory. The Git package's root manifest loads both source entrypoints and automatically prepares their runtime dependencies.
+Load only extensions you trust: they run with Pi's operating-system permissions. See the [workspace guide](../../README.md) for builds and validation. The package directory loads its generated `dist/index.ts` entrypoint; build an unbuilt local development checkout before loading that directory. The Git package's root manifest loads all three source entrypoints and automatically prepares their runtime dependencies.
 
 ## Quick start
 
@@ -33,6 +33,39 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 5. Implementation remains tracked. Before implementing requested changes, the agent saves localized revisions with `plan_mode_edit` or complete replacements with `plan_mode_update`, then continues without another approval dialog. Reasons are optional. It finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**. Use `/plan verify` to check again, or `/plan resume` before requesting further implementation changes.
 
 By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. Each completed plan should include a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Revisions update the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
+
+## Background artifacts
+
+Load `pi-artifacts` alongside Plan mode and select the complete tool set in `/plan tools`:
+`artifact_create`, `artifact_update`, `artifact_status`, `artifact_wait`, and `artifact_cancel`.
+`/plan settings` saves these as future defaults; installation does not change the default
+inspection-only selection. The parent remains directly read-only; its child session owns
+confined native mutation tools independently.
+
+Launch a focused brief once user-facing requirements are clear, continue technical
+planning during generation, and wait only at an actual dependency or at the end.
+Both planning save tools refuse queued/running associated work **without publishing
+or scheduling review**. Failures require a retry or explicit user agreement through
+`/plan artifacts omit <jobId>`; partial files are never presented as successful artifacts.
+The implementation-phase requirement to record plan changes is not gated on artifacts.
+
+Each workflow has a stable workspace under the saved-plan directory:
+`artifacts/<workspace-id>/`. Create in a new or empty child directory. Structured
+claims and results survive restoration, compaction, saved-plan continuation, and fresh
+implementation handoff. Review lists identifiers, directories, and useful file paths.
+The handoff carries references, not HTML bodies or child conversations. Capture important
+design decisions in the plan Markdown too.
+
+Artifacts are **live files, not snapshots**: historical revisions refer to latest contents.
+Continuing an older plan continues its live artifacts. Use another artifact directory for
+an independent alternative. Exiting Plan mode cancels its outstanding jobs, retaining
+partial output and history. Adherence checking excludes every artifact tool, even when
+selected for planning; it can inspect referenced files without generating artifacts.
+
+Captured and replacement planning prompts are preserved. Start a new workflow with the
+updated default, or deliberately update a replacement prompt to include the artifact
+exception and wait-at-the-end protocol. See the [artifact package](../pi-artifacts/README.md)
+for persistence, cost, tool-boundary, and untrusted HTML details.
 
 ## Commands
 
@@ -51,6 +84,7 @@ By default, plans are decision briefs for an equally capable implementer who can
 | `/plan cancel`   | Cancel an in-progress adherence check.                                                       |
 | `/plan finalize` | Ask the active planner to resolve a remaining material question or submit the complete plan. |
 | `/plan save`     | Leave a completed workflow with its already-saved revision available for later.              |
+| `/plan artifacts omit <jobId>` | Explicitly agree to omit a failed/cancelled/interrupted artifact from readiness. |
 | `/plan exit`     | Leave Plan mode and restore the previous active tools; saved files remain.                   |
 
 Commands require an idle agent with no queued messages, except `/plan cancel` and `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.

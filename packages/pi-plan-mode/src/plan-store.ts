@@ -5,6 +5,7 @@ import { lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises"
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
 import { normalizePlanModeCompletion, PLAN_MODE_MAX_CHARS } from "./completion-tool.js";
 
 export interface RevisionHistory {
@@ -23,6 +24,7 @@ export interface PlanRevision {
   path: string;
   title: string;
   history?: RevisionHistory;
+  artifacts?: PlanArtifacts;
 }
 
 /** Persisted location: legacy paths are scoped to the current canonical project. */
@@ -58,6 +60,7 @@ export interface PlanStore {
       parent?: PlanRevision;
       parentPlan?: string;
       reason?: string;
+      artifacts?: PlanArtifacts;
       isCurrent?: () => boolean;
       signal?: AbortSignal;
     },
@@ -71,7 +74,26 @@ const MAX_SERIES_LENGTH = 120;
 const MAX_PLAN_BYTES = PLAN_MODE_MAX_CHARS * 3 + 32_768;
 const METADATA_PREFIX = "<!-- pi-plan-revision-v1:";
 
-function decodeDocument(document: string): { plan: string; history?: RevisionHistory } {
+const ENVELOPE_PREFIX = "<!-- pi-plan-document-v2:";
+function decodeDocument(document: string): { plan: string; history?: RevisionHistory; artifacts?: PlanArtifacts } {
+  if (document.startsWith(ENVELOPE_PREFIX)) {
+    const end = document.indexOf(" -->\n");
+    if (end < 0 || end > 32_768) throw new InvalidPlanFile("Invalid document metadata.");
+    let value: { version?: unknown; history?: RevisionHistory; artifacts?: PlanArtifacts };
+    try {
+      value = JSON.parse(Buffer.from(document.slice(ENVELOPE_PREFIX.length, end), "base64").toString("utf8"));
+    } catch {
+      throw new InvalidPlanFile("Invalid document metadata.");
+    }
+    if (value?.version !== 2 || (value.artifacts !== undefined && !validPlanArtifacts(value.artifacts)))
+      throw new InvalidPlanFile("Invalid artifact metadata.");
+    const decoded = value.history
+      ? decodeDocument(
+          `${METADATA_PREFIX}${Buffer.from(JSON.stringify(value.history)).toString("base64")} -->\n${document.slice(end + 5)}`,
+        )
+      : { plan: document.slice(end + 5) };
+    return { ...decoded, ...(value.artifacts ? { artifacts: value.artifacts } : {}) };
+  }
   if (!document.startsWith(METADATA_PREFIX)) return { plan: document };
   const end = document.indexOf(" -->\n");
   if (end < 0 || end > 32_768) throw new InvalidPlanFile("Invalid revision metadata.");
@@ -146,6 +168,8 @@ export async function createPlanStore(
     if (revision.path !== expectedPath) throw new Error("Plan revision does not belong to this store.");
     await checkDirectory();
     const document = await readPlanFile(expectedPath);
+    if (JSON.stringify(document.artifacts) !== JSON.stringify(revision.artifacts))
+      throw new Error("Plan artifact metadata has changed.");
     if (JSON.stringify(document.history) !== JSON.stringify(revision.history))
       throw new Error("Plan revision metadata has changed.");
     return document.plan;
@@ -159,8 +183,14 @@ export async function createPlanStore(
       if (!parsed || !entry.isFile()) continue;
       const path = join(directory, entry.name);
       try {
-        const { plan, history } = await readPlanFile(path);
-        revisions.push({ ...parsed, path, title: planTitle(plan), ...(history ? { history } : {}) });
+        const { plan, history, artifacts } = await readPlanFile(path);
+        revisions.push({
+          ...parsed,
+          path,
+          title: planTitle(plan),
+          ...(history ? { history } : {}),
+          ...(artifacts ? { artifacts } : {}),
+        });
       } catch (error: unknown) {
         // A removed, malformed, oversized, or symlinked file is not a saved plan.
         if (!(error instanceof InvalidPlanFile) && !hasCode(error, "ENOENT") && !hasCode(error, "ELOOP")) throw error;
@@ -173,7 +203,7 @@ export async function createPlanStore(
     const normalized = normalizePlanModeCompletion({ plan });
     if (!normalized.ok) throw new Error(normalized.error);
     const content = normalized.plan;
-    if (content.startsWith(METADATA_PREFIX))
+    if (content.startsWith(METADATA_PREFIX) || content.startsWith(ENVELOPE_PREFIX))
       throw new Error("Plan body must not begin with reserved revision metadata.");
     const title = planTitle(content);
     let history: RevisionHistory | undefined;
@@ -190,7 +220,13 @@ export async function createPlanStore(
         ...(reason ? { reason } : {}),
       };
     }
-    const header = history ? `${METADATA_PREFIX}${Buffer.from(JSON.stringify(history)).toString("base64")} -->\n` : "";
+    const artifacts = options.artifacts ?? options.parent?.artifacts;
+    if (artifacts && !validPlanArtifacts(artifacts)) throw new Error("Invalid plan artifact metadata.");
+    const header = artifacts?.references.length
+      ? `${ENVELOPE_PREFIX}${Buffer.from(JSON.stringify({ version: 2, history, artifacts })).toString("base64")} -->\n`
+      : history
+        ? `${METADATA_PREFIX}${Buffer.from(JSON.stringify(history)).toString("base64")} -->\n`
+        : "";
     if (header.length > 32_768) throw new Error("Revision metadata exceeds 32768 bytes.");
     const document = header + content;
     // Capture once per new series, not once per publication retry or revision.
@@ -245,7 +281,14 @@ export async function createPlanStore(
           // anything. The short synchronous syscall leaves no cancellation gap between
           // the ownership check and publication. EEXIST retries work across processes.
           linkSync(temporaryPath, path);
-          return { series, revision, path, title, ...(history ? { history } : {}) };
+          return {
+            series,
+            revision,
+            path,
+            title,
+            ...(history ? { history } : {}),
+            ...(artifacts?.references.length ? { artifacts } : {}),
+          };
         } catch (error: unknown) {
           if (!hasCode(error, "EEXIST")) throw error;
         }

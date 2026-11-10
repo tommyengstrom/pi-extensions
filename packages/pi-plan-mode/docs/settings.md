@@ -103,6 +103,28 @@ The previous active-tool selection is restored when planning ends. You do not ne
 
 **Trust warning:** selecting nondefault tools—including `bash`, `powershell`, `write`, or a core-name override—trusts their implementation and arguments. There is no shell parser, command filter, or automatic side-effect analysis. The default planning prompt instructs the planner not to mutate the project, but trusted tools can execute code or modify local and external state. Read-only annotations are hints, not guarantees. Plan mode is not an OS sandbox and does not prevent disclosure of data Pi can read.
 
+### Background artifact tools
+
+With `pi-artifacts` loaded, the recommended selection is:
+
+```json
+{
+  "tools": ["read", "grep", "find", "ls", "artifact_create", "artifact_update", "artifact_status", "artifact_wait", "artifact_cancel"]
+}
+```
+
+Select all five artifact tools so delegated work has wait/cancel management. They do
+not enable parent `write`, `edit`, or `bash`. Plan mode enforces its workspace and
+associated identifiers, and refuses ready saves while jobs are pending. A failed
+artifact must be retried or explicitly omitted by the user with
+`/plan artifacts omit <jobId>`. Artifact tools are excluded from checker identities,
+source loading, and execution even when selected here.
+
+Existing captured prompts keep their safety snapshots. Start a new workflow with
+the updated default or update a full replacement prompt explicitly to authorize
+selected artifact delegation and require waiting before completion. Live artifacts
+are not historical snapshots; see the package README before opening generated HTML.
+
 ## Persistence and invalid files
 
 Settings reads are bounded to 64 KiB and require valid UTF-8 and a JSON object. Invalid values, malformed JSON, directories, and symlinks are rejected. A workflow that cannot read valid settings does not silently substitute defaults; correct or remove the invalid file before retrying.

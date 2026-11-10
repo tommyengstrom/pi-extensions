@@ -1,3 +1,4 @@
+import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
 import { type PlanRevision, type PlanStorage, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
 import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
@@ -17,6 +18,7 @@ export interface PlanWorkflow {
   tools?: string[];
   series?: string;
   parent?: PlanRevision;
+  artifacts?: PlanArtifacts;
 }
 
 export type PlanState =
@@ -46,7 +48,8 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       !names(workflow.previousTools) ||
       (workflow.tools !== undefined && !names(workflow.tools)) ||
       (workflow.series !== undefined && !text(workflow.series)) ||
-      (workflow.parent !== undefined && !validRevision(workflow.parent))
+      (workflow.parent !== undefined && !validRevision(workflow.parent)) ||
+      (workflow.artifacts !== undefined && !validPlanArtifacts(workflow.artifacts))
     )
       return { kind: "idle" };
     const restored: PlanWorkflow = {
@@ -59,6 +62,7 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       ...(workflow.tools !== undefined ? { tools: [...workflow.tools] } : {}),
       ...(workflow.series !== undefined ? { series: workflow.series } : {}),
       ...(validRevision(workflow.parent) ? { parent: workflow.parent } : {}),
+      ...(validPlanArtifacts(workflow.artifacts) ? { artifacts: workflow.artifacts } : {}),
     };
     if (value.kind === "planning") return { kind: "planning", workflow: restored };
     const revision = value.revision;
@@ -83,6 +87,7 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
         path: revision.path,
         title: revision.title,
         ...(validRevision(revision) && revision.history ? { history: revision.history } : {}),
+        ...(validPlanArtifacts(revision.artifacts) ? { artifacts: revision.artifacts } : {}),
       },
     };
   }
@@ -100,6 +105,7 @@ export function validRevision(value: unknown): value is PlanRevision {
     (value.revision as number) < 1
   )
     return false;
+  if (value.artifacts !== undefined && !validPlanArtifacts(value.artifacts)) return false;
   if (value.history !== undefined) {
     const h = value.history;
     if (

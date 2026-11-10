@@ -1,6 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
+import {
+  ARTIFACT_ENTRY,
+  ARTIFACT_TOOLS,
+  ArtifactNotReady,
+  artifactGuidance,
+  artifactReadiness,
+  artifactRequest,
+  artifactScope,
+  associate,
+  collectArtifactReferences,
+  validArtifactReference,
+} from "./artifacts.js";
 import {
   normalizePlanModeCompletion,
   PLAN_MODE_COMPLETE_PARAMS,
@@ -181,6 +194,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       workflow = {
         projectRoot: store.projectRoot,
         storage: store.storage,
+        artifacts: options.parent?.artifacts ?? {
+          version: 1,
+          workspace: { id: randomUUID(), directory: "" },
+          references: [],
+        },
         instructions,
         basePrompt,
         previousTools: pi.getActiveTools(),
@@ -188,6 +206,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         ...(options.series ? { series: options.series } : {}),
         ...(options.parent ? { parent: options.parent } : {}),
       };
+      if (workflow.artifacts && !workflow.artifacts.workspace.directory)
+        workflow.artifacts.workspace.directory = join(store.directory, "artifacts", workflow.artifacts.workspace.id);
       transition({ kind: "planning", workflow }, ctx);
     } catch (error) {
       if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
@@ -199,9 +219,20 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     return lifecycle(ctx);
   }
 
-  function leave(ctx: ExtensionContext) {
+  async function leave(ctx: ExtensionContext) {
     idle(ctx);
-    if (state.kind !== "idle") transition({ kind: "idle" }, ctx);
+    const current = lifecycle(ctx);
+    if (state.kind !== "idle") {
+      await artifactRequest(
+        pi,
+        ctx,
+        "cancel",
+        collectArtifactReferences(ctx, state.workflow.artifacts)
+          ?.references.filter((r) => r.status === "queued" || r.status === "running")
+          .map((r) => r.jobId) ?? [],
+      );
+      if (current.isCurrent()) transition({ kind: "idle" }, ctx);
+    }
   }
 
   async function restore(ctx: ExtensionContext) {
@@ -215,8 +246,19 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     try {
       if (state.kind !== "idle") {
         const candidate = state;
-        await storeFor(ctx, candidate.workflow);
+        const store = await storeFor(ctx, candidate.workflow);
         if (!current.isCurrent()) return;
+        if (!candidate.workflow.artifacts) {
+          const id = randomUUID();
+          candidate.workflow.artifacts = candidate.workflow.parent?.artifacts ?? {
+            version: 1,
+            workspace: { id, directory: join(store.directory, "artifacts", id) },
+            references: [],
+          };
+        }
+        for (const entry of ctx.sessionManager.getBranch())
+          if (entry.type === "custom" && entry.customType === ARTIFACT_ENTRY && validArtifactReference(entry.data))
+            candidate.workflow.artifacts = associate(candidate.workflow.artifacts, entry.data);
         pi.setActiveTools(planTools(candidate.workflow).active);
       }
     } catch (error) {
@@ -228,6 +270,22 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
     if (current.isCurrent()) updateStatus(ctx);
   }
+
+  pi.events.on(ARTIFACT_ENTRY, (value) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("sessionId" in value) ||
+      !("reference" in value) ||
+      !validArtifactReference(value.reference) ||
+      state.kind === "idle" ||
+      value.sessionId !== session?.getSessionId() ||
+      !state.workflow.artifacts
+    )
+      return;
+    const artifacts = associate(state.workflow.artifacts, value.reference);
+    if (artifacts !== state.workflow.artifacts) commit({ ...state, workflow: { ...state.workflow, artifacts } });
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     await restore(ctx);
@@ -256,6 +314,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       const base = state.kind === "ready" ? state.revision : state.workflow.parent;
       event.systemPromptOptions.sections.pi_plan_mode =
         buildPlanModePrompt(state.workflow.instructions, state.workflow.basePrompt) +
+        (planTools(state.workflow).allowed.some((name) => ARTIFACT_TOOLS.includes(name))
+          ? artifactGuidance(state.workflow.artifacts)
+          : "") +
         (base
           ? `\n\nCurrent saved plan revision: ${JSON.stringify(base.path)}. Use this source path for plan_mode_edit; each successful edit returns the new current path.`
           : "");
@@ -341,6 +402,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         reason: `Plan mode blocks '${event.toolName}'. The user can change trusted tools with /plan tools while idle. Each nested call needs its own permission.`,
       };
     }
+    const scopeError = artifactScope(state.workflow.artifacts, event.toolName, event.input, ctx.cwd);
+    if (scopeError) return { block: true, reason: scopeError };
     if (
       (event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME || event.toolName === PLAN_MODE_EDIT_TOOL_NAME) &&
       (event.parentToolCallId !== undefined || !standaloneToolCall(ctx, event.toolName))
@@ -402,7 +465,17 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   ) {
     const { source, signal, isCurrent } = operation;
     if (!isCurrent()) throw new Error("Plan completion cancelled because the session changed.");
+    let artifacts: PlanWorkflow["artifacts"];
+    try {
+      artifacts = await artifactReadiness(pi, ctx, collectArtifactReferences(ctx, source.workflow.artifacts));
+    } catch (error) {
+      if (error instanceof ArtifactNotReady && isCurrent())
+        commit({ ...source, workflow: { ...source.workflow, artifacts: error.artifacts } });
+      throw error;
+    }
+    if (!isCurrent()) throw new Error("Plan completion cancelled because the session changed.");
     const revision = await store.save(plan, {
+      artifacts,
       series: source.workflow.series,
       parent: source.kind === "ready" ? source.revision : source.workflow.parent,
       ...options,
@@ -416,6 +489,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         kind: "ready",
         workflow: {
           ...source.workflow,
+          artifacts,
           storage: store.storage,
           series: revision.series,
           parent: revision,
@@ -509,6 +583,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const current = lifecycle(ctx);
     const storage = store ?? (await storeFor(ctx, source.kind !== "idle" ? source.workflow : undefined));
     const plan = await storage.read(selected);
+    await artifactReadiness(pi, ctx, selected.artifacts);
     const ui = await loadUi();
     if (!current.isCurrent()) return;
     const action = await ui.reviewPlan(ctx, plan, selected, current);
@@ -516,7 +591,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     idle(ctx);
     // Act on exactly the reviewed bytes, not a later file read.
     if (action === "save") {
-      leave(ctx);
+      await leave(ctx);
       notify(ctx, `Saved for later: ${selected.path}`);
     } else if (action === "continue") {
       let continued: ReturnType<typeof lifecycle> | undefined;
@@ -533,6 +608,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             workflow: {
               ...state.workflow,
               storage: storage.storage,
+              artifacts: selected.artifacts ?? state.workflow.artifacts,
               series: selected.series,
               parent: selected,
             },
@@ -558,7 +634,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       );
       const before = state;
       const previousImplementation = implementation.state;
-      leave(ctx);
+      await leave(ctx);
       // Persist the end of ownership before replacement; never write through a disposed source context.
       const handoff = lifecycle(ctx);
       try {
@@ -589,7 +665,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       );
       const before = state;
       const previousImplementation = implementation.state;
-      leave(ctx);
+      await leave(ctx);
       try {
         implementation.begin(tracked, ctx);
         pi.sendUserMessage(implementationPrompt(plan));
@@ -766,15 +842,38 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           await implementation.command(command, ctx);
           return;
         }
+        if (command.startsWith("artifacts omit ")) {
+          if (state.kind === "idle" || !state.workflow.artifacts) throw new Error("No active artifact workflow.");
+          const jobId = input.slice("artifacts omit ".length).trim();
+          const reference = state.workflow.artifacts.references.find((r) => r.jobId === jobId);
+          if (!reference) throw new Error("Job is not associated with this plan.");
+          const current = lifecycle(ctx);
+          const [status] = await artifactRequest(pi, ctx, "status", [jobId]);
+          if (!current.isCurrent()) return;
+          if (!status || ["queued", "running", "succeeded"].includes(status.status))
+            throw new Error("Only failed/cancelled/interrupted artifacts may be omitted.");
+          commit({
+            ...state,
+            workflow: {
+              ...state.workflow,
+              artifacts: {
+                ...state.workflow.artifacts,
+                omittedJobIds: [...new Set([...(state.workflow.artifacts.omittedJobIds ?? []), jobId])],
+              },
+            },
+          });
+          notify(ctx, "Omission recorded by user request. Partial files remain live, not a successful prototype.");
+          return;
+        }
         if (command === "exit") {
-          leave(ctx);
+          await leave(ctx);
           implementation.detach(ctx);
           return;
         }
         if (command === "save") {
           if (state.kind !== "ready") throw new Error("Complete a plan before saving it for later.");
           const path = state.revision.path;
-          leave(ctx);
+          await leave(ctx);
           notify(ctx, `Saved for later: ${path}`);
           return;
         }
@@ -839,7 +938,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           else if (choice === "Tools") await tools(ctx);
           else if (choice === "Settings" || choice === "Save defaults") await settingsMenu(ctx);
           else if (choice === "Finalize plan") pi.sendUserMessage(FINALIZE_REQUEST);
-          else leave(ctx);
+          else await leave(ctx);
           return;
         }
         const previous = state;
@@ -889,7 +988,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           try {
             idle(ctx);
             if (state.kind === "idle") await enter(ctx);
-            else leave(ctx);
+            else await leave(ctx);
           } catch (error) {
             if (current.isCurrent()) notify(ctx, errorMessage(error), "error");
           } finally {

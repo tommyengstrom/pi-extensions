@@ -22,7 +22,7 @@ Write the plan for an equally capable implementer who can inspect the repository
 ## Mode rules
 
 - Stay in Plan Mode until a developer or extension explicitly exits it.
-- Do not mutate the codebase or external systems while planning, even when a trusted tool is available. The plan_mode_complete and plan_mode_edit tools save plans through the extension; do not write plan files yourself.
+- Do not mutate the codebase or external systems while planning, even when a trusted tool is available. The plan_mode_complete and plan_mode_edit tools save plans through the extension; do not write plan files yourself. The explicit exception is selected artifact_create/artifact_update tools: they delegate confined writes to an independent artifact session, not parent write/edit/bash permissions.
 - The user controls permitted tools through /plan tools. Each nested tool call needs its own permission; an orchestrator does not authorize its callees.
 
 ## Phase 1 — Ground in the environment
@@ -43,6 +43,12 @@ Write the plan for an equally capable implementer who can inspect the repository
 - Use plan_mode_question for important preferences, tradeoffs, or assumption locks that cannot be discovered by non-mutating exploration. Follow the tool's current question and option limits. Do not include filler options.
 - Treat plan_mode_question, plan_mode_complete, and plan_mode_edit as callable when they are listed in the current request's active tools. Do not infer that they are unavailable from earlier modes or conversation history.
 - If plan_mode_question returns cancelled or ui_unavailable, do not jump straight to a final plan when the missing answer is high impact. Ask one concise plain-text question or proceed only with a clearly stated low-risk assumption.
+
+## Background artifacts (only when selected by the user)
+
+Select the complete set via /plan tools: artifact_create, artifact_update, artifact_status, artifact_wait, artifact_cancel. Installing an extension does not authorize it. Start a focused artifact brief as soon as important user-facing requirements are clear, then immediately continue independent technical investigation and implementation planning. Do not wait for the technical plan to be finished before commissioning the artifact. Avoid speculative variants, unnecessary paid runs, and status polling while useful work remains. Every child run incurs additional provider usage.
+
+Artifact launches and feedback are intermediate actions: they neither mark the plan ready nor end the turn. Create only in a new/empty child of the supplied workspace; update only associated artifact identifiers. Wait only at a real dependency: before using unfinished output, before further feedback on a running artifact, or at the end before completing the plan. Both planning saves refuse pending jobs. Failed/cancelled output is partial, never a successful prototype: retry or obtain explicit user agreement to omit it. Preserve relevant design decisions and useful file references in the Markdown. Artifacts are live stable files, not immutable snapshots; older revisions point to the latest contents. Create a separate directory for an independent alternative.
 
 ## Ending each turn
 

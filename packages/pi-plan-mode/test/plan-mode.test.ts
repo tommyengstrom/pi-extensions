@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEditToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, test, vi } from "vitest";
+import { ARTIFACT_TOOLS, type ArtifactReference } from "../src/artifacts.js";
 import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import planMode from "../src/plan-mode.js";
@@ -52,6 +54,7 @@ async function fixture(
       ...[...BASELINE, "grep", "find", "ls"].map(builtinTool),
       extensionTool("subagent"),
       extensionTool("nested_read"),
+      ...ARTIFACT_TOOLS.map(extensionTool),
     ],
   });
   let branch: unknown[] | undefined;
@@ -68,6 +71,7 @@ async function fixture(
     editorText: "Unsent draft",
     sessionManager: {
       getSessionFile: () => join(root, "source.jsonl"),
+      getSessionId: () => "test-parent-session",
       getBranch: () => branch ?? mock.entries.map((entry) => ({ type: "custom", ...entry })),
     },
   });
@@ -1567,3 +1571,88 @@ test.each(["plan_mode_complete", "plan_mode_edit"])(
     assert.equal((await (await createPlanStore(f.cwd, undefined, f.agentDir)).list()).length, 1);
   },
 );
+
+test("artifact claims are available before save; pending work gates both readiness tools without publication", async () => {
+  const f = await fixture({ tools: ["read", ...ARTIFACT_TOOLS] });
+  await f.command("start");
+  const state = f.state();
+  assert.notEqual(state.kind, "idle");
+  if (state.kind === "idle") return;
+  const workspace = state.workflow.artifacts;
+  assert.ok(workspace);
+  const reference: ArtifactReference = {
+    version: 1,
+    artifactId: randomUUID(),
+    jobId: randomUUID(),
+    directory: join(workspace.workspace.directory, "checkout"),
+    paths: [],
+    status: "running",
+  };
+  f.rawPi.events.on("pi-artifacts-service-v1", (value) => {
+    const request = value as { respond(value: unknown): void; action: string };
+    request.respond(request.action === "status" ? { version: 1, jobs: [reference] } : { version: 1 });
+  });
+  f.rawPi.events.emit("pi-artifacts-reference-v1", { sessionId: "test-parent-session", reference });
+  await assert.rejects(f.execute("plan_mode_complete", { plan: PLAN }), /still pending.*artifact_wait/);
+  assert.equal((await (await createPlanStore(f.cwd, undefined, f.agentDir)).list()).length, 0);
+  assert.equal(f.reviews.length, 0);
+  assert.deepEqual(
+    await f.emit("tool_call", { toolName: "artifact_create", input: { directory: join(f.cwd, "outside") } }),
+    {
+      block: true,
+      reason: "Plan artifacts must be created in a new/empty child directory of the current artifact workspace.",
+    },
+  );
+  assert.equal(
+    await f.emit("tool_call", { toolName: "artifact_update", input: { artifactId: reference.artifactId } }),
+    undefined,
+  );
+  assert.equal(((await f.emit("tool_call", { toolName: "write", input: {} })) as { block: boolean }).block, true);
+  reference.status = "succeeded";
+  reference.paths = [join(reference.directory, "index.html")];
+  const saved = await f.execute("plan_mode_complete", { plan: PLAN });
+  const revisions = await (await createPlanStore(f.cwd, undefined, f.agentDir)).list();
+  assert.equal(revisions[0].artifacts?.references[0].artifactId, reference.artifactId);
+  const next = { ...reference, jobId: randomUUID(), status: "queued" as const };
+  Object.assign(reference, next);
+  f.rawPi.events.emit("pi-artifacts-reference-v1", { sessionId: "test-parent-session", reference });
+  await assert.rejects(
+    f.execute("plan_mode_edit", { path: saved.details.path, edits: [{ oldText: "Simplify", newText: "Improve" }] }),
+    /still pending/,
+  );
+  assert.equal((await (await createPlanStore(f.cwd, undefined, f.agentDir)).list()).length, 1);
+  await f.command("exit");
+});
+
+test("failed artifacts require retry or explicit user omission; associations survive metadata without ancestry", async () => {
+  const f = await fixture({ tools: ["read", ...ARTIFACT_TOOLS] });
+  await f.command("start");
+  const state = f.state();
+  if (state.kind === "idle") throw new Error("Expected planning");
+  assert.ok(state.workflow.artifacts);
+  const reference: ArtifactReference = {
+    version: 1,
+    artifactId: randomUUID(),
+    jobId: randomUUID(),
+    directory: join(state.workflow.artifacts.workspace.directory, "design"),
+    paths: [],
+    status: "failed",
+  };
+  f.rawPi.events.on("pi-artifacts-service-v1", (value) => {
+    (value as { respond(v: unknown): void }).respond({ version: 1, jobs: [reference] });
+  });
+  f.rawPi.events.emit("pi-artifacts-reference-v1", { sessionId: "test-parent-session", reference });
+  await assert.rejects(f.execute("plan_mode_complete", { plan: PLAN }), /did not succeed/);
+  await f.command(`artifacts omit ${reference.jobId}`);
+  const saved = await f.execute("plan_mode_complete", { plan: PLAN });
+  const store = await createPlanStore(f.cwd, undefined, f.agentDir);
+  const [revision] = await store.list();
+  assert.equal(revision.history, undefined);
+  assert.deepEqual(revision.artifacts?.omittedJobIds, [reference.jobId]);
+  assert.equal(await store.read(revision), PLAN);
+  assert.ok((await readFile(saved.details.path, "utf8")).startsWith("<!-- pi-plan-document-v2:"));
+  await f.emit("session_start");
+  const restored = f.state();
+  if (restored.kind === "idle") throw new Error("Expected restored workflow");
+  assert.equal(restored.workflow.artifacts?.references[0].artifactId, reference.artifactId);
+});

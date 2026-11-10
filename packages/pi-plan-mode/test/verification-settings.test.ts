@@ -52,6 +52,31 @@ test.each([{ thinkingLevel: "ultra" }, { thinkingLevel: null }, { model: {} }, {
   },
 );
 
+test("naming override and reset preserve independent models and unknown fields", async () => {
+  const settingsPath = await path();
+  await writeFile(
+    settingsPath,
+    JSON.stringify({ naming: { future: true }, progress: { model: { provider: "p", id: "observer" } } }),
+  );
+  await updatePlanModeSettings({ naming: { model: { provider: "n", id: "namer" } } }, { settingsPath });
+  assert.deepEqual((await readPlanModeSettings(settingsPath)).naming, { model: { provider: "n", id: "namer" } });
+  await updatePlanModeSettings({ naming: { model: null } }, { settingsPath });
+  const raw = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.deepEqual(raw.naming, { future: true });
+  assert.deepEqual(raw.progress.model, { provider: "p", id: "observer" });
+});
+
+test.each([null, [], { model: null }, { model: {} }])(
+  "invalid naming settings are not overwritten: %j",
+  async (naming) => {
+    const settingsPath = await path();
+    const contents = JSON.stringify({ naming });
+    await writeFile(settingsPath, contents);
+    await assert.rejects(updatePlanModeSettings({ naming: { model: null } }, { settingsPath }), /Invalid/);
+    assert.equal(await readFile(settingsPath, "utf8"), contents);
+  },
+);
+
 test("verification defaults on for missing file, object or flag; explicit false survives updates", async () => {
   const settingsPath = await path();
   for (const content of [undefined, {}, { verification: {} }]) {

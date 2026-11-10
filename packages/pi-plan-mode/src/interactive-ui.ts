@@ -39,6 +39,12 @@ export async function reviewPlan(
       `Path: ${terminalText(revision.path)}`,
       `Revision: ${revision.revision}`,
       ...(revision.history?.reason ? [`Change reason: ${terminalText(revision.history.reason)}`] : []),
+      ...(revision.artifacts?.references.flatMap((r) => [
+        `Live artifact: ${terminalText(r.artifactId)} · ${r.status}${revision.artifacts?.omittedJobIds?.includes(r.jobId) ? " (omitted by user agreement)" : ""}`,
+        terminalText(r.directory),
+        ...r.paths.slice(0, 10).map(terminalText),
+        "Live files, not a historical snapshot.",
+      ]) ?? []),
     ],
     content: plan,
     format: { kind: "markdown" },

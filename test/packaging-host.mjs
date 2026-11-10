@@ -23,7 +23,8 @@ await loader.reload();
 const loaded = loader.getExtensions();
 try {
   assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions.length, 2);
+  assert.equal(loaded.extensions.length, 3);
+  assert.ok(loaded.extensions.some((extension) => extension.tools.has("artifact_create")));
   assert.ok(loaded.extensions.some((extension) => extension.commands.has("plan")));
   const shortcuts = loaded.extensions.flatMap((extension) => [...extension.shortcuts.keys()]);
   assert.ok(shortcuts.includes("alt+,"));
@@ -59,19 +60,20 @@ const probeLoader = new DefaultResourceLoader({
   noPromptTemplates: true,
   noThemes: true,
   noContextFiles: true,
-  additionalExtensionPaths: [probe, join(candidate, "packages/pi-plan-mode")],
+  additionalExtensionPaths: [probe, join(candidate, "packages/pi-plan-mode"), join(candidate, "packages/pi-artifacts")],
 });
 try {
   await probeLoader.reload();
   const result = probeLoader.getExtensions();
   assert.deepEqual(result.errors, []);
-  assert.equal(result.extensions.length, 2);
+  assert.equal(result.extensions.length, 3);
   assert.ok(result.extensions.some((extension) => extension.commands.has("plan")));
+  assert.ok(result.extensions.some((extension) => extension.tools.has("artifact_update")));
 } finally {
   probeLoader.getExtensions().runtime.invalidate("packaging UI complete");
   await rm(probe, { force: true });
 }
-console.log("Pi 1.5.0: both extensions, package runtime, and lazy Plan UI/TUI Kit rendered successfully.");
+console.log("Pi 1.5.0: all three extensions, package runtime, and lazy Plan UI/TUI Kit rendered successfully.");
 
 async function exerciseUi(ui, assert) {
   let frames = 0;

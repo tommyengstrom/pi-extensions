@@ -585,11 +585,18 @@ test("real-runtime TUI smoke: automatic document review, dismissal, reopening, t
 
 test("finalize and later revisions automatically present review without control-text model requests", async () => {
   const f = await fixture();
+  const started = Promise.withResolvers<void>();
+  const unsubscribe = f.runtime.session.subscribe((event) => {
+    if (event.type === "agent_start") started.resolve();
+  });
   try {
     const session = f.runtime.session;
     await session.prompt("/plan start");
     f.queueTool("plan_mode_complete", { plan });
     await session.prompt("/plan finalize");
+    // The command's sendUserMessage is fire-and-forget. In Pi 1.5.1 its async
+    // input/auth preflight can still be idle; observe the run before awaiting settlement.
+    await started.promise;
     await session.waitForIdle();
     assert.equal(f.reviewPlan.mock.calls.length, 1);
     assert.equal(f.requests.length, 1);
@@ -603,6 +610,7 @@ test("finalize and later revisions automatically present review without control-
     assert.equal(ready.revision.revision, 2);
     assert.equal(JSON.stringify(f.requests).includes("__review"), false);
   } finally {
+    unsubscribe();
     await f.dispose();
   }
 });

@@ -628,3 +628,19 @@ test("report validation checks only the two-field structure and preserves arbitr
     assert.throws(() => parseVerificationReport(JSON.stringify(value)), /Invalid adherence report/);
   }
 });
+
+test("artifact tools are excluded from checker source loading and executable declarations even in old snapshots", async () => {
+  const f = await fixture({ tools: ["read"] });
+  for (const name of ["artifact_create", "artifact_update", "artifact_status", "artifact_wait", "artifact_cancel"]) {
+    f.implementation.toolIdentities.push({
+      name,
+      source: "extension",
+      path: "/nonexistent/artifact-extension.ts",
+      exposure: "direct",
+    });
+  }
+  const result = await runVerification(f);
+  assert.equal(result.report.status, "ok");
+  for (const request of f.requests)
+    assert.ok(getCurrentTools(request).every((tool) => !tool.name.startsWith("artifact_")));
+});
