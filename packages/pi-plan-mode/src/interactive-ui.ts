@@ -1,4 +1,3 @@
-import { dirname, join } from "node:path";
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import { runConfirmation } from "@narumitw/pi-tui-kit/confirmation";
@@ -6,43 +5,37 @@ import { runDocumentReview } from "@narumitw/pi-tui-kit/document-review";
 import { runMultiSelect } from "@narumitw/pi-tui-kit/multi-select";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
-import type { PlanRevision } from "./plan-store.js";
+import type { PlanDocument } from "./plan-store.js";
 import { defaultPlanTools, PLAN_HELPER_NAMES } from "./tool-policy.js";
 
-/** The caller aborts this signal on session replacement, reload, and shutdown. */
 export interface MenuLifecycle {
   signal: AbortSignal;
   isCurrent(): boolean;
 }
-
 type ReviewAction = "fresh" | "here" | "save" | "continue";
-
-function current(lifecycle: MenuLifecycle): boolean {
+function current(lifecycle: MenuLifecycle) {
   return !lifecycle.signal.aborted && lifecycle.isCurrent();
 }
-
-function canPrompt(ctx: ExtensionContext, lifecycle: MenuLifecycle): boolean {
+function canPrompt(ctx: ExtensionContext, lifecycle: MenuLifecycle) {
   return ctx.hasUI && (ctx.mode === "tui" || ctx.mode === "rpc") && current(lifecycle);
 }
-
-/** Collect intent only: opening or dismissing this UI never launches implementation. */
+/** Intent only; dismissal never approves implementation. */
 export async function reviewPlan(
   ctx: ExtensionContext,
   plan: string,
-  revision: PlanRevision,
+  document: PlanDocument,
   lifecycle: MenuLifecycle,
-): Promise<"fresh" | "here" | "save" | "continue" | undefined> {
+): Promise<ReviewAction | undefined> {
   if (!canPrompt(ctx, lifecycle)) return undefined;
   const reviewed = await runDocumentReview(ctx, {
-    title: `Review plan: ${terminalText(revision.title)}`,
+    title: `Review plan: ${terminalText(document.title)}`,
     lines: [
-      `Path: ${terminalText(revision.path)}`,
-      `Revision: ${revision.revision}`,
-      ...(revision.history?.reason ? [`Change reason: ${terminalText(revision.history.reason)}`] : []),
-      ...(revision.artifacts?.references.flatMap((r) => [
-        `Live artifact: ${terminalText(r.artifactId)} · ${r.status}${revision.artifacts?.omittedJobIds?.includes(r.jobId) ? " (omitted by user agreement)" : ""}`,
-        terminalText(r.directory),
-        ...r.paths.slice(0, 10).map(terminalText),
+      `Name: ${terminalText(document.name)}`,
+      `Path: ${terminalText(document.path)}`,
+      ...(document.artifacts?.references.flatMap((reference) => [
+        `Live artifact: ${terminalText(reference.artifactId)} · ${reference.status}${document.artifacts?.omittedJobIds?.includes(reference.jobId) ? " (omitted by user agreement)" : ""}`,
+        terminalText(reference.directory),
+        ...reference.paths.slice(0, 10).map(terminalText),
         "Live files, not a historical snapshot.",
       ]) ?? []),
     ],
@@ -50,7 +43,6 @@ export async function reviewPlan(
     format: { kind: "markdown" },
     viewportSize: "adaptive",
     enableSearch: true,
-    // Never remember a previous launch choice: fresh is always first/default.
     actions: [
       { id: "fresh", label: "Implement in fresh session" },
       { id: "here", label: "Implement here" },
@@ -63,73 +55,39 @@ export async function reviewPlan(
   });
   return current(lifecycle) && reviewed.kind === "selected" ? (reviewed.actionId as ReviewAction) : undefined;
 }
-
-/** Browse a supplied filesystem snapshot; no index or selection is persisted. */
+/** One entry per current document. The store excludes unsupported files. */
 export async function selectSavedPlan(
   ctx: ExtensionContext,
-  revisions: PlanRevision[],
+  documents: PlanDocument[],
   lifecycle: MenuLifecycle,
-): Promise<PlanRevision | undefined> {
+): Promise<PlanDocument | undefined> {
   if (!canPrompt(ctx, lifecycle)) return undefined;
-  if (revisions.length === 0) {
-    ctx.ui.notify("No saved plans found.", "info");
+  if (!documents.length) {
+    ctx.ui.notify("No saved plans found. Import Markdown explicitly to start an independent plan.", "info");
     return undefined;
   }
-  const groups = new Map<string, PlanRevision[]>();
-  for (const revision of revisions) {
-    const key = join(dirname(revision.path), revision.series);
-    const group = groups.get(key) ?? [];
-    group.push(revision);
-    groups.set(key, group);
-  }
-  const locationsPerSeries = new Map<string, number>();
-  for (const group of groups.values()) {
-    group.sort((a, b) => b.revision - a.revision);
-    const series = group[0].series;
-    locationsPerSeries.set(series, (locationsPerSeries.get(series) ?? 0) + 1);
-  }
-  let activeGroup: PlanRevision[] = [];
-  let chosen: PlanRevision | undefined;
-  const menu = defineMenu<undefined, "series" | "revisions", "open" | "choose", ExtensionContext>({
-    start: "series",
+  let chosen: PlanDocument | undefined;
+  const menu = defineMenu<undefined, "plans", "choose", ExtensionContext>({
+    start: "plans",
     screens: {
-      series: () => ({
+      plans: () => ({
         kind: "choice",
         title: "Saved plans",
-        lines: ["Choose a plan series, then its latest or an older revision."],
-        items: [...groups].map(([series, group]) => ({
-          id: series,
-          label: `${terminalText(group[0].title || group[0].series)} — ${terminalText(group[0].series)}${(locationsPerSeries.get(group[0].series) ?? 0) > 1 ? ` · ${terminalText(dirname(group[0].path))}` : ""}`,
-          description: `Latest revision: ${group[0]?.revision} · ${group.length} revision(s)`,
-          details: [`Path: ${terminalText(group[0]?.path ?? "")}`],
+        lines: ["Choose a plan to review its current contents."],
+        items: documents.map((document) => ({
+          id: document.path,
+          label: `${terminalText(document.name)} — ${terminalText(document.title)}`,
+          description: terminalText(document.path),
+          details: [`Path: ${terminalText(document.path)}`],
         })),
-        action: "open",
+        action: "choose",
         enableSearch: true,
         hint: "close",
       }),
-      revisions: () => ({
-        kind: "choice",
-        title: `Revisions: ${terminalText(activeGroup[0]?.series ?? "")}`,
-        lines: ["Latest is selected by default. Choose an older revision if needed."],
-        items: activeGroup.map((revision, index) => ({
-          id: revision.path,
-          label: `Revision ${revision.revision}${index === 0 ? " (latest)" : ""} — ${terminalText(revision.title)}`,
-          description: terminalText(revision.path),
-          details: [`Path: ${terminalText(revision.path)}`],
-        })),
-        initialItemId: activeGroup[0]?.path,
-        action: "choose",
-        enableSearch: true,
-      }),
     },
     actions: {
-      open: ({ itemId }) => {
-        if (!current(lifecycle)) return { kind: "close" };
-        activeGroup = groups.get(itemId) ?? [];
-        return activeGroup.length ? { kind: "to", screen: "revisions" } : { kind: "stay" };
-      },
       choose: ({ itemId }) => {
-        if (current(lifecycle)) chosen = activeGroup.find((revision) => revision.path === itemId);
+        if (current(lifecycle)) chosen = documents.find((document) => document.path === itemId);
         return { kind: "close" };
       },
     },
@@ -141,10 +99,8 @@ export async function selectSavedPlan(
   });
   return current(lifecycle) && result.kind === "closed" ? chosen : undefined;
 }
-
 const FIXED_HELPERS = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS]);
-
-/** Return a proposed configuration; activation and persistence belong to the caller. */
+/** Configuration only: normal-mode callers must not activate planning restrictions. */
 export async function selectPlanTools(
   ctx: ExtensionContext,
   tools: ToolInfo[],

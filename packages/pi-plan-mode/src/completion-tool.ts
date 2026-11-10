@@ -4,74 +4,51 @@ import { sanitizeTerminalDocument } from "@narumitw/pi-tui-kit/terminal-document
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 
 export const PLAN_MODE_COMPLETE_TOOL_NAME = "plan_mode_complete";
-export const PLAN_MODE_COMPLETE_VERSION = 1;
+export const PLAN_MODE_COMPLETE_VERSION = 3;
 export const PLAN_MODE_MAX_CHARS = 50_000;
-
 export type PlanModeCompletionDetails = {
   version: typeof PLAN_MODE_COMPLETE_VERSION;
   source: typeof PLAN_MODE_COMPLETE_TOOL_NAME;
   plan: string;
   path: string;
 };
-
 export const PLAN_MODE_COMPLETE_PARAMS = {
   type: "object",
   additionalProperties: false,
   required: ["plan"],
   properties: {
-    reason: {
-      type: "string",
-      minLength: 1,
-      maxLength: 8000,
-      description: "Optional explanation of what changed and why when revising a saved plan.",
-    },
     plan: {
       type: "string",
       minLength: 1,
       maxLength: PLAN_MODE_MAX_CHARS,
-      description: "The complete Markdown implementation plan under the active planning instructions.",
+      description: "The complete Markdown implementation plan. Replaces the current plan at its stable path.",
     },
   },
 } as const;
-
-type NormalizePlanModeCompletionResult = { ok: true; plan: string; reason?: string } | { ok: false; error: string };
-
+type NormalizePlanModeCompletionResult = { ok: true; plan: string } | { ok: false; error: string };
 export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCompletionResult {
-  if (!isRecord(input) || typeof input.plan !== "string") {
-    return { ok: false, error: "plan must be a string" };
-  }
+  if (!isRecord(input) || typeof input.plan !== "string") return { ok: false, error: "plan must be a string" };
+  if (Object.keys(input).some((key) => key !== "plan"))
+    return { ok: false, error: "Only the complete plan field is accepted" };
   const plan = input.plan.trim();
   if (!plan) return { ok: false, error: "plan must not be empty" };
-  if (plan.length > PLAN_MODE_MAX_CHARS) {
-    return {
-      ok: false,
-      error: `plan must not exceed ${PLAN_MODE_MAX_CHARS} characters`,
-    };
-  }
+  if (plan.length > PLAN_MODE_MAX_CHARS)
+    return { ok: false, error: `plan must not exceed ${PLAN_MODE_MAX_CHARS} characters` };
   if (!plan.isWellFormed()) return { ok: false, error: "plan must be well-formed Unicode (no unpaired surrogates)" };
-  if (
-    input.reason !== undefined &&
-    (typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 8000)
-  )
-    return { ok: false, error: "reason must be nonempty and at most 8000 characters" };
-  return { ok: true, plan, ...(typeof input.reason === "string" ? { reason: input.reason.trim() } : {}) };
+  return { ok: true, plan };
 }
-
 export function planFromCompletionDetails(value: unknown) {
-  if (!isRecord(value)) return undefined;
-  if (value.version !== PLAN_MODE_COMPLETE_VERSION || value.source !== PLAN_MODE_COMPLETE_TOOL_NAME) {
+  if (!isRecord(value) || value.version !== PLAN_MODE_COMPLETE_VERSION || value.source !== PLAN_MODE_COMPLETE_TOOL_NAME)
     return undefined;
-  }
   const normalized = normalizePlanModeCompletion({ plan: value.plan });
   return normalized.ok ? normalized.plan : undefined;
 }
-
 export function planModeCompleted(plan: string, path: string) {
   return {
     content: [
       {
         type: "text" as const,
-        text: `**Plan ready**\n\n${plan}\n\nSaved to: ${terminalText(path)}\nIn TUI or RPC, review opens automatically after this turn settles. Implementation requires your explicit choice. Open /plan to reopen review or if it does not appear; in print/JSON, resume interactively first.`,
+        text: `**Plan ready**\n\n${plan}\n\nSaved to: ${terminalText(path)}\nIn TUI or RPC, review opens automatically after this turn settles. Initial implementation requires your explicit choice. Open /plan to reopen review; in print/JSON, resume interactively first.`,
       },
     ],
     details: {
@@ -83,12 +60,7 @@ export function planModeCompleted(plan: string, path: string) {
     terminate: true,
   };
 }
-
-type PlanModeCompletionRenderResult = {
-  content: Array<{ type: string; text?: string }>;
-  details?: unknown;
-};
-
+type PlanModeCompletionRenderResult = { content: Array<{ type: string; text?: string }>; details?: unknown };
 export function planModeCompletionMarkdown(result: PlanModeCompletionRenderResult) {
   const content = result.content
     .filter((block) => block.type === "text" && typeof block.text === "string")
@@ -99,11 +71,9 @@ export function planModeCompletionMarkdown(result: PlanModeCompletionRenderResul
   const plan = planFromCompletionDetails(result.details);
   return plan ? `**Proposed Plan**\n\n${plan}` : "";
 }
-
 export function renderPlanModeCompletion(result: PlanModeCompletionRenderResult) {
   return new Markdown(sanitizeTerminalDocument(planModeCompletionMarkdown(result)), 0, 0, getMarkdownTheme());
 }
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

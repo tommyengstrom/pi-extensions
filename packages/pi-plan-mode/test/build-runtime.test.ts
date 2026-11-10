@@ -123,9 +123,11 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     assert.equal(files.length, 1);
     const savedFile = files[0];
     assert.ok(savedFile);
-    assert.match(savedFile, /\/\d{4}-\d{2}-\d{2}-generated-runtime-01\.md$/u);
+    assert.match(savedFile, /\/untitled-plan\.md$/u);
     const savedPath = join(agentDir, "pi-plan-mode", savedFile);
-    assert.equal(await readFile(savedPath, "utf8"), plan);
+    const saved = await readFile(savedPath, "utf8");
+    assert.match(saved, /^<!-- pi-plan-document-v3:/);
+    assert.equal(saved.slice(saved.indexOf(" -->\n") + 5), plan);
     const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     assert.ok(text.includes(plan));
     assert.ok(text.includes(savedPath));

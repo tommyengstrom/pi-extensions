@@ -7,28 +7,13 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test, vi } from "vitest";
-import {
-  createPlanStore as createCurrentPlanStore,
-  type PlanRevision,
-  type PlanStore,
-  planHash,
-} from "../src/plan-store.js";
+import { createPlanStore, type PlanStore, planHash, readImportedMarkdown } from "../src/plan-store.js";
 
-// Exercise legacy stores throughout the compatibility/security suite below.
-const createPlanStore = (
-  cwd: string,
-  location: Parameters<typeof createCurrentPlanStore>[1] = "plans",
-  agentDir?: string,
-) => createCurrentPlanStore(cwd, location, agentDir);
-
-// Keep real filesystem behavior while making cleanup failures injectable.
 vi.mock("node:fs/promises", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs/promises")>()),
 }));
-
 const execFileAsync = promisify(execFile);
 const PLAN = "# A useful plan\n\n1. Implement the change.\n2. Verify it.";
-
 async function withStore(
   run: (fixture: { root: string; project: string; agent: string; store: PlanStore }) => Promise<void>,
 ) {
@@ -37,123 +22,87 @@ async function withStore(
     const project = join(root, "project");
     const agent = join(root, "agent");
     await mkdir(project);
-    const store = await createPlanStore(project, undefined, agent);
-    await run({ root, project, agent, store });
+    await run({ root, project, agent, store: await createPlanStore(project, undefined, agent) });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }
-
 async function git(cwd: string, ...args: string[]) {
   await execFileAsync("git", ["-C", cwd, ...args], {
     env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
   });
 }
+function staged(directory: string) {
+  return readdirSync(directory).some(
+    (name) => name.endsWith(".tmp") && readFileSync(join(directory, name), "utf8").endsWith(PLAN),
+  );
+}
 
-test("legacy storage uses getAgentDir and preserves the original hashed location and filenames", async () => {
+test("default storage uses getAgentDir, canonical roots and a v3 envelope without touching the project", async () => {
   await withStore(async ({ project, agent, store }) => {
     vi.stubEnv("PI_CODING_AGENT_DIR", agent);
     try {
-      const defaultStore = await createPlanStore(project);
-      assert.equal(defaultStore.directory, store.directory);
+      assert.equal((await createPlanStore(project)).directory, store.directory);
     } finally {
       vi.unstubAllEnvs();
     }
     assert.equal(store.projectRoot, await realpath(project));
-    assert.match(basename(store.directory), /^project-[a-f0-9]{64}$/);
-    assert.equal(store.directory, join(agent, "pi-plan-mode", "plans", basename(store.directory)));
+    assert.equal(store.directory, join(agent, "pi-plan-mode", "project"));
     assert.deepEqual(await store.list(), []);
-    const revision = await store.save(PLAN);
-    assert.equal(basename(revision.path), "a-useful-plan-01.md");
-    assert.equal(revision.title, "A useful plan");
-    assert.equal(await store.read(revision), PLAN);
-    assert.deepEqual(await store.list(), [revision]);
+    const document = await store.save(PLAN, { name: "useful-plan" });
+    assert.ok(document.id);
+    assert.equal(document.name, "useful-plan");
+    assert.equal(document.title, "A useful plan");
+    assert.match(await readFile(document.path, "utf8"), /^<!-- pi-plan-document-v3:/);
+    assert.equal(await store.read(document), PLAN);
+    assert.deepEqual(await store.list(), [document]);
     assert.deepEqual(await readdir(project), []);
   });
 });
 
-test("revision metadata is atomic, explains changes, and tracks actual parents rather than filename order", async () => {
-  await withStore(async ({ store }) => {
-    const first = await store.save(PLAN);
-    const second = await store.save("# Changed", {
-      series: first.series,
-      parent: first,
-      reason: "User requested changed scope.",
-    });
-    const third = await store.save("# Alternate", {
-      series: first.series,
-      parent: first,
-      reason: "User requested an alternative from the baseline.",
-    });
-    assert.equal(third.revision, 3);
-    assert.equal(third.history?.parent.revision, 1);
-    assert.equal(await store.read(second), "# Changed");
-    assert.deepEqual(await store.list(), [third, second, first]);
-    const unchanged = await store.save("# Alternate", { series: first.series, parent: third });
-    assert.equal(unchanged.history?.reason, undefined);
-    await writeFile(third.path, "# External replacement");
-    await assert.rejects(store.read(third), /metadata has changed/);
-    assert.equal(await store.read(first), PLAN);
-  });
-});
-
-test("changed revisions without reasons retain actual parent hashes and round-trip without invented metadata", async () => {
+test("updates atomically replace the same document; names, identity and paths survive title changes and reopen", async () => {
   await withStore(async ({ project, agent, store }) => {
-    const first = await store.save(PLAN);
-    const second = await store.save("# Changed scope", { series: first.series, parent: first });
-    const third = await store.save("# Alternative scope", {
-      series: first.series,
-      parent: first,
-      parentPlan: PLAN,
-    });
-    for (const revision of [second, third]) {
-      assert.deepEqual(revision.history, {
-        version: 1,
-        parent: { series: first.series, revision: first.revision, hash: planHash(PLAN) },
-      });
-    }
-    assert.equal(third.revision, 3);
+    const first = await store.save(PLAN, { name: "useful-plan" });
+    const changed = await store.save("# Changed", { document: first, expectedHash: planHash(PLAN) });
+    assert.equal(changed.id, first.id);
+    assert.equal(changed.path, first.path);
+    assert.equal(changed.name, first.name);
+    assert.equal(changed.title, "Changed");
+    assert.equal(await store.read(first), "# Changed", "old locators read current contents, not a snapshot");
     const reopened = await createPlanStore(project, undefined, agent);
-    assert.deepEqual(await reopened.list(), [third, second, first]);
-    assert.equal(await reopened.read(second), "# Changed scope");
-    assert.equal(await reopened.read(third), "# Alternative scope");
-    assert.equal(await reopened.read(first), PLAN);
-  });
-});
-
-test("reasonless changes still validate parent identity and supplied parentPlan against disk", async () => {
-  await withStore(async ({ store }) => {
-    const first = await store.save(PLAN);
-    await assert.rejects(
-      store.save("# Changed", { series: "other-series", parent: first, parentPlan: PLAN }),
-      /same series/,
-    );
-    await assert.rejects(
-      store.save("# Changed", {
-        series: first.series,
-        parent: { ...first, path: join(store.directory, "other-01.md") },
-        parentPlan: PLAN,
-      }),
-      /does not belong/,
-    );
-    await assert.rejects(
-      store.save("# Changed", { series: first.series, parent: first, parentPlan: "# Incorrect parent" }),
-      /Parent plan changed on disk/,
-    );
-    await assert.rejects(
-      store.save("# Changed", { series: first.series, parent: first, reason: "x".repeat(8001) }),
-      /Change reason exceeds/,
-    );
-    await writeFile(first.path, "# External replacement");
-    await assert.rejects(
-      store.save("# Changed", { series: first.series, parent: first, parentPlan: PLAN }),
-      /Parent plan changed on disk/,
-    );
+    assert.deepEqual(await reopened.list(), [changed]);
+    const again = await reopened.save("# Alternate", { document: changed, expectedHash: planHash("# Changed") });
+    assert.equal(again.path, first.path);
+    assert.equal(await store.read(first), "# Alternate");
     assert.deepEqual(await readdir(store.directory), [basename(first.path)]);
   });
 });
 
-test("Git roots unify nested directories and canonical aliases; linked worktrees get their own canonical root", async () => {
+test("stale expected hashes and forged document identities never overwrite current bytes", async () => {
+  await withStore(async ({ store }) => {
+    const first = await store.save(PLAN);
+    const current = await store.save("# External update", { document: first, expectedHash: planHash(PLAN) });
+    const bytes = await readFile(first.path);
+    for (const options of [
+      { document: first, expectedHash: planHash(PLAN) },
+      { document: { ...current, id: "forged" }, expectedHash: planHash("# External update") },
+      {
+        document: { ...current, path: join(store.directory, "other.md") },
+        expectedHash: planHash("# External update"),
+      },
+    ])
+      await assert.rejects(store.save("# Must not publish", options));
+    assert.deepEqual(await readFile(first.path), bytes);
+    assert.deepEqual(await readdir(store.directory), [basename(first.path)]);
+    await unlink(first.path);
+    await assert.rejects(
+      store.save("# Missing is not a new plan", { document: current, expectedHash: planHash("# External update") }),
+    );
+    assert.deepEqual(await readdir(store.directory), []);
+  });
+});
+
+test("Git roots unify nested directories and aliases; linked worktrees retain their own canonical root", async () => {
   await withStore(async ({ root, project, agent }) => {
     await git(project, "init", "--quiet");
     await git(
@@ -167,60 +116,51 @@ test("Git roots unify nested directories and canonical aliases; linked worktrees
       "-qm",
       "Initial",
     );
-    const nested = join(project, "src", "nested");
-    await mkdir(nested, { recursive: true });
+    await mkdir(join(project, "src", "nested"), { recursive: true });
     const alias = join(root, "alias");
     await symlink(project, alias);
     const main = await createPlanStore(project, undefined, agent);
-    assert.equal((await createPlanStore(nested, undefined, agent)).directory, main.directory);
+    assert.equal((await createPlanStore(join(project, "src", "nested"), undefined, agent)).directory, main.directory);
     assert.equal((await createPlanStore(join(alias, "src"), undefined, agent)).directory, main.directory);
     const worktree = join(root, "worktree");
     await git(project, "worktree", "add", "--quiet", "--detach", worktree);
     await mkdir(join(worktree, "nested"));
     const linked = await createPlanStore(join(worktree, "nested"), undefined, agent);
     assert.equal(linked.projectRoot, await realpath(worktree));
+    assert.equal(basename(linked.directory), "worktree");
     assert.notEqual(linked.directory, main.directory);
     assert.equal((await createPlanStore(worktree, undefined, agent)).directory, linked.directory);
     await main.save(PLAN);
     assert.deepEqual(await linked.list(), []);
-    const current = await createCurrentPlanStore(project, undefined, agent);
-    assert.equal((await createCurrentPlanStore(nested, undefined, agent)).directory, current.directory);
-    assert.equal((await createCurrentPlanStore(join(alias, "src"), undefined, agent)).directory, current.directory);
-    const currentLinked = await createCurrentPlanStore(join(worktree, "nested"), undefined, agent);
-    assert.notEqual(currentLinked.directory, current.directory);
-    assert.equal(basename(currentLinked.directory), "worktree");
   });
 });
 
-test("non-Git cwd fallback and same-named projects have stable, collision-resistant scopes", async () => {
-  await withStore(async ({ root, project, agent, store }) => {
-    const otherProject = join(root, "other", "project");
+test("non-Git cwd fallback is stable and documents cannot cross unrelated stores", async () => {
+  await withStore(async ({ project, agent, store }) => {
     const nested = join(project, "nested");
-    await mkdir(otherProject, { recursive: true });
     await mkdir(nested);
-    const other = await createPlanStore(otherProject, undefined, agent);
+    const other = await createPlanStore(nested, undefined, agent);
     assert.notEqual(other.directory, store.directory);
-    assert.notEqual((await createPlanStore(nested, undefined, agent)).directory, store.directory);
     assert.equal((await createPlanStore(project, undefined, agent)).directory, store.directory);
-    const revision = await store.save(PLAN);
-    await assert.rejects(other.read(revision), /belong/);
-    await assert.rejects(other.save(PLAN, { series: revision.series }), /belong/);
+    const document = await store.save(PLAN);
+    await assert.rejects(other.read(document));
+    await assert.rejects(other.save(PLAN, { document, expectedHash: planHash(PLAN) }));
     assert.deepEqual(await other.list(), []);
   });
 });
 
-test("configured directory is relative to extension data and rejects lexical escapes", async () => {
+test("configured locations stay beneath extension data and reject lexical escapes", async () => {
   await withStore(async ({ project, agent }) => {
     const custom = await createPlanStore(project, "notes/plans", agent);
     assert.equal(custom.directory, join(agent, "pi-plan-mode", "notes", "plans", basename(custom.directory)));
-    for (const option of ["", "..", "../escape", "notes/../../escape", "/tmp/escape", "notes\\escape", "bad\0path"]) {
+    for (const option of ["", "..", "../escape", "notes/../../escape", "/tmp/escape", "notes\\escape", "bad\0path"])
       await assert.rejects(createPlanStore(project, option, agent), /directory/);
-    }
   });
 });
 
-test("directory symlinks cannot redirect writes outside the extension data directory", async () => {
+test("directory symlinks cannot redirect reads, discovery or publication", async () => {
   await withStore(async ({ root, project, agent, store }) => {
+    const document = await store.save(PLAN);
     const outside = join(root, "outside");
     await mkdir(outside);
     await symlink(outside, join(agent, "pi-plan-mode", "redirect"));
@@ -229,15 +169,7 @@ test("directory symlinks cannot redirect writes outside the extension data direc
     await symlink(outside, store.directory);
     await assert.rejects(store.save(PLAN), /symlink/);
     await assert.rejects(store.list(), /symlink/);
-    await assert.rejects(
-      store.read({
-        series: "a-useful-plan",
-        revision: 1,
-        path: join(store.directory, "a-useful-plan-01.md"),
-        title: "",
-      }),
-      /symlink/,
-    );
+    await assert.rejects(store.read(document), /symlink/);
     assert.deepEqual(await readdir(outside), []);
     const secondAgent = join(root, "second-agent");
     await mkdir(secondAgent);
@@ -246,82 +178,56 @@ test("directory symlinks cannot redirect writes outside the extension data direc
   });
 });
 
-test("series remain stable when titles change and revisions follow the highest existing number, including 100", async () => {
-  await withStore(async ({ project, agent, store }) => {
-    const first = await store.save(PLAN);
-    const second = await store.save("# A different title\n\nUpdated.", { series: first.series });
-    assert.equal(second.series, first.series);
-    assert.equal(second.revision, 2);
-    assert.equal(second.title, "A different title");
-    assert.equal(basename(second.path), "a-useful-plan-02.md");
-    await writeFile(join(store.directory, `${first.series}-99.md`), "# Manually retained revision");
-    await unlink(first.path);
-    const reopened = await createPlanStore(project, undefined, agent);
-    const hundredth = await reopened.save("# Yet another title", { series: first.series });
-    assert.equal(hundredth.revision, 100);
-    assert.equal(basename(hundredth.path), "a-useful-plan-100.md");
-    assert.deepEqual(
-      (await reopened.list()).map((revision) => revision.revision),
-      [100, 99, 2],
-    );
-  });
-});
-
-test("new plans with the same title are independent of existing series even when revision 01 is missing", async () => {
+test("same-title independent saves never overwrite each other, even after another document is deleted", async () => {
   await withStore(async ({ store }) => {
     const first = await store.save(PLAN);
-    const resumed = await store.save(PLAN, { series: first.series });
+    const second = await store.save(PLAN);
+    assert.notEqual(first.id, second.id);
+    assert.notEqual(first.path, second.path);
     await unlink(first.path);
-    const independent = await store.save(PLAN);
-    assert.notEqual(independent.series, first.series);
-    assert.match(independent.series, /^a-useful-plan-[a-f0-9-]+$/);
-    assert.equal(independent.revision, 1);
-    assert.equal(resumed.revision, 2);
-    assert.equal((await store.save("# Changed again", { series: independent.series })).revision, 2);
-    assert.equal(await readFile(resumed.path, "utf8"), PLAN);
+    const third = await store.save(PLAN);
+    assert.notEqual(third.id, second.id);
+    assert.notEqual(third.path, second.path);
+    assert.equal(await store.read(second), PLAN);
   });
 });
 
-test("concurrent independent store instances create distinct same-title plans and never overwrite revisions", async () => {
+test("independent store instances publish distinct documents; competing expected-hash updates have one winner", async () => {
   await withStore(async ({ project, agent, store }) => {
     const stores = await Promise.all(Array.from({ length: 8 }, () => createPlanStore(project, undefined, agent)));
     const created = await Promise.all(stores.map((instance) => instance.save(PLAN)));
-    assert.equal(new Set(created.map((revision) => revision.series)).size, stores.length);
-    assert.ok(created.every((revision) => revision.revision === 1));
+    assert.equal(new Set(created.map((document) => document.id)).size, stores.length);
+    assert.equal(new Set(created.map((document) => document.path)).size, stores.length);
     const first = created[0];
-    const continued = await Promise.all(
-      stores.map((instance, index) => instance.save(`# Revision ${index}`, { series: first.series })),
+    const results = await Promise.allSettled(
+      stores.map((instance, index) =>
+        instance.save(`# Candidate ${index}`, { document: first, expectedHash: planHash(PLAN) }),
+      ),
     );
-    assert.deepEqual(
-      continued.map((revision) => revision.revision).sort((a, b) => a - b),
-      [2, 3, 4, 5, 6, 7, 8, 9],
-    );
-    assert.equal(new Set(continued.map((revision) => revision.path)).size, stores.length);
-    for (const [index, revision] of continued.entries()) {
-      assert.equal(await store.read(revision), `# Revision ${index}`);
-    }
-    assert.equal(await store.read(first), PLAN);
-    assert.equal((await readdir(store.directory)).length, 16);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal((await store.list()).length, 8);
+    assert.match(await store.read(first), /^# Candidate \d$/);
+    assert.equal((await readdir(store.directory)).length, 8);
   });
 });
 
-test("Markdown headings produce safe bounded kebab-case stems, with a fallback for non-ASCII titles", async () => {
+test("headings produce safe bounded filenames, including setext, fences, non-ASCII and terminal controls", async () => {
   await withStore(async ({ store }) => {
-    const revision = await store.save("```md\n# Not the title\n```\n\n## Café: ../../A **safe** title! ##\n\nBody");
-    assert.equal(revision.series, "cafe-a-safe-title");
-    assert.equal(revision.title, "Café: ../../A **safe** title!");
-    assert.equal((await store.save("Setext title\n============\n\nBody")).series, "setext-title");
-    assert.equal((await store.save("# 日本語")).series, "untitled-plan");
-    const long = await store.save(`# ${"a".repeat(500)}`);
-    assert.equal(long.series.length, 80);
-    assert.ok((await store.save(`# ${"a".repeat(500)}`)).series.length <= 120);
+    const document = await store.save("```md\n# Not the title\n```\n\n## Café: ../../A **safe** title! ##\n\nBody");
+    assert.match(basename(document.path), /cafe-a-safe-title/);
+    assert.equal(document.title, "Café: ../../A **safe** title!");
+    assert.match(basename((await store.save("Setext title\n============\n\nBody")).path), /setext-title/);
+    for (const plan of ["# 日本語", `# ${"a".repeat(500)}`, "# Title\u001b[31m\u0007"]) {
+      const saved = await store.save(plan);
+      assert.match(basename(saved.path), /^[a-z0-9-]+\.md$/);
+      assert.ok(Buffer.byteLength(basename(saved.path)) <= 255);
+    }
     const control = await store.save("# Title\u001b[31m\u0007");
-    assert.match(basename(control.path), /^[a-z0-9-]+\.md$/);
-    assert.ok(control.title.includes("\u001b"), "Titles are data; terminal sanitization belongs to the UI");
+    assert.ok(control.title.includes("\u001b"), "titles are data; UI sanitizes them");
   });
 });
 
-test("reads validate full local revision identity and reject symlink plan files", async () => {
+test("reads validate local identity and reject symlink plan files without touching their targets", async () => {
   await withStore(async ({ root, store }) => {
     const first = await store.save(PLAN);
     const outside = join(root, "outside.md");
@@ -329,22 +235,14 @@ test("reads validate full local revision identity and reject symlink plan files"
     for (const replacement of [
       { path: outside },
       { path: join(store.directory, "..", basename(first.path)) },
-      { series: "../escape" },
-      { series: "/absolute" },
-      { series: "bad\\path" },
-      { revision: 0 },
-      { revision: 1.5 },
-      { revision: Number.MAX_SAFE_INTEGER + 1 },
-      { revision: 2 },
-    ]) {
+      { id: "forged" },
+      { id: "" },
+    ])
       await assert.rejects(store.read({ ...first, ...replacement }));
-    }
-    for (const series of ["", "../escape", "/absolute", "bad\\path", "bad\0path", "a".repeat(121)]) {
-      await assert.rejects(store.save(PLAN, { series }), /series/);
-    }
     await unlink(first.path);
     await symlink(outside, first.path);
     await assert.rejects(store.read(first));
+    await assert.rejects(store.save("# No", { document: first, expectedHash: planHash(PLAN) }));
     assert.deepEqual(await store.list(), []);
     const replacement = await store.save(PLAN);
     assert.notEqual(replacement.path, first.path);
@@ -352,62 +250,87 @@ test("reads validate full local revision identity and reject symlink plan files"
   });
 });
 
-test("content limits use JavaScript characters rather than UTF-8 bytes and invalid disk content is bounded", async () => {
+test("content limits count JavaScript characters; invalid on-disk content is bounded and excluded", async () => {
   await withStore(async ({ store }) => {
     const maximum = "😀".repeat(25_000);
-    const revision = await store.save(`  ${maximum}\n`);
-    assert.equal(await store.read(revision), maximum);
+    const document = await store.save(`  ${maximum}\n`);
+    assert.equal(await store.read(document), maximum);
     await assert.rejects(store.save(`${maximum}x`), /50000/);
     await assert.rejects(store.save(" \n "), /empty/);
-    for (const [name, content] of [
-      ["oversized-01.md", "x".repeat(50_001)],
-      ["huge-01.md", "x".repeat(150_001)],
-      ["empty-01.md", " \n"],
-    ]) {
-      const path = join(store.directory, name);
-      await writeFile(path, content);
-      const series = name.slice(0, -6);
-      await assert.rejects(store.read({ series, revision: 1, path, title: "" }));
+    const original = await readFile(document.path, "utf8");
+    const header = original.slice(0, original.indexOf("\n") + 1);
+    for (const content of ["x".repeat(50_001), "x".repeat(150_001), " \n"]) {
+      await writeFile(document.path, header + content);
+      await assert.rejects(store.read(document));
+      assert.deepEqual(await store.list(), []);
     }
-    assert.deepEqual(await store.list(), [revision]);
   });
 });
 
-test("malformed UTF-8 plan files are rejected on read and skipped during discovery", async () => {
+test("malformed UTF-8 is rejected on read and excluded without modifying the file", async () => {
   await withStore(async ({ store }) => {
-    const valid = await store.save(PLAN);
-    const path = join(store.directory, "malformed-01.md");
+    const document = await store.save(PLAN);
+    const original = await readFile(document.path, "utf8");
+    const header = original.slice(0, original.indexOf("\n") + 1);
     for (const bytes of [[0xc3, 0x28], [0xe2, 0x82], [0xff]]) {
-      const contents = Buffer.concat([Buffer.from("# Malformed\n"), Buffer.from(bytes)]);
-      await writeFile(path, contents);
-      await assert.rejects(store.read({ series: "malformed", revision: 1, path, title: "" }), /UTF-8/);
-      assert.deepEqual(await store.list(), [valid]);
-      assert.deepEqual(await readFile(path), contents);
+      const contents = Buffer.concat([Buffer.from(`${header}# Malformed\n`), Buffer.from(bytes)]);
+      await writeFile(document.path, contents);
+      await assert.rejects(store.read(document), /UTF-8/);
+      assert.deepEqual(await store.list(), []);
+      assert.deepEqual(await readFile(document.path), contents);
     }
   });
 });
 
-test("discovery accepts only current canonical revision filenames and regular files", async () => {
+test("discovery accepts only valid v3 documents, never legacy Markdown, metadata, directories or staging files", async () => {
   await withStore(async ({ store }) => {
-    const revision = await store.save(PLAN);
-    for (const name of [
-      "PLAN.md",
-      "legacy.json",
-      "foo-1.md",
-      "foo-001.md",
-      "foo-00.md",
-      "foo-9007199254740992.md",
-      ".plan-leftover.tmp",
-      "Bad Title-01.md",
-    ]) {
-      await writeFile(join(store.directory, name), "# Ignored");
-    }
-    await mkdir(join(store.directory, "directory-01.md"));
-    assert.deepEqual(await store.list(), [revision]);
+    const document = await store.save(PLAN);
+    const history = { version: 1, parent: { series: "old", revision: 1, hash: planHash(PLAN) } };
+    for (const [name, content] of [
+      ["old-01.md", PLAN],
+      ["PLAN.md", PLAN],
+      ["legacy.json", "{}"],
+      [".plan-leftover.tmp", PLAN],
+      ["old-02.md", `<!-- pi-plan-revision-v1:${Buffer.from(JSON.stringify(history)).toString("base64")} -->\n${PLAN}`],
+      [
+        "old-03.md",
+        `<!-- pi-plan-document-v2:${Buffer.from(JSON.stringify({ version: 2, history })).toString("base64")} -->\n${PLAN}`,
+      ],
+      ["malformed.md", "<!-- pi-plan-document-v3:not-json -->\n# Invalid"],
+    ])
+      await writeFile(join(store.directory, name), content);
+    await mkdir(join(store.directory, "directory.md"));
+    assert.deepEqual(await store.list(), [document]);
   });
 });
 
-test("only complete final files are observable while concurrent saves are in flight", async () => {
+test("imports read current Markdown, strip legacy envelopes, and never create or silently recover missing files", async () => {
+  await withStore(async ({ root, store }) => {
+    const path = join(root, "import.md");
+    const history = {
+      version: 1,
+      parent: { series: "old", revision: 1, hash: planHash(PLAN) },
+      reason: "Earlier change",
+    };
+    for (const [prefix, metadata] of [
+      ["pi-plan-revision-v1", history],
+      ["pi-plan-document-v2", { version: 2, history }],
+    ] as const) {
+      const bytes = `<!-- ${prefix}:${Buffer.from(JSON.stringify(metadata)).toString("base64")} -->\n${PLAN}`;
+      await writeFile(path, bytes);
+      assert.equal(await readImportedMarkdown(path), PLAN);
+      assert.equal(await readFile(path, "utf8"), bytes);
+    }
+    await writeFile(path, "# Current external contents");
+    assert.equal(await readImportedMarkdown(path), "# Current external contents");
+    assert.deepEqual(await store.list(), []);
+    await unlink(path);
+    await assert.rejects(readImportedMarkdown(path), /ENOENT/);
+    assert.deepEqual(await store.list(), []);
+  });
+});
+
+test("only complete envelopes are observable while independent publications are in flight", async () => {
   await withStore(async ({ store }) => {
     const content = `# Atomic plan\n${"x".repeat(49_000)}`;
     let finished = false;
@@ -416,24 +339,22 @@ test("only complete final files are observable while concurrent saves are in fli
     });
     try {
       do {
+        for (const document of await store.list()) assert.equal(await store.read(document), content);
         for (const name of await readdir(store.directory)) {
           if (!name.endsWith(".md")) continue;
-          assert.equal(await readFile(join(store.directory, name), "utf8"), content);
+          const bytes = await readFile(join(store.directory, name), "utf8");
+          assert.match(bytes, /^<!-- pi-plan-document-v3:/);
+          assert.ok(bytes.endsWith(content));
         }
       } while (!finished);
     } finally {
       await saves;
     }
-    const names = await readdir(store.directory);
-    assert.equal(names.length, 12);
-    for (const name of names) {
-      assert.ok(name.endsWith(".md"));
-      assert.equal(await readFile(join(store.directory, name), "utf8"), content);
-    }
+    assert.equal((await readdir(store.directory)).length, 12);
   });
 });
 
-test("cancelled and stale saves publish nothing and remove staged files", async () => {
+test("cancelled and stale saves clean staging files, including cancellation after staging", async () => {
   await withStore(async ({ store }) => {
     const controller = new AbortController();
     controller.abort();
@@ -443,8 +364,7 @@ test("cancelled and stale saves publish nothing and remove staged files", async 
     await assert.rejects(
       store.save(PLAN, {
         isCurrent: () => {
-          const temporary = readdirSync(store.directory).find((name) => name.endsWith(".tmp"));
-          if (temporary && readFileSync(join(store.directory, temporary), "utf8") === PLAN) {
+          if (staged(store.directory)) {
             sawCompleteTemporary = true;
             return false;
           }
@@ -453,45 +373,42 @@ test("cancelled and stale saves publish nothing and remove staged files", async 
       }),
       { name: "AbortError" },
     );
-    assert.ok(sawCompleteTemporary, "Cancellation is rechecked after staging, before publication");
+    assert.ok(sawCompleteTemporary);
     const lateAbort = new AbortController();
     await assert.rejects(
       store.save(PLAN, {
         signal: lateAbort.signal,
         isCurrent: () => {
-          const temporary = readdirSync(store.directory).find((name) => name.endsWith(".tmp"));
-          if (temporary && readFileSync(join(store.directory, temporary), "utf8") === PLAN) lateAbort.abort();
+          if (staged(store.directory)) lateAbort.abort();
           return true;
         },
       }),
       { name: "AbortError" },
     );
     assert.deepEqual(await readdir(store.directory), []);
-    const first = await store.save(PLAN);
-    assert.equal(first.revision, 1);
+    assert.equal(await store.read(await store.save(PLAN)), PLAN);
   });
 });
 
-test("cleanup failure after publication still returns the committed revision", async () => {
+test("cleanup failure after new publication still returns the committed document", async () => {
   await withStore(async ({ store }) => {
     const cleanup = vi.spyOn(fs, "unlink").mockRejectedValueOnce(new Error("Cleanup unavailable"));
-    let revision: PlanRevision;
+    let document: Awaited<ReturnType<typeof store.save>>;
     try {
-      revision = await store.save(PLAN);
+      document = await store.save(PLAN);
       assert.equal(cleanup.mock.calls.length, 1);
     } finally {
       cleanup.mockRestore();
     }
-    assert.equal(revision.revision, 1);
-    assert.equal(await readFile(revision.path, "utf8"), PLAN);
-    assert.deepEqual(await store.list(), [revision]);
-    assert.ok((await readdir(store.directory)).some((name) => name.endsWith(".tmp")));
-    const next = await store.save("# Next revision", { series: revision.series });
-    assert.equal(next.revision, 2);
+    assert.equal(await store.read(document), PLAN);
+    assert.deepEqual(await store.list(), [document]);
+    const next = await store.save("# Next", { document, expectedHash: planHash(PLAN) });
+    assert.equal(next.path, document.path);
+    assert.equal(await store.read(next), "# Next");
   });
 });
 
-test("cleanup failure before publication cannot replace the original save error", async () => {
+test("cleanup failure before publication cannot replace the owner's original error", async () => {
   await withStore(async ({ store }) => {
     const original = new Error("Owner failed before publication");
     const cleanup = vi.spyOn(fs, "unlink").mockRejectedValueOnce(new Error("Cleanup unavailable"));
@@ -514,24 +431,25 @@ test("cleanup failure before publication cannot replace the original save error"
   });
 });
 
-test("failure after staging cleans temporary artifacts without harming existing revisions", async () => {
+test("failed same-path staging leaves original bytes intact and permits retry", async () => {
   await withStore(async ({ store }) => {
     const first = await store.save(PLAN);
+    const bytes = await readFile(first.path);
     await assert.rejects(
       store.save(PLAN, {
-        series: first.series,
+        document: first,
+        expectedHash: planHash(PLAN),
         isCurrent: () => {
-          const temporary = readdirSync(store.directory).find((name) => name.endsWith(".tmp"));
-          if (temporary && readFileSync(join(store.directory, temporary), "utf8") === PLAN)
-            throw new Error("Owner failed");
+          if (staged(store.directory)) throw new Error("Owner failed");
           return true;
         },
       }),
       /Owner failed/,
     );
+    assert.deepEqual(await readFile(first.path), bytes);
     assert.deepEqual(await readdir(store.directory), [basename(first.path)]);
-    assert.equal(await store.read(first), PLAN);
-    const next: PlanRevision = await store.save("# Retry", { series: first.series });
-    assert.equal(next.revision, 2);
+    const next = await store.save("# Retry", { document: first, expectedHash: planHash(PLAN) });
+    assert.equal(next.path, first.path);
+    assert.equal(await store.read(first), "# Retry");
   });
 });

@@ -3,12 +3,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import type { ImplementationState } from "./implementation-state.js";
 import { implementationTranscript, type TranscriptSnapshot } from "./implementation-transcript.js";
+import { createPlanStore, planHash, storedPlanStorage } from "./plan-store.js";
 import { OBSERVER_INSTRUCTIONS, type ProgressRunner, runProgress } from "./progress-runner.js";
 import { DEFAULT_PROGRESS, type PlanModeSettings } from "./settings.js";
 
 export const PROGRESS_WIDGET = "plan-progress";
 const INTERVAL = 30_000;
-
 export function progressBullets(text: string): string[] {
   let words = 150;
   return text
@@ -27,8 +27,6 @@ export function progressBullets(text: string): string[] {
       return [`• ${parts.join(" ")}`];
     });
 }
-
-/** UTF-8 bytes are a conservative token upper bound; reserve substantial output/protocol room. */
 export function progressEvidence(
   plan: string,
   transcript: TranscriptSnapshot,
@@ -50,7 +48,6 @@ export function progressEvidence(
     );
   let recent = transcript.document;
   let omitted = false;
-  // Retain a suffix without silently losing the complete plan or provenance warning.
   if (Buffer.byteLength(JSON.stringify(recent)) > remaining) {
     omitted = true;
     let low = 0;
@@ -61,7 +58,6 @@ export function progressEvidence(
       else high = mid - 1;
     }
     recent = low ? recent.slice(-low) : "";
-    // Drop partial entry headers/content; keep whole recent entries where possible.
     const boundary = recent.indexOf("\n## [");
     recent = boundary >= 0 ? recent.slice(boundary + 1) : "";
   }
@@ -73,15 +69,16 @@ export function progressEvidence(
     limitationsNote: transcript.limitations.length > 20 ? "Additional evidence limitations omitted." : "",
   })}`;
 }
-
-type Snapshot = { state: ImplementationState; transcript: TranscriptSnapshot };
+export type ProgressSnapshot = { state: ImplementationState; transcript: TranscriptSnapshot };
 type Panel = {
   ctx: ExtensionContext;
   id: string;
-  revision: string;
+  path: string;
+  name: string;
+  hash: string;
   summary: string[];
   assessed?: string;
-  assessedRevision?: number;
+  assessedHash?: string;
   lastKey?: string;
   lastStart: number;
   status: string;
@@ -89,27 +86,37 @@ type Panel = {
   controller?: AbortController;
 };
 
-/** Independent from verification and the agent abort signal. No inference is awaited by event handlers. */
+/** File contents are read for each assessment, never restored from cached plan text. */
 export function createProgressController(options: {
-  snapshot(ctx: ExtensionContext): Snapshot | undefined;
+  snapshot(ctx: ExtensionContext): ProgressSnapshot | undefined;
   readSettings(): Promise<PlanModeSettings>;
   runner?: ProgressRunner;
+  createStore?: typeof createPlanStore;
 }) {
   let panel: Panel | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let assessment: Promise<void> | undefined;
   const runner = options.runner ?? runProgress;
-  const current = (p: Panel) => panel === p && !p.stopped && options.snapshot(p.ctx)?.state.id === p.id;
+  const makeStore = options.createStore ?? createPlanStore;
+  const current = (p: Panel) => {
+    const state = options.snapshot(p.ctx)?.state;
+    return (
+      panel === p &&
+      !p.stopped &&
+      state?.id === p.id &&
+      state.document.path === p.path &&
+      state.phase === "implementing"
+    );
+  };
   function render(p: Panel) {
     if (panel !== p) return;
-    const revision = options.snapshot(p.ctx)?.state.revisions.at(-1)?.revision.revision;
     p.ctx.ui.setWidget(
       PROGRESS_WIDGET,
       [
-        `Reported progress — plan revision ${revision ?? "?"} — ${p.status}`,
+        `Reported progress — ${p.name} — ${p.status}`,
         p.assessed
-          ? `Assessment snapshot: ${p.assessed} · revision ${p.assessedRevision} (not verification)`
+          ? `Assessment snapshot: ${p.assessed} · SHA-256 ${p.assessedHash?.slice(0, 12)} (not verification)`
           : "No assessment yet (not verification).",
         ...p.summary,
       ].map((line) => sanitizeTerminalText(line)),
@@ -128,7 +135,8 @@ export function createProgressController(options: {
     const p = panel;
     if (!p || p.stopped) return;
     const snap = options.snapshot(p.ctx);
-    if (!snap || snap.state.id !== p.id || snap.state.phase === "detached") return close();
+    if (!snap || snap.state.id !== p.id || snap.state.document.path !== p.path || snap.state.phase === "detached")
+      return close();
     if (snap.state.phase === "completed") {
       p.stopped = true;
       p.controller?.abort();
@@ -138,15 +146,12 @@ export function createProgressController(options: {
       render(p);
       return;
     }
-    const revision = snap.state.revisions.at(-1)?.hash;
-    if (!revision) return close();
-    if (p.revision !== revision) {
-      p.revision = revision;
-      p.status = "stale — plan revised";
+    if (p.hash !== snap.state.hash) {
+      p.hash = snap.state.hash;
+      p.status = "stale — plan updated";
       render(p);
     }
     if (running || timer) return;
-    // Event handlers only schedule: export evidence after persistence, off the implementation path.
     timer = setTimeout(
       () => {
         timer = undefined;
@@ -158,27 +163,33 @@ export function createProgressController(options: {
   async function assess(p: Panel) {
     if (!current(p) || running) return;
     const snap = options.snapshot(p.ctx);
-    const latest = snap?.state.revisions.at(-1);
-    if (!snap || !latest) return close();
+    if (!snap) return close();
+    const state = structuredClone(snap.state);
     const transcript = snap.transcript;
-    const key = `${latest.hash}:${transcript.hash}`;
-    if (key === p.lastKey) return;
     running = true;
-    p.lastKey = key;
     p.lastStart = Date.now();
     const time = new Date(p.lastStart).toISOString();
     const controller = new AbortController();
     p.controller = controller;
-    p.status = p.summary.length ? "updating" : "loading";
-    render(p);
     try {
+      const store = await makeStore(p.ctx.cwd, storedPlanStorage(state), undefined, { existingOnly: true });
+      if (!current(p) || controller.signal.aborted) return;
+      if (store.projectRoot !== state.projectRoot) throw new Error("Progress plan belongs to a different project.");
+      const plan = await store.read(state.document);
+      if (!current(p) || controller.signal.aborted) return;
+      const hash = planHash(plan);
+      const key = `${hash}:${transcript.hash}`;
+      if (key === p.lastKey) return;
+      p.hash = hash;
+      p.status = p.summary.length ? "updating" : "loading";
+      render(p);
       const settings = await options.readSettings();
       if (!current(p) || controller.signal.aborted) return;
       const configuration = { ...DEFAULT_PROGRESS, ...settings.progress };
       const model = p.ctx.modelRegistry.find(configuration.model.provider, configuration.model.id);
       if (!model)
         throw new Error(
-          `Progress model ${configuration.model.provider}/${configuration.model.id} is unavailable as a chat model. Choose a supported progress model in /plan settings; no fallback was used.`,
+          `Progress model ${configuration.model.provider}/${configuration.model.id} is unavailable. Choose a supported progress model; no fallback was used.`,
         );
       const thinkingLevel = clampThinkingLevel(model, configuration.thinkingLevel);
       const constraint =
@@ -187,19 +198,29 @@ export function createProgressController(options: {
           : ` · reasoning ${thinkingLevel} (requested ${configuration.thinkingLevel})`;
       p.status += constraint;
       render(p);
-      const prompt = progressEvidence(latest.plan, transcript, p.summary.join("\n"), model.contextWindow);
+      const prompt = progressEvidence(plan, transcript, p.summary.join("\n"), model.contextWindow);
       const response = await runner({ model: configuration.model, thinkingLevel, prompt, signal: controller.signal });
       if (!current(p) || controller.signal.aborted) return;
-      if (options.snapshot(p.ctx)?.state.revisions.at(-1)?.hash !== latest.hash) return;
-      p.summary = progressBullets(response);
-      if (!p.summary.length) throw new Error("Progress observer returned no displayable summary.");
+      const currentDocument = options.snapshot(p.ctx)?.state.document;
+      if (!currentDocument || currentDocument.id !== state.document.id) return;
+      // File edits during inference make this summary stale, not authoritative.
+      const observed = await store.read(currentDocument);
+      if (!current(p) || controller.signal.aborted) return;
+      if (planHash(observed) !== hash) {
+        p.status = "stale — plan changed during assessment";
+        render(p);
+        return;
+      }
+      const summary = progressBullets(response);
+      if (!summary.length) throw new Error("Progress observer returned no displayable summary.");
+      p.summary = summary;
       p.assessed = time;
-      p.assessedRevision = latest.revision.revision;
+      p.assessedHash = hash;
+      p.lastKey = key;
       p.status = `transcript only${constraint}`;
       render(p);
     } catch (error) {
       if (!current(p) || controller.signal.aborted) return;
-      if (options.snapshot(p.ctx)?.state.revisions.at(-1)?.hash !== latest.hash) return;
       p.stopped = true;
       p.status = `stale/error — ${sanitizeTerminalText(error instanceof Error ? error.message : String(error)).slice(0, 360)} Close and reopen /plan progress to retry.`;
       render(p);
@@ -224,15 +245,13 @@ export function createProgressController(options: {
       }
       const snap = options.snapshot(ctx);
       if (snap?.state.phase !== "implementing")
-        throw new Error(
-          "No active tracked implementation. Implement a reviewed plan via /plan saved, or use /plan resume.",
-        );
-      const latest = snap.state.revisions.at(-1);
-      if (!latest) throw new Error("Tracked implementation has no plan snapshot.");
+        throw new Error("No active tracked implementation. Implement a reviewed plan or use /plan resume.");
       panel = {
         ctx,
         id: snap.state.id,
-        revision: latest.hash,
+        path: snap.state.document.path,
+        name: snap.state.document.name,
+        hash: snap.state.hash,
         summary: [],
         lastStart: -Infinity,
         status: "loading",
@@ -243,8 +262,7 @@ export function createProgressController(options: {
     },
   };
 }
-
-export function progressSnapshot(ctx: ExtensionContext, state: ImplementationState): Snapshot {
+export function progressSnapshot(ctx: ExtensionContext, state: ImplementationState): ProgressSnapshot {
   return {
     state,
     get transcript() {

@@ -23,7 +23,8 @@ const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentToo
   "@earendil-works/pi-ai"
 );
 const { createMockContext } = await import("./support.js");
-const { createImplementation, snapshot } = await import("../src/implementation-state.js");
+const { createImplementation } = await import("../src/implementation-state.js");
+const { planHash } = await import("../src/plan-store.js");
 const { runVerification, parseVerificationReport, renderVerificationResult, renderVerificationReport } = await import(
   "../src/verification.js"
 );
@@ -155,6 +156,13 @@ async function fixture(
   assert.ok(model);
   const { ctx } = createMockContext({ cwd, hasUI: false, model, modelRegistry: new ModelRegistry(modelRuntime) });
   Object.assign(ctx, { isProjectTrusted: () => true, thinkingLevel: "off" });
+  const document = {
+    id: "f3c58190-3a28-4a8e-8f36-87b186d0b205",
+    name: "colors",
+    path: join(cwd, "plan.md"),
+    title: "Colors",
+  };
+  const plan = "# Colors\n\nUse blue.";
   const implementation = createImplementation(
     {
       projectRoot: cwd,
@@ -167,7 +175,8 @@ async function fixture(
         exposure: "direct",
       })),
     },
-    snapshot({ series: "colors", revision: 1, path: join(cwd, "plan.md"), title: "Colors" }, "# Colors\n\nUse blue."),
+    document,
+    plan,
   );
   const transcript = implementationTranscript(
     [
@@ -186,6 +195,7 @@ async function fixture(
     modelRuntime,
     cwd,
     implementation,
+    target: { document, plan, hash: planHash(plan) },
     transcript,
     signal: controller.signal,
     requests,
@@ -258,34 +268,12 @@ test("invalid and batched report submissions are rejected before a valid standal
   }
 });
 
-test("checker receives meaningful reasonless revisions without invented rationale or unchanged labels", async () => {
+test("checker receives current contents as the sole target without invented ancestry or reasons", async () => {
   const f = await fixture();
-  const baseline = snapshot(f.implementation.revisions[0].revision, "# Colors\n\nUse red.");
-  const updated = snapshot(
-    {
-      series: "colors",
-      revision: 2,
-      path: join(f.cwd, "colors-02.md"),
-      title: "Colors",
-      history: { version: 1, parent: { series: "colors", revision: 1, hash: baseline.hash } },
-    },
-    "# Colors\n\nUse blue.",
-  );
-  const clarified = snapshot(
-    {
-      series: "colors",
-      revision: 3,
-      path: join(f.cwd, "colors-03.md"),
-      title: "Colors",
-      history: {
-        version: 1,
-        parent: { series: "colors", revision: 2, hash: updated.hash },
-        reason: "Preserve the existing compatibility requirement.",
-      },
-    },
-    "# Colors\n\nUse blue. Preserve color compatibility.",
-  );
-  f.implementation.revisions = [baseline, updated, clarified];
+  const priorHash = f.implementation.hash;
+  const plan = "# Colors\n\nUse blue. Preserve color compatibility.";
+  f.target = { document: f.target.document, plan, hash: planHash(plan) };
+  assert.notEqual(f.target.hash, priorHash);
   const result = await runVerification(f);
   assert.deepEqual(result.report, report);
   const user = f.requests[0].find((message) => message.role === "user");
@@ -297,21 +285,25 @@ test("checker receives meaningful reasonless revisions without invented rational
           .filter((part) => part.type === "text")
           .map((part) => part.text)
           .join("\n");
-  assert.ok(prompt.includes("## Approved baseline: colors/1\nReason: Not supplied\n# Colors\n\nUse red."));
-  assert.ok(prompt.includes("## Updated plan: colors/2\nReason: Not supplied\n# Colors\n\nUse blue."));
   assert.ok(
     prompt.includes(
-      "## Updated plan: colors/3\nReason: Preserve the existing compatibility requirement.\n# Colors\n\nUse blue. Preserve color compatibility.",
+      `## Current plan snapshot\nName: colors\nPath: ${JSON.stringify(f.target.document.path)}\nSHA-256 (informational): ${f.target.hash}\n\n${plan}`,
     ),
   );
+  assert.equal(prompt.split("## Current plan snapshot").length - 1, 1);
+  assert.ok(!prompt.includes(priorHash));
+  assert.doesNotMatch(prompt, /Approved baseline|Updated plan|Reason:|Baseline \/ unchanged|colors\/\d/);
   assert.ok(prompt.includes("Please use blue."));
-  assert.ok(!prompt.includes("Baseline / unchanged"));
   assert.ok(!prompt.includes("TRANSCRIPT ONLY RATIONALE"));
   const instructions = getCurrentSystemPrompt(f.requests[0]);
-  assert.match(instructions, /Do not invent rationale/);
+  assert.match(instructions, /sole target for this run/);
+  assert.match(instructions, /not historical approval or ancestry/);
   assert.match(instructions, /Explained but unapproved material scope changes remain deviations/);
   assert.match(instructions, /Unknown provenance is not proof of user authorization/);
-  assert.equal(updated.revision.history?.reason, undefined);
+  assert.equal(f.implementation.hash, priorHash);
+  assert.equal("revisions" in f.implementation, false);
+  assert.equal("history" in f.target.document, false);
+  assert.equal("reason" in f.target.document, false);
 });
 
 test("delegation resolves parent credentials again after the authentication preflight", async () => {

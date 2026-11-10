@@ -5,7 +5,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { createRpcHarness, createTuiHarness } from "@narumitw/pi-tui-kit/testing";
 import { test } from "vitest";
 import { type MenuLifecycle, reviewPlan, selectPlanTools, selectSavedPlan } from "../src/interactive-ui.js";
-import type { PlanRevision } from "../src/plan-store.js";
+import type { PlanDocument } from "../src/plan-store.js";
 import { builtinTool, createMockContext, extensionTool } from "./support.js";
 
 function owner() {
@@ -20,9 +20,18 @@ function owner() {
   };
 }
 
-const revision: PlanRevision = { series: "alpha", revision: 2, path: "/plans/alpha-v2.md", title: "Alpha" };
-const oldRevision: PlanRevision = { ...revision, revision: 1, path: "/plans/alpha-v1.md" };
-const otherRevision: PlanRevision = { series: "beta", revision: 1, path: "/plans/beta-v1.md", title: "Beta" };
+const document: PlanDocument = {
+  id: "1b37f001-468e-4a00-8d39-283c3209fa01",
+  name: "alpha",
+  path: "/plans/alpha.md",
+  title: "Alpha",
+};
+const otherDocument: PlanDocument = {
+  id: "1b37f001-468e-4a00-8d39-283c3209fa02",
+  name: "beta",
+  path: "/plans/beta.md",
+  title: "Beta",
+};
 
 function coreTool(name: string): ToolInfo {
   return {
@@ -56,7 +65,7 @@ test("review shows Markdown, metadata and all actions immediately; fresh is alwa
     const running = reviewPlan(
       tuiContext(tui),
       "# Full plan\n\nImplement **everything**.",
-      revision,
+      document,
       owner().lifecycle,
     );
     let settled = false;
@@ -66,8 +75,9 @@ test("review shows Markdown, metadata and all actions immediately; fresh is alwa
     await tui.waitForOpen();
     assert.match(frame(tui), /Full plan/u);
     assert.match(frame(tui), /everything/u);
-    assert.match(frame(tui), /\/plans\/alpha-v2\.md/u);
-    assert.match(frame(tui), /Revision: 2/u);
+    assert.match(frame(tui), /\/plans\/alpha\.md/u);
+    assert.match(frame(tui), /Name: alpha/u);
+    assert.doesNotMatch(frame(tui), /Revision:|Reason:/u);
     assert.equal(settled, false);
     const actions = frame(tui);
     assert.match(actions, /> Implement in fresh session/u);
@@ -87,7 +97,7 @@ test("review has the whole document available for scrolling and remains width-sa
   const plan = ["# Start", ...Array.from({ length: 70 }, (_, index) => `Step ${index + 1}`), "Final sentinel"].join(
     "\n\n",
   );
-  const running = reviewPlan(tuiContext(tui), plan, revision, owner().lifecycle);
+  const running = reviewPlan(tuiContext(tui), plan, document, owner().lifecycle);
   await tui.waitForOpen();
   frame(tui); // Establish the viewport, as the host's initial render does.
   tui.press("end");
@@ -102,7 +112,7 @@ test("review has the whole document available for scrolling and remains width-sa
 test("Escape from any selected review action returns no action", async () => {
   for (const index of [0, 1, 2, 3]) {
     const tui = createTuiHarness();
-    const running = reviewPlan(tuiContext(tui), "Plan", revision, owner().lifecycle);
+    const running = reviewPlan(tuiContext(tui), "Plan", document, owner().lifecycle);
     await tui.waitForOpen();
     for (let i = 0; i < index; i++) tui.press("tui.select.down");
     tui.press("tui.select.cancel");
@@ -117,8 +127,9 @@ test("RPC review offers all actions with the first document page and preserves p
     { kind: "select", options: [...actions, "Previous", "Close"], response: "Save for later" },
   ]);
   const plan = Array.from({ length: 10 }, (_, index) => `Line ${index + 1}`).join("\n");
-  assert.equal(await reviewPlan(rpcContext(rpc), plan, revision, owner().lifecycle), "save");
-  assert.match(rpc.dialogs[0]?.title ?? "", /Path: \/plans\/alpha-v2\.md[\s\S]*Line 1[\s\S]*Page 1\/2/u);
+  assert.equal(await reviewPlan(rpcContext(rpc), plan, document, owner().lifecycle), "save");
+  assert.match(rpc.dialogs[0]?.title ?? "", /Name: alpha[\s\S]*Path: \/plans\/alpha\.md[\s\S]*Line 1[\s\S]*Page 1\/2/u);
+  assert.doesNotMatch(rpc.dialogs[0]?.title ?? "", /Revision:|Reason:/u);
   assert.match(rpc.dialogs[1]?.title ?? "", /Line 10[\s\S]*Page 2\/2/u);
   rpc.assertConsumed();
 });
@@ -132,65 +143,69 @@ test("RPC action results are explicit, including continue and cancellation", asy
     [undefined, undefined],
   ] as const) {
     const rpc = createRpcHarness([{ kind: "select", response: label }]);
-    assert.equal(await reviewPlan(rpcContext(rpc), "Plan", revision, owner().lifecycle), expected);
+    assert.equal(await reviewPlan(rpcContext(rpc), "Plan", document, owner().lifecycle), expected);
     rpc.assertConsumed();
   }
 });
 
-test("saved browser groups series and defaults to the newest numeric revision without sorting the input", async () => {
+test("saved browser selects a current document directly without sorting the input", async () => {
   const tui = createTuiHarness({ rows: 32 });
-  const newest: PlanRevision = { ...revision, revision: 10, path: "/plans/alpha-v10.md" };
-  const revisions = [oldRevision, otherRevision, newest, revision];
-  const running = selectSavedPlan(tuiContext(tui), revisions, owner().lifecycle);
+  const documents = [otherDocument, document];
+  const running = selectSavedPlan(tuiContext(tui), documents, owner().lifecycle);
   await tui.waitForOpen();
-  assert.match(frame(tui), /Alpha — alpha/u);
-  assert.match(frame(tui), /Beta — beta/u);
-  assert.doesNotMatch(frame(tui), /Revision 1 — Alpha/u);
+  assert.match(frame(tui), /alpha — Alpha/u);
+  assert.match(frame(tui), /beta — Beta/u);
+  assert.doesNotMatch(frame(tui), /Revision|latest/u);
   tui.press("tui.select.confirm");
-  await tui.waitForOpen();
-  assert.match(frame(tui), /[→›] Revision 10 \(latest\)/u);
-  assert.match(frame(tui), /Revision 2/u);
-  assert.match(frame(tui), /Revision 1/u);
-  tui.press("tui.select.confirm");
-  assert.equal(await running, newest);
-  assert.deepEqual(revisions, [oldRevision, otherRevision, newest, revision]);
+  assert.equal(await running, otherDocument);
+  assert.equal(tui.isOpen, false);
+  assert.deepEqual(documents, [otherDocument, document]);
 });
 
-test("same-named series from different stores remain separate and selectable in RPC", async () => {
-  const legacy = { ...revision, path: "/legacy/plans/alpha-v2.md" };
+test("same-named documents from different stores remain separate and selectable", async () => {
+  const legacy: PlanDocument = {
+    ...document,
+    id: "1b37f001-468e-4a00-8d39-283c3209fa03",
+    path: "/legacy/plans/alpha.md",
+  };
+  const tui = createTuiHarness({ rows: 32 });
+  const running = selectSavedPlan(tuiContext(tui), [document, legacy], owner().lifecycle);
+  await tui.waitForOpen();
+  tui.press("tui.select.down");
+  assert.match(frame(tui), /\/legacy\/plans\/alpha\.md/u);
+  tui.press("tui.select.confirm");
+  assert.equal(await running, legacy);
   const rpc = createRpcHarness([
     {
       kind: "select",
-      options: ["Alpha — alpha · /plans", "Alpha — alpha · /legacy/plans", "Done"],
-      response: "Alpha — alpha · /legacy/plans",
+      options: ["alpha — Alpha", "alpha — Alpha [2]", "Done"],
+      response: "alpha — Alpha [2]",
     },
-    { kind: "select", options: ["Revision 2 (latest) — Alpha", "Back"], response: "Revision 2 (latest) — Alpha" },
   ]);
-  assert.equal(await selectSavedPlan(rpcContext(rpc), [revision, oldRevision, legacy], owner().lifecycle), legacy);
+  assert.equal(await selectSavedPlan(rpcContext(rpc), [document, legacy], owner().lifecycle), legacy);
   rpc.assertConsumed();
 });
 
-test("RPC browser permits an older revision and never persists its selection", async () => {
-  for (const selected of [oldRevision, revision]) {
+test("RPC browser selects documents in one step and never persists its selection", async () => {
+  const documents = [otherDocument, document];
+  for (const selected of [document, otherDocument]) {
     const rpc = createRpcHarness([
-      { kind: "select", options: ["Alpha — alpha", "Beta — beta", "Done"], response: "Alpha — alpha" },
       {
         kind: "select",
-        options: ["Revision 2 (latest) — Alpha", "Revision 1 — Alpha", "Back"],
-        response: selected === oldRevision ? "Revision 1 — Alpha" : "Revision 2 (latest) — Alpha",
+        options: ["beta — Beta", "alpha — Alpha", "Done"],
+        response: `${selected.name} — ${selected.title}`,
       },
     ]);
-    assert.equal(
-      await selectSavedPlan(rpcContext(rpc), [oldRevision, otherRevision, revision], owner().lifecycle),
-      selected,
-    );
+    assert.equal(await selectSavedPlan(rpcContext(rpc), documents, owner().lifecycle), selected);
+    assert.equal(rpc.dialogs.length, 1);
+    assert.deepEqual(documents, [otherDocument, document]);
     rpc.assertConsumed();
   }
 });
 
 test("saved browser cancellation and empty catalogs do not choose a plan", async () => {
   const rpc = createRpcHarness([{ kind: "select", response: undefined }]);
-  assert.equal(await selectSavedPlan(rpcContext(rpc), [revision], owner().lifecycle), undefined);
+  assert.equal(await selectSavedPlan(rpcContext(rpc), [document], owner().lifecycle), undefined);
   rpc.assertConsumed();
   const emptyRpc = createRpcHarness([]);
   assert.equal(await selectSavedPlan(rpcContext(emptyRpc), [], owner().lifecycle), undefined);
@@ -297,8 +312,8 @@ test("empty selections remain empty, and cancellation is not an empty selection"
 
 test("owner abort dismisses open TUI adapters and discards their results", async () => {
   for (const open of [
-    (ctx: ReturnType<typeof tuiContext>, lifecycle: MenuLifecycle) => reviewPlan(ctx, "Plan", revision, lifecycle),
-    (ctx: ReturnType<typeof tuiContext>, lifecycle: MenuLifecycle) => selectSavedPlan(ctx, [revision], lifecycle),
+    (ctx: ReturnType<typeof tuiContext>, lifecycle: MenuLifecycle) => reviewPlan(ctx, "Plan", document, lifecycle),
+    (ctx: ReturnType<typeof tuiContext>, lifecycle: MenuLifecycle) => selectSavedPlan(ctx, [document], lifecycle),
     (ctx: ReturnType<typeof tuiContext>, lifecycle: MenuLifecycle) =>
       selectPlanTools(ctx, [coreTool("read")], [], lifecycle),
   ]) {
@@ -340,14 +355,14 @@ test("stale RPC responses cannot advance review or return tool selections", asyn
     }).ctx;
     const result =
       operation === "review"
-        ? await reviewPlan(ctx, "Plan", revision, session.lifecycle)
+        ? await reviewPlan(ctx, "Plan", document, session.lifecycle)
         : await selectPlanTools(ctx, [coreTool("read")], ["read"], session.lifecycle);
     assert.equal(result, undefined);
     assert.equal(calls, 1);
   }
 });
 
-test("a session replacement racing final revision or trust selection discards the result", async () => {
+test("a session replacement racing document or trust selection discards the result", async () => {
   for (const operation of ["saved", "tools"]) {
     const session = owner();
     let calls = 0;
@@ -355,17 +370,17 @@ test("a session replacement racing final revision or trust selection discards th
       mode: "rpc",
       select: async () => {
         calls += 1;
-        if (calls === 1) return operation === "saved" ? "Alpha — alpha" : "Apply tool selection";
+        if (operation === "tools" && calls === 1) return "Apply tool selection";
         session.replace();
-        return operation === "saved" ? "Revision 2 (latest) — Alpha" : "Trust selected tools";
+        return operation === "saved" ? "alpha — Alpha" : "Trust selected tools";
       },
     }).ctx;
     const result =
       operation === "saved"
-        ? await selectSavedPlan(ctx, [revision], session.lifecycle)
+        ? await selectSavedPlan(ctx, [document], session.lifecycle)
         : await selectPlanTools(ctx, [coreTool("bash")], ["bash"], session.lifecycle);
     assert.equal(result, undefined);
-    assert.equal(calls, 2);
+    assert.equal(calls, operation === "saved" ? 1 : 2);
   }
 });
 
@@ -375,24 +390,21 @@ test("print/JSON, pre-aborted owners, and stale owners never open UI", async () 
     if (mode === "rpc") session.controller.abort();
     const rpc = createRpcHarness([]);
     const ctx = createMockContext({ mode, select: rpc.ui.select, custom: rpc.ui.custom }).ctx;
-    assert.equal(await reviewPlan(ctx, "Plan", revision, session.lifecycle), undefined);
-    assert.equal(await selectSavedPlan(ctx, [revision], session.lifecycle), undefined);
+    assert.equal(await reviewPlan(ctx, "Plan", document, session.lifecycle), undefined);
+    assert.equal(await selectSavedPlan(ctx, [document], session.lifecycle), undefined);
     assert.equal(await selectPlanTools(ctx, [coreTool("read")], [], session.lifecycle), undefined);
     rpc.assertConsumed();
   }
   const session = owner();
   session.replace();
   const rpc = createRpcHarness([]);
-  assert.equal(await reviewPlan(rpcContext(rpc), "Plan", revision, session.lifecycle), undefined);
+  assert.equal(await reviewPlan(rpcContext(rpc), "Plan", document, session.lifecycle), undefined);
   rpc.assertConsumed();
 });
 
-test("display sanitization does not change returned revision paths", async () => {
-  const unsafe: PlanRevision = { ...revision, title: "Alpha\u001b[31m", path: "/plans/alpha\u001b[31m.md" };
-  const rpc = createRpcHarness([
-    { kind: "select", response: "Alpha — alpha" },
-    { kind: "select", response: "Revision 2 (latest) — Alpha" },
-  ]);
+test("display sanitization does not change returned document paths", async () => {
+  const unsafe: PlanDocument = { ...document, title: "Alpha\u001b[31m", path: "/plans/alpha\u001b[31m.md" };
+  const rpc = createRpcHarness([{ kind: "select", response: "alpha — Alpha" }]);
   assert.equal(await selectSavedPlan(rpcContext(rpc), [unsafe], owner().lifecycle), unsafe);
   for (const dialog of rpc.dialogs) {
     assert.equal((dialog.title + dialog.options?.join("\n")).includes("\u001b"), false);

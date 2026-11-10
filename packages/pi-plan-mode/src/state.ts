@@ -1,134 +1,115 @@
 import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
-import { type PlanRevision, type PlanStorage, validPlanStorage } from "./plan-store.js";
+import { type PlanDocument, type PlanStorage, validPlanDocument, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
 import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
 
 export const PLAN_STATE_ENTRY = "pi-plan-state";
-
 export interface PlanWorkflow {
+  version: 3;
+  id: string;
+  name?: string;
+  /** Initial task only; naming must never derive input from subsequent history. */
+  task?: string;
+  document?: PlanDocument;
+  hash?: string;
   projectRoot: string;
-  /** Legacy session location; new workflows use storage. */
   plansDirectory?: string;
   storage?: PlanStorage;
   instructions: string;
-  /** Captured base; absent only in legacy entries, which restore the built-in default. */
   basePrompt?: string;
   previousTools: string[];
-  /** Undefined means canonical inspection tools, not arbitrary tools with those names. */
   tools?: string[];
-  series?: string;
-  parent?: PlanRevision;
   artifacts?: PlanArtifacts;
 }
-
 export type PlanState =
   | { kind: "idle" }
   | { kind: "planning"; workflow: PlanWorkflow }
-  | { kind: "ready"; workflow: PlanWorkflow; revision: PlanRevision };
+  | { kind: "ready"; workflow: PlanWorkflow; document: PlanDocument };
 
-/** Restore explicit state, including legacy storage locators; never infer it from assistant prose. */
-export function restorePlanState(entries: readonly unknown[]): PlanState {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (!record(entry) || entry.type !== "custom" || entry.customType !== PLAN_STATE_ENTRY) continue;
-    const value = entry.data;
-    if (!record(value) || value.kind === "idle") return { kind: "idle" };
-    if (value.kind !== "planning" && value.kind !== "ready") return { kind: "idle" };
-    const workflow = value.workflow;
-    if (
-      !record(workflow) ||
-      !text(workflow.projectRoot) ||
-      !validPlanStorage(workflow.storage ?? { kind: "legacy", plansDirectory: workflow.plansDirectory }) ||
-      typeof workflow.instructions !== "string" ||
-      Buffer.byteLength(workflow.instructions, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
-      (workflow.basePrompt !== undefined &&
-        (typeof workflow.basePrompt !== "string" ||
-          !workflow.basePrompt.trim() ||
-          Buffer.byteLength(workflow.basePrompt, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
-      !names(workflow.previousTools) ||
-      (workflow.tools !== undefined && !names(workflow.tools)) ||
-      (workflow.series !== undefined && !text(workflow.series)) ||
-      (workflow.parent !== undefined && !validRevision(workflow.parent)) ||
-      (workflow.artifacts !== undefined && !validPlanArtifacts(workflow.artifacts))
-    )
-      return { kind: "idle" };
-    const restored: PlanWorkflow = {
-      projectRoot: workflow.projectRoot,
-      ...(typeof workflow.plansDirectory === "string" ? { plansDirectory: workflow.plansDirectory } : {}),
-      ...(validPlanStorage(workflow.storage) ? { storage: workflow.storage } : {}),
-      instructions: workflow.instructions,
-      basePrompt: workflow.basePrompt ?? DEFAULT_PLAN_MODE_PROMPT,
-      previousTools: [...workflow.previousTools],
-      ...(workflow.tools !== undefined ? { tools: [...workflow.tools] } : {}),
-      ...(workflow.series !== undefined ? { series: workflow.series } : {}),
-      ...(validRevision(workflow.parent) ? { parent: workflow.parent } : {}),
-      ...(validPlanArtifacts(workflow.artifacts) ? { artifacts: workflow.artifacts } : {}),
-    };
-    if (value.kind === "planning") return { kind: "planning", workflow: restored };
-    const revision = value.revision;
-    if (
-      !validRevision(revision) ||
-      !text(revision.series) ||
-      !text(revision.path) ||
-      typeof revision.title !== "string" ||
-      revision.title.length > 50_000 ||
-      typeof revision.revision !== "number" ||
-      !Number.isSafeInteger(revision.revision) ||
-      revision.revision < 1 ||
-      restored.series !== revision.series
-    )
-      return { kind: "idle" };
-    return {
-      kind: "ready",
-      workflow: restored,
-      revision: {
-        series: revision.series,
-        revision: revision.revision,
-        path: revision.path,
-        title: revision.title,
-        ...(validRevision(revision) && revision.history ? { history: revision.history } : {}),
-        ...(validPlanArtifacts(revision.artifacts) ? { artifacts: revision.artifacts } : {}),
-      },
-    };
+function latest(entries: readonly unknown[]) {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (record(entry) && entry.type === "custom" && entry.customType === PLAN_STATE_ENTRY) return entry.data;
   }
-  return { kind: "idle" };
+  return undefined;
 }
+/** Inspect the latest branch-local state only. This function never mutates entries or files. */
+export function legacyPlanState(entries: readonly unknown[]): boolean {
+  const value = latest(entries);
+  return (
+    record(value) &&
+    value.kind !== "idle" &&
+    (!record(value.workflow) ||
+      value.workflow.version !== 3 ||
+      "revision" in value ||
+      "series" in value.workflow ||
+      "parent" in value.workflow)
+  );
+}
+export function restorePlanState(entries: readonly unknown[]): PlanState {
+  if (legacyPlanState(entries))
+    throw new Error(
+      "Legacy Plan workflow is unsupported. Import its Markdown explicitly into a new workflow; no files were changed.",
+    );
+  const value = latest(entries);
+  if (value === undefined || (record(value) && value.kind === "idle")) return { kind: "idle" };
+  if (!record(value) || !["planning", "ready"].includes(String(value.kind)) || !validWorkflow(value.workflow))
+    throw new Error("Invalid v3 Plan workflow state. No files were changed.");
+  const workflow: PlanWorkflow = structuredClone(value.workflow);
+  workflow.basePrompt ??= DEFAULT_PLAN_MODE_PROMPT;
+  if (value.kind === "planning") return { kind: "planning", workflow };
+  if (
+    !validPlanDocument(value.document) ||
+    !workflow.document ||
+    value.document.id !== workflow.document.id ||
+    value.document.path !== workflow.document.path ||
+    value.document.name !== workflow.name ||
+    JSON.stringify(value.document) !== JSON.stringify(workflow.document) ||
+    !workflow.hash
+  )
+    throw new Error("Invalid ready Plan document state. No files were changed.");
+  return { kind: "ready", workflow, document: structuredClone(value.document) };
+}
+export { validPlanDocument };
 
-export function validRevision(value: unknown): value is PlanRevision {
+function validWorkflow(value: unknown): value is PlanWorkflow {
   if (
     !record(value) ||
-    !text(value.series) ||
-    !text(value.path) ||
-    typeof value.title !== "string" ||
-    value.title.length > 50_000 ||
-    !Number.isSafeInteger(value.revision) ||
-    (value.revision as number) < 1
+    value.version !== 3 ||
+    !text(value.id) ||
+    !text(value.projectRoot) ||
+    !validPlanStorage(value.storage ?? { kind: "legacy", plansDirectory: value.plansDirectory }) ||
+    typeof value.instructions !== "string" ||
+    Buffer.byteLength(value.instructions) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
+    (value.basePrompt !== undefined &&
+      (typeof value.basePrompt !== "string" ||
+        !value.basePrompt.trim() ||
+        Buffer.byteLength(value.basePrompt) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
+    !names(value.previousTools) ||
+    (value.tools !== undefined && !names(value.tools)) ||
+    (value.name !== undefined && !name(value.name)) ||
+    (value.task !== undefined && (typeof value.task !== "string" || !value.task.trim() || value.task.length > 4000)) ||
+    (value.hash !== undefined && (typeof value.hash !== "string" || !/^[a-f0-9]{64}$/.test(value.hash))) ||
+    (value.artifacts !== undefined && !validPlanArtifacts(value.artifacts)) ||
+    "series" in value ||
+    "parent" in value
   )
     return false;
-  if (value.artifacts !== undefined && !validPlanArtifacts(value.artifacts)) return false;
-  if (value.history !== undefined) {
-    const h = value.history;
-    if (
-      !record(h) ||
-      h.version !== 1 ||
-      !record(h.parent) ||
-      !text(h.parent.series) ||
-      !Number.isSafeInteger(h.parent.revision) ||
-      (h.parent.revision as number) < 1 ||
-      typeof h.parent.hash !== "string" ||
-      !/^[a-f0-9]{64}$/.test(h.parent.hash) ||
-      (h.reason !== undefined && (typeof h.reason !== "string" || !h.reason.trim() || h.reason.length > 8000))
-    )
-      return false;
-  }
-  return true;
+  if (
+    value.document !== undefined &&
+    (!validPlanDocument(value.document) || value.name !== value.document.name || typeof value.hash !== "string")
+  )
+    return false;
+  return value.document !== undefined || value.hash === undefined;
 }
-
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function text(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 4096;
+}
+function name(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 80 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
 }
 function names(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= 1000 && value.every(text);

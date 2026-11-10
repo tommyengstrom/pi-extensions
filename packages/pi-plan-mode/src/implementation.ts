@@ -10,12 +10,12 @@ import {
   IMPLEMENTATION_HELPERS,
   type ImplementationState,
   INPUT_ENTRY,
+  legacyImplementationState,
   restoreImplementation,
-  snapshot,
   VERIFICATION_MESSAGE,
 } from "./implementation-state.js";
 import { implementationTranscript } from "./implementation-transcript.js";
-import { createPlanStore, type PlanRevision, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
+import { createPlanStore, type PlanDocument, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
 import { createProgressController, progressSnapshot } from "./progress.js";
 import type { ProgressRunner } from "./progress-runner.js";
 import {
@@ -45,11 +45,10 @@ const UPDATE = IMPLEMENTATION_HELPERS[0];
 const COMPLETE = IMPLEMENTATION_HELPERS[1];
 
 export function implementationInstructions(state: ImplementationState): string {
-  const latest = latestPlan(state);
   return `# Tracked plan implementation
-Implement the approved plan, preserving unchanged requirements. At the start of this run the recorded plan was revision ${latest.revision.revision} at ${latest.revision.path} (SHA-256 ${latest.hash}). Successful plan_mode_edit or plan_mode_update results supersede this reference immediately. After compaction, or whenever the current revision is uncertain, call plan_mode_implementation_status to recover the authoritative current plan before continuing. Do not assume an older path is still current.
-When the user requests a plan change, including a steering/follow-up request, record it BEFORE implementing the change. Prefer ${PLAN_MODE_EDIT_TOOL_NAME} for localized revisions, using {path, edits: [{oldText, newText}]} against the current revision. It preserves the source and returns a diff and a new revision path; use that path for subsequent edits. For broad replacements, call ${UPDATE} with the COMPLETE replacement plan. Reasons are optional; do not invent one. A clarification without a change needs no revision. Saving a user-requested revision continues implementation without ending the turn or requiring another review dialog. Seek user agreement before an agent-discovered material scope change; never invent approval or rewrite the plan just to hide drift.
-When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal. A fresh adherence checker runs by default, with the plans, implementation user requests and access to the implementation transcript. Its report does not authorize automatic fixes. Do not start a repair loop.${artifactGuidance(latest.revision.artifacts)}`;
+Implement the approved plan, preserving unchanged requirements. The current plan is ${state.document.path}. It is one mutable file. After compaction, or whenever its contents are uncertain, call plan_mode_implementation_status to read the current file.
+When the user requests a plan change, update the plan before implementing the change. Prefer ${PLAN_MODE_EDIT_TOOL_NAME} for localized changes using {path, edits: [{oldText, newText}]}; use ${UPDATE} with the COMPLETE replacement plan for broader changes. Both update the same path without another approval dialog. A clarification without a change needs no edit. Seek user agreement before an agent-discovered material scope change; never invent approval or rewrite the plan just to hide drift.
+When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal. A fresh adherence checker runs by default against the current file contents and branch-scoped implementation transcript. Results apply to inspected contents, not later changes. Its report does not authorize automatic fixes. Do not start a repair loop.${artifactGuidance(state.document.artifacts)}`;
 }
 
 /** Separate lifetime from restricted planning: implementation never gets planning's tool gate. */
@@ -57,6 +56,7 @@ export function registerImplementation(
   pi: ExtensionAPI,
   dependencies: ImplementationDependencies = {},
   planningActive: (ctx: ExtensionContext) => boolean = () => false,
+  onStatus: (ctx: ExtensionContext) => void = () => {},
 ) {
   let state: ImplementationState | undefined;
   let owner: ExtensionContext["sessionManager"] | undefined;
@@ -68,6 +68,7 @@ export function registerImplementation(
   const progress = createProgressController({
     readSettings,
     runner: dependencies.progressRunner,
+    createStore: makeStore,
     snapshot: (ctx) =>
       owner === ctx.sessionManager && state && !planningActive(ctx) ? progressSnapshot(ctx, state) : undefined,
   });
@@ -85,19 +86,20 @@ export function registerImplementation(
     progress.mark();
   });
 
-  function cancel() {
+  function cancel(ctx?: ExtensionContext) {
     generation++;
-    operation?.abort();
+    const checking = operation;
+    operation = undefined;
+    checking?.abort();
+    if (checking && ctx && owner === ctx.sessionManager && state) {
+      commit({ ...state, phase: "completed" });
+      progress.close();
+      activate(ctx);
+      status(ctx);
+    }
   }
-  function status(ctx: ExtensionContext, text?: string) {
-    if (owner === ctx.sessionManager && ctx.hasUI)
-      ctx.ui.setStatus(
-        "plan-implementation",
-        text ??
-          (state
-            ? `plan ${state.phase}${state.lastCheck ? ` · ${state.lastCheck.status}` : ""} · /plan verify`
-            : undefined),
-      );
+  function status(ctx: ExtensionContext) {
+    if (owner === ctx.sessionManager) onStatus(ctx);
   }
   function commit(next: ImplementationState) {
     pi.appendEntry(IMPLEMENTATION_ENTRY, next);
@@ -141,15 +143,29 @@ export function registerImplementation(
     activate(ctx);
     status(ctx);
   }
-  async function restore(ctx: ExtensionContext) {
+  async function restore(ctx: ExtensionContext, fresh = false) {
     progress.close();
     cancel();
     const manager = ctx.sessionManager;
     owner = manager;
-    state = restoreImplementation(manager.getBranch());
+    try {
+      state = restoreImplementation(manager.getBranch());
+    } catch (error) {
+      state = undefined;
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          sanitizeTerminalText(
+            `${legacyImplementationState(manager.getBranch()) ? "Legacy implementation tracking is not restored." : errorMessage(error)} Start fresh or use /plan import <Markdown path>.`,
+          ),
+          "warning",
+        );
+    }
     const version = generation;
     try {
-      if (state) await ownedStore(ctx, state);
+      if (state) {
+        const store = await ownedStore(ctx, state);
+        await store.read(state.document);
+      }
     } catch (error) {
       if (generation !== version || owner !== manager) return;
       if (state) state = { ...state, phase: "detached" };
@@ -160,25 +176,25 @@ export function registerImplementation(
         );
     }
     if (generation !== version || owner !== manager) return;
+    if (fresh && state?.phase === "implementing" && !planningActive(ctx)) pi.setActiveTools(state.previousTools);
     activate(ctx);
     status(ctx);
   }
-  pi.on("session_start", (_event, ctx) => restore(ctx));
+  pi.on("session_start", (event, ctx) => restore(ctx, event.reason === "new"));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", async (_event, ctx) => {
     const disposed = progress.dispose();
     if (owner === ctx.sessionManager) {
-      cancel();
+      cancel(ctx);
       pi.setActiveTools(
         pi.getActiveTools().filter((name) => !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE)),
       );
-      if (ctx.hasUI) ctx.ui.setStatus("plan-implementation", undefined);
       owner = undefined;
     }
     await disposed;
   });
   pi.on("before_agent_start", (event, ctx) => {
-    cancel();
+    cancel(ctx);
     if (active(ctx) && state) {
       if (state.lastCheck) commit({ ...state, lastCheck: undefined });
       status(ctx);
@@ -193,7 +209,7 @@ export function registerImplementation(
       source: event.source,
       fingerprint: planHash(event.text),
     });
-    if (operation) cancel();
+    if (operation) cancel(ctx);
   });
   pi.on("tool_call", (event, ctx) => {
     if (!IMPLEMENTATION_HELPERS.includes(event.toolName as (typeof IMPLEMENTATION_HELPERS)[number])) return;
@@ -216,23 +232,6 @@ export function registerImplementation(
     if (store.projectRoot !== source.projectRoot) throw new Error("Implementation belongs to a different project.");
     return store;
   }
-  async function validateHistory(store: PlanStore, source: ImplementationState) {
-    for (let index = 0; index < source.revisions.length; index++) {
-      const item = source.revisions[index];
-      if (planHash(await store.read(item.revision)) !== item.hash)
-        throw new Error(`Incomplete plan history: revision ${item.revision.revision} changed on disk.`);
-      if (!index) continue;
-      const previous = source.revisions[index - 1];
-      const history = item.revision.history;
-      if (
-        !history ||
-        history.parent.series !== previous.revision.series ||
-        history.parent.revision !== previous.revision.revision ||
-        history.parent.hash !== previous.hash
-      )
-        throw new Error("Incomplete plan history: missing ancestry.");
-    }
-  }
 
   async function check(ctx: ExtensionContext, signal?: AbortSignal): Promise<VerificationResult> {
     if (!state || owner !== ctx.sessionManager)
@@ -253,12 +252,17 @@ export function registerImplementation(
     const dialog = new AbortController();
     let cancellation: Promise<unknown> | undefined;
     try {
-      commit({ ...source, lastCheck: undefined });
-      status(ctx, "Checking plan adherence…");
-      const settings = await readSettings();
-      assertCurrent();
+      // Verification owns its own activity; persist inactivity before any await so
+      // tree restoration/reload cannot resurrect the checked implementation.
+      commit({ ...source, phase: "completed", lastCheck: undefined });
+      activate(ctx);
+      status(ctx);
+      progress.close();
       const store = await ownedStore(ctx, source);
-      await validateHistory(store, source);
+      const plan = await store.read(source.document);
+      const target = { document: source.document, plan, hash: planHash(plan) };
+      assertCurrent();
+      const settings = await readSettings();
       assertCurrent();
       const resolved = resolvePlanTools(pi.getAllTools(), source.tools);
       if (resolved.unavailable.length)
@@ -283,18 +287,17 @@ export function registerImplementation(
       const result = await verify({
         ctx,
         implementation: source,
+        target,
         transcript,
         settings: settings.verification ?? { automatic: true },
         signal: combined,
-        onProgress: (text) => {
-          if (current()) status(ctx, sanitizeTerminalText(text));
-        },
+        onProgress: () => {},
       });
       assertCurrent();
       const timestamp = new Date().toISOString();
       pi.appendEntry("pi-plan-check", {
         implementationId: source.id,
-        revisionHashes: source.revisions.map((item) => item.hash),
+        planHash: target.hash,
         transcriptHash: transcript.hash,
         transcriptEndpoint: transcript.endpoint,
         timestamp,
@@ -302,7 +305,8 @@ export function registerImplementation(
       });
       commit({
         ...source,
-        lastCheck: { status: result.report.status, timestamp, revisionHash: latestPlan(source).hash },
+        phase: "completed",
+        lastCheck: { status: result.report.status, timestamp, hash: target.hash },
       });
       return result;
     } catch (error) {
@@ -310,21 +314,27 @@ export function registerImplementation(
         const timestamp = new Date().toISOString();
         pi.appendEntry("pi-plan-check", {
           implementationId: source.id,
-          revisionHashes: source.revisions.map((item) => item.hash),
+          planId: source.document.id,
           transcriptHash: transcript.hash,
           transcriptEndpoint: transcript.endpoint,
           timestamp,
           outcome: "failed",
           error: errorMessage(error),
         });
-        commit({ ...source, lastCheck: { status: "failed", timestamp, revisionHash: latestPlan(source).hash } });
+        commit({ ...source, phase: "completed", lastCheck: { status: "failed", timestamp, hash: source.hash } });
       }
       throw error;
     } finally {
       dialog.abort();
       await cancellation?.catch(() => {});
-      if (operation === controller) operation = undefined;
-      if (owner === manager) status(ctx);
+      if (operation === controller) {
+        operation = undefined;
+        if (owner === manager && state?.id === source.id) {
+          commit({ ...state, phase: "completed" });
+          activate(ctx);
+          status(ctx);
+        }
+      }
     }
   }
 
@@ -338,7 +348,7 @@ export function registerImplementation(
     ),
   );
 
-  function revisionOperation(ctx: ExtensionContext, signal?: AbortSignal) {
+  function planOperation(ctx: ExtensionContext, signal?: AbortSignal) {
     const source = requireImplementation(ctx);
     const manager = ctx.sessionManager;
     const version = generation;
@@ -350,39 +360,36 @@ export function registerImplementation(
     };
   }
 
-  async function publishRevision(
+  async function publishPlan(
     ctx: ExtensionContext,
-    operation: ReturnType<typeof revisionOperation>,
+    operation: ReturnType<typeof planOperation>,
     store: PlanStore,
     plan: string,
-    reason?: string,
   ) {
     const { source, signal, isCurrent } = operation;
     if (!isCurrent()) throw new Error("Plan update cancelled.");
-    const previous = latestPlan(source);
-    const revision = await store.save(plan, {
-      series: previous.revision.series,
-      parent: previous.revision,
-      parentPlan: previous.plan,
-      reason,
+    const document = await store.save(plan, {
+      document: source.document,
+      expectedHash: source.hash,
       signal,
       isCurrent,
     });
-    if (!isCurrent()) throw new Error(`Plan saved at ${revision.path}, but implementation ownership changed.`);
+    if (!isCurrent()) throw new Error(`Plan saved at ${document.path}, but implementation ownership changed.`);
     try {
       commit({
         ...source,
-        revisions: [...source.revisions, snapshot(revision, plan)],
+        document,
+        hash: planHash(plan),
         lastCheck: undefined,
         completion: undefined,
       });
     } catch (error) {
       throw new Error(
-        `Plan saved at ${revision.path}, but implementation tracking could not be persisted. The previous tracked revision is still current; retry the update before implementing this change. ${errorMessage(error)}`,
+        `Plan saved at ${document.path}, but tracking could not be persisted. Read plan_mode_implementation_status before continuing. ${errorMessage(error)}`,
       );
     }
     status(ctx);
-    return revision;
+    return document;
   }
 
   pi.registerTool({
@@ -391,23 +398,23 @@ export function registerImplementation(
     defaultActive: false,
     executionMode: "sequential",
     description:
-      "During tracked implementation, save a COMPLETE revised plan before implementing a user-requested change. Reason is optional. Prefer plan_mode_edit for localized revisions. Does not require another approval dialog.",
+      "Update the current single-file implementation plan with a COMPLETE replacement. Prefer plan_mode_edit for localized changes. Does not require another approval dialog.",
     parameters: PLAN_MODE_COMPLETE_PARAMS,
     renderResult: renderPlanModeCompletion,
     async execute(_id, params, signal, _update, ctx) {
-      const operation = revisionOperation(ctx, signal);
+      const operation = planOperation(ctx, signal);
       const parsed = normalizePlanModeCompletion(params);
       if (!parsed.ok) throw new Error(parsed.error);
       const store = await ownedStore(ctx, operation.source);
-      const revision = await publishRevision(ctx, operation, store, parsed.plan, parsed.reason);
+      const document = await publishPlan(ctx, operation, store, parsed.plan);
       return {
         content: [
           {
             type: "text",
-            text: `## Implementation plan updated\n\nReason: ${parsed.reason ?? "Not supplied"}\n\n${parsed.plan}\n\nSaved to: ${revision.path}\nContinue implementing this revision; no additional approval dialog is required.`,
+            text: `## Implementation plan updated\n\n${parsed.plan}\n\nSaved to: ${document.path}\nContinue implementation; no additional approval dialog is required.`,
           },
         ],
-        details: { revision, reason: parsed.reason },
+        details: { document },
       };
     },
   });
@@ -416,20 +423,25 @@ export function registerImplementation(
     label: "Current implementation plan",
     defaultActive: false,
     description:
-      "Read the authoritative current tracked implementation plan after compaction or whenever the current revision is uncertain. Does not save a revision.",
+      "Read the current tracked plan file after compaction or whenever its contents are uncertain. Does not modify the file.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     renderResult: renderPlanModeCompletion,
     async execute(_id, _params, _signal, _update, ctx) {
       const source = requireImplementation(ctx);
-      const latest = latestPlan(source);
+      const op = planOperation(ctx);
+      const store = await ownedStore(ctx, source);
+      const plan = await store.read(source.document);
+      if (!op.isCurrent()) throw new Error("Plan read cancelled.");
+      const hash = planHash(plan);
+      commit({ ...source, hash });
       return {
         content: [
           {
             type: "text",
-            text: `## Current implementation plan\n\nImplementation: ${source.id}\nRevision: ${latest.revision.revision}\nPath: ${latest.revision.path}\nSHA-256: ${latest.hash}\nReason: ${latest.revision.history?.reason ?? "Not supplied"}\n\n${latest.plan}`,
+            text: `## Current implementation plan\n\nImplementation: ${source.id}\nPath: ${source.document.path}\nSHA-256: ${hash}\n\n${plan}`,
           },
         ],
-        details: latest,
+        details: { document: source.document, hash },
       };
     },
   });
@@ -492,21 +504,22 @@ export function registerImplementation(
     get state() {
       return state;
     },
-    get checking() {
-      return !!operation;
+    checking(ctx: ExtensionContext) {
+      return owner === ctx.sessionManager && !!operation;
     },
     active,
     progress: progress.toggle,
     async edit(ctx: ExtensionToolContext, input: PlanEditInput, signal?: AbortSignal) {
-      const operation = revisionOperation(ctx, signal);
+      const operation = planOperation(ctx, signal);
       const store = await ownedStore(ctx, operation.source);
       if (!operation.isCurrent()) throw new Error("Plan update cancelled.");
-      const previous = latestPlan(operation.source);
-      const plan = await store.read(previous.revision);
-      if (planHash(plan) !== previous.hash) throw new Error("Current implementation plan changed on disk.");
-      const edited = await applyPlanEdits(ctx, input, previous.revision, plan, operation.signal);
-      const revision = await publishRevision(ctx, operation, store, edited.plan);
-      return planModeEdited(revision, previous.revision.path, edited, false);
+      const previous = operation.source.document;
+      const plan = await store.read(previous);
+      if (planHash(plan) !== operation.source.hash)
+        throw new Error("Current plan changed on disk. Read plan_mode_implementation_status before editing.");
+      const edited = await applyPlanEdits(ctx, input, previous, plan, operation.signal);
+      const document = await publishPlan(ctx, operation, store, edited.plan);
+      return planModeEdited(document, edited, false);
     },
     begin,
     rollback,
@@ -514,7 +527,7 @@ export function registerImplementation(
     cancel,
     prepare(
       _ctx: ExtensionContext,
-      revision: PlanRevision,
+      document: PlanDocument,
       plan: string,
       store: PlanStore,
       tools?: string[],
@@ -536,7 +549,8 @@ export function registerImplementation(
           tools,
           toolIdentities: toolIdentities(pi.getAllTools(), names),
         },
-        snapshot(revision, plan),
+        document,
+        plan,
       );
     },
     async command(command: string, ctx: ExtensionContext): Promise<boolean> {
@@ -560,15 +574,19 @@ export function registerImplementation(
         const source = state;
         const manager = ctx.sessionManager;
         const version = generation;
-        await ownedStore(ctx, source);
+        const store = await ownedStore(ctx, source);
+        const plan = await store.read(source.document);
         if (generation !== version || owner !== manager) return true;
-        begin({ ...source, phase: "implementing", completion: undefined, lastCheck: undefined }, ctx);
+        begin(
+          { ...source, hash: planHash(plan), phase: "implementing", completion: undefined, lastCheck: undefined },
+          ctx,
+        );
         if (ctx.hasUI)
           ctx.ui.notify("Implementation tracking resumed. Send the requested fixes or changes now.", "info");
         return true;
       }
       if (command === "cancel") {
-        cancel();
+        cancel(ctx);
         status(ctx);
         return true;
       }
@@ -602,6 +620,23 @@ export function registerImplementation(
             },
             { signal },
           );
+      } else if (choice === "Naming model") {
+        const available = ctx.modelRegistry.getAvailable();
+        const options = [
+          "Progress model (default)",
+          ...available.map((model, index) => `${index + 1}. ${sanitizeTerminalText(`${model.provider}/${model.id}`)}`),
+        ];
+        const answer = await ctx.ui.select(
+          "Naming model — receives initial task only (additional provider request)",
+          options,
+          { signal },
+        );
+        if (!answer || signal.aborted) return;
+        const selected = available[options.indexOf(answer) - 1];
+        await updatePlanModeSettings(
+          { naming: { model: selected ? { provider: selected.provider, id: selected.id } : null } },
+          { signal },
+        );
       } else if (choice === "Progress model") {
         const available = ctx.modelRegistry.getAvailable();
         const options = [
@@ -640,11 +675,6 @@ export function registerImplementation(
       }
     },
   };
-}
-function latestPlan(state: ImplementationState) {
-  const latest = state.revisions.at(-1);
-  if (!latest) throw new Error("Implementation has no baseline plan.");
-  return latest;
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

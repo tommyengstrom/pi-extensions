@@ -41,6 +41,7 @@ const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentToo
   "@earendil-works/pi-ai"
 );
 const { IMPLEMENTATION_HELPERS, restoreImplementation } = await import("../src/implementation-state.js");
+const { createPlanStore, planHash } = await import("../src/plan-store.js");
 const { default: planMode } = await import("../src/plan-mode.js");
 const { default: entrypoint } = await import("../src/index.js");
 
@@ -54,6 +55,7 @@ async function fixture(
   extra?: (pi: ExtensionAPI) => void,
   shortcuts?: import("../src/settings.js").PlanModeSettings["shortcuts"],
   trustedTools?: string[],
+  verify?: import("../src/implementation.js").ImplementationDependencies["verify"],
 ) {
   const cwd = await mkdtemp(join(suiteRoot, "project-"));
   await mkdir(agentDir, { recursive: true });
@@ -61,6 +63,7 @@ async function fixture(
   const replies: ToolCall[][] = [];
   const errors: ExtensionError[] = [];
   const statuses = new Map<string, string | undefined>();
+  const statusHistory: Array<{ key: string; value: string | undefined }> = [];
   const promptOptions: Array<{ section: string | undefined; forced: string | undefined }> = [];
   const lifecycle: string[] = [];
   const reviewPlan = vi.fn<typeof import("../src/interactive-ui.js").reviewPlan>(async () => undefined);
@@ -160,6 +163,9 @@ async function fixture(
           planMode(pi, {
             readSettings: async () => ({ plansDirectory: "plans", shortcuts, tools: trustedTools }),
             readInstructions: () => instructions,
+            // Naming is isolated from the main/checker request queue in these runtime tests.
+            namePlan: async () => "runtime-smoke",
+            verify,
             loadUi,
           }),
         (pi) => {
@@ -209,8 +215,16 @@ async function fixture(
           ...baseUi,
           setStatus: (key, value) => {
             statuses.set(key, value);
+            statusHistory.push({ key, value });
           },
           notify: vi.fn(),
+          select: verify
+            ? async (_title, _options, options) =>
+                new Promise<string | undefined>((resolve) => {
+                  if (options?.signal?.aborted) resolve(undefined);
+                  else options?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+                })
+            : baseUi.select,
         },
         onError: (error) => {
           errors.push(error);
@@ -237,11 +251,15 @@ async function fixture(
       requests,
       errors,
       statuses,
+      statusHistory,
       promptOptions,
       lifecycle,
       reviewPlan,
       loadUi,
       newSessions,
+      async readPlan(document: import("../src/plan-store.js").PlanDocument) {
+        return (await createPlanStore(cwd, { kind: "repo" }, agentDir)).read(document);
+      },
       queueTool(name: string, args: ToolCall["arguments"] = {}) {
         replies.push([{ type: "toolCall", id: `tool-${requests.length}`, name, arguments: args }]);
       },
@@ -294,6 +312,19 @@ function toolNames(messages: Message[]) {
     .sort();
 }
 
+function assertStatus(f: Awaited<ReturnType<typeof fixture>>, expected: string) {
+  assert.equal(f.statuses.get("plan-mode"), expected);
+  assert.equal(f.statuses.get("plan-implementation"), undefined);
+  assert.ok(f.statusHistory.every(({ key, value }) => key !== "plan-implementation" || value === undefined));
+}
+
+async function assertSingleFile(document: import("../src/plan-store.js").PlanDocument) {
+  assert.deepEqual(
+    (await readdir(dirname(document.path))).filter((name) => name.endsWith(".md")),
+    [basename(document.path)],
+  );
+}
+
 test("native shortcut resolution and key matching preserve Enter and reserved host bindings", async () => {
   const { KeybindingsManager } = await import(
     new URL("./core/keybindings.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
@@ -317,8 +348,10 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
     const previousTools = f.runtime.session.getActiveToolNames();
     await toggle.handler(context);
     assert.equal(stateOf(f.runtime.session).kind, "planning");
+    assertStatus(f, "[Planning]");
     await toggle.handler(context);
     assert.equal(stateOf(f.runtime.session).kind, "idle");
+    assertStatus(f, "[Normal]");
     assert.deepEqual(f.runtime.session.getActiveToolNames(), previousTools);
     assert.equal(f.requests.length, 0);
     // A user's reserved binding wins over the extension default.
@@ -336,16 +369,59 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
   }
 });
 
+test("real tree navigation restores the verification-start boundary without resurrecting implementation", async () => {
+  const entered = Promise.withResolvers<import("../src/verification.js").VerificationInput>();
+  const finished = Promise.withResolvers<import("../src/verification.js").VerificationResult>();
+  const f = await fixture(undefined, undefined, undefined, async (input) => {
+    entered.resolve(input);
+    return finished.promise;
+  });
+  try {
+    const session = f.runtime.session;
+    const baseline = session.getActiveToolNames();
+    await session.prompt("/plan start");
+    await f.complete();
+    f.choose("here");
+    const beforeKickoff = f.requests.length;
+    await session.prompt("/plan");
+    await vi.waitFor(() => assert.equal(f.requests.length, beforeKickoff + 1));
+    await session.waitForIdle();
+    const checking = session.prompt("/plan verify");
+    const input = await entered.promise;
+    const boundary = session.sessionManager.getLeafId();
+    assert.ok(boundary);
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
+    session.sessionManager.appendCustomEntry("test-descendant", {});
+    await session.navigateTree(boundary, { summarize: false });
+    assert.equal(input.signal.aborted, true);
+    assertStatus(f, "[Normal]");
+    assert.deepEqual(session.getActiveToolNames(), baseline);
+    const entries = structuredClone(session.sessionManager.getEntries());
+    finished.resolve({ model: { provider: "offline", id: "checker" }, report: { status: "ok", motivation: "Late" } });
+    await checking;
+    assert.deepEqual(session.sessionManager.getEntries(), entries);
+    assertStatus(f, "[Normal]");
+    await session.prompt("/plan resume");
+    assertStatus(f, "[Implementing runtime-smoke]");
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("real completion runs one isolated checker and terminates without a main-agent retry", async () => {
   const f = await fixture();
   try {
     const session = f.runtime.session;
     await session.prompt("PRIVATE PLANNING CONTENT");
     await session.prompt("/plan start");
-    await f.complete();
+    const ready = await f.complete();
     f.choose("here");
+    const beforeKickoff = f.requests.length;
     await session.prompt("/plan");
+    await vi.waitFor(() => assert.equal(f.requests.length, beforeKickoff + 1));
     await session.waitForIdle();
+    assertStatus(f, `[Implementing ${ready.document.name}]`);
     await session.prompt("Keep the material requirements unchanged.");
     const prefix = f.requests.at(-1);
     assert.ok(prefix);
@@ -355,6 +431,10 @@ test("real completion runs one isolated checker and terminates without a main-ag
       prefix,
       "ordinary implementation turns retain the request prefix",
     );
+    // The checker must capture the current disk target, not the kickoff text or stored hash.
+    const currentPlan = `${plan}\n\nCurrent on-disk verification requirement.`;
+    const raw = await readFile(ready.document.path, "utf8");
+    await writeFile(ready.document.path, raw.replace(plan, currentPlan));
     const before = f.requests.length;
     f.queueTool("plan_mode_implementation_complete");
     await session.prompt("Implementation is ready; signal completion now.");
@@ -363,8 +443,15 @@ test("real completion runs one isolated checker and terminates without a main-ag
     assert.ok(childRequest);
     assert.equal(JSON.stringify(childRequest).includes("PRIVATE PLANNING CONTENT"), false);
     assert.ok(JSON.stringify(childRequest).includes("Keep the material requirements unchanged."));
+    assert.ok(JSON.stringify(childRequest).includes("Current on-disk verification requirement."));
+    assert.ok(JSON.stringify(childRequest).includes(planHash(currentPlan)));
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.status, "ok");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.hash, planHash(currentPlan));
+    assert.ok(
+      f.statusHistory.some(({ key, value }) => key === "plan-mode" && value === `[Verifying ${ready.document.name}]`),
+    );
+    assertStatus(f, "[Normal]");
     assert.deepEqual(toolNames(childRequest), ["find", "grep", "ls", "read", "submit_adherence_report"]);
     assert.equal(session.getActiveToolNames().includes("submit_adherence_report"), false);
     assert.equal(session.getActiveToolNames().includes("plan_mode_implementation_complete"), false);
@@ -372,6 +459,8 @@ test("real completion runs one isolated checker and terminates without a main-ag
     await session.prompt("/plan resume");
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck, undefined);
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "implementing");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.hash, planHash(currentPlan));
+    assertStatus(f, `[Implementing ${ready.document.name}]`);
   } finally {
     await f.dispose();
   }
@@ -491,16 +580,26 @@ test("completion saves the full Markdown, terminates, and automatically opens re
     const session = f.runtime.session;
     await session.prompt("/plan start");
     const ready = await f.complete();
-    assert.match(basename(ready.revision.path), /^\d{4}-\d{2}-\d{2}-runtime-smoke-01\.md$/);
-    assert.equal(dirname(dirname(ready.revision.path)), join(agentDir, "pi-plan-mode"));
-    assert.equal(await readFile(ready.revision.path, "utf8"), plan);
+    assert.equal(basename(ready.document.path), "runtime-smoke.md");
+    assert.equal(dirname(dirname(ready.document.path)), join(agentDir, "pi-plan-mode"));
+    assert.equal(await f.readPlan(ready.document), plan);
+    assert.match(await readFile(ready.document.path, "utf8"), /^<!-- pi-plan-document-v3:/);
+    assert.equal(ready.workflow.version, 3);
+    assert.ok(ready.workflow.id);
+    assert.equal(ready.workflow.name, ready.document.name);
+    assert.deepEqual(ready.workflow.document, ready.document);
+    assert.equal(ready.workflow.hash, planHash(plan));
+    assert.equal("parent" in ready.workflow, false);
+    assert.equal("series" in ready.workflow, false);
+    assert.equal("plan" in ready.workflow, false);
+    await assertSingleFile(ready.document);
     const result = session.messages.findLast((message) => message.role === "toolResult");
     assert.ok(result?.role === "toolResult");
     assert.equal(result.isError, false);
     const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     assert.ok(text.includes(plan));
-    assert.ok(text.includes(ready.revision.path));
-    assert.ok([...f.statuses.values()].some((value) => value?.includes("ready")));
+    assert.ok(text.includes(ready.document.path));
+    assertStatus(f, `[Planning ${ready.document.name}]`);
     assert.equal(f.reviewPlan.mock.calls.length, 1);
     assert.equal(f.loadUi.mock.calls.length, 1);
     assert.equal(f.reviewPlan.mock.calls[0]?.[1], plan);
@@ -574,6 +673,7 @@ test("real-runtime TUI smoke: automatic document review, dismissal, reopening, t
     tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     await reopened;
+    await vi.waitFor(() => assert.equal(f.requests.length, 2));
     await session.waitForIdle();
     assert.equal(f.requests.length, 2);
     assert.equal(stateOf(session).kind, "idle");
@@ -583,7 +683,7 @@ test("real-runtime TUI smoke: automatic document review, dismissal, reopening, t
   }
 });
 
-test("finalize and later revisions automatically present review without control-text model requests", async () => {
+test("finalize and later replacements automatically present review without control-text model requests", async () => {
   const f = await fixture();
   const started = Promise.withResolvers<void>();
   const unsubscribe = f.runtime.session.subscribe((event) => {
@@ -600,14 +700,25 @@ test("finalize and later revisions automatically present review without control-
     await session.waitForIdle();
     assert.equal(f.reviewPlan.mock.calls.length, 1);
     assert.equal(f.requests.length, 1);
-    f.queueTool("plan_mode_complete", { plan: `${plan}\n\nNew requirement.`, reason: "User added a requirement" });
-    await session.prompt("Revise the plan with the new requirement.");
+    const first = stateOf(session);
+    assert.ok(first.kind === "ready");
+    const replacement = "# Replacement plan\n\nA new complete body, not an appended revision.";
+    f.queueTool("plan_mode_complete", { plan: replacement });
+    await session.prompt("Replace the plan with the new requirements.");
     await session.waitForIdle();
     assert.equal(f.reviewPlan.mock.calls.length, 2);
     assert.equal(f.requests.length, 2);
     const ready = stateOf(session);
     assert.ok(ready.kind === "ready");
-    assert.equal(ready.revision.revision, 2);
+    assert.equal(ready.document.id, first.document.id);
+    assert.equal(ready.document.path, first.document.path);
+    assert.equal(ready.document.name, first.document.name);
+    assert.equal(ready.document.title, "Replacement plan");
+    assert.equal(ready.workflow.id, first.workflow.id);
+    assert.equal(ready.workflow.hash, planHash(replacement));
+    assert.equal(await f.readPlan(first.document), replacement);
+    assert.equal(f.reviewPlan.mock.calls.at(-1)?.[1], replacement);
+    await assertSingleFile(ready.document);
     assert.equal(JSON.stringify(f.requests).includes("__review"), false);
   } finally {
     unsubscribe();
@@ -633,7 +744,7 @@ test("tree navigation restores planning, ready, and idle from the active branch 
     assert.deepEqual(session.getActiveToolNames().sort(), [...planningTools].sort());
     await session.navigateTree(readyLeaf, { summarize: false });
     assert.deepEqual(stateOf(session), ready);
-    assert.ok([...f.statuses.values()].some((value) => value?.includes("ready")));
+    assertStatus(f, `[Planning ${ready.document.name}]`);
     await session.navigateTree(root, { summarize: false });
     assert.equal(stateOf(session).kind, "idle");
     assert.deepEqual(session.getActiveToolNames(), previous);
@@ -663,8 +774,8 @@ test.each([undefined, "save", "continue", "here"] as const)(
       assert.equal(f.newSessions.length, 0);
       assert.equal(f.reviewPlan.mock.calls.length, 2, "manual /plan reopens the dismissed automatic review");
       assert.equal(f.reviewPlan.mock.calls[1]?.[1], plan);
-      assert.deepEqual(f.reviewPlan.mock.calls[1]?.[2], ready.revision);
-      assert.equal(await readFile(ready.revision.path, "utf8"), plan);
+      assert.deepEqual(f.reviewPlan.mock.calls[1]?.[2], ready.document);
+      assert.equal(await f.readPlan(ready.document), plan);
       if (action === undefined) {
         assert.deepEqual(stateOf(session), ready);
         assert.equal(f.requests.length, 1);
@@ -810,7 +921,7 @@ test("cancelled fresh replacement leaves the source ready and its plan available
     assert.equal(f.newSessions.length, 1);
     assert.equal(f.requests.length, 1);
     assert.deepEqual(f.lifecycle, ["start:startup"]);
-    assert.equal(await readFile(ready.revision.path, "utf8"), plan);
+    assert.equal(await f.readPlan(ready.document), plan);
   } finally {
     await f.dispose();
   }
@@ -820,7 +931,6 @@ test("fresh review uses command newSession/withSession and transfers only the fu
   const f = await fixture();
   try {
     const old = f.runtime.session;
-    const defaultTools = old.getActiveToolNames();
     await old.prompt("Private planning discussion that must not be copied.");
     old.sessionManager.appendCustomEntry("private-smoke-history", { secret: "not-for-implementation" });
     old.setActiveToolsByName(["read", "write"]);
@@ -843,8 +953,15 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     assert.throws(() => oldContext.sessionManager.getSessionId());
     assert.deepEqual(stateOf(old), { kind: "idle" }, "the source branch must not resume into a completed workflow");
     assert.equal(stateOf(replacement).kind, "idle");
-    assert.deepEqual(replacement.getActiveToolNames(), [...defaultTools, ...IMPLEMENTATION_HELPERS]);
-    assert.equal(restoreImplementation(replacement.sessionManager.getBranch())?.phase, "implementing");
+    assert.deepEqual(replacement.getActiveToolNames(), ["read", "write", ...IMPLEMENTATION_HELPERS]);
+    const tracked = restoreImplementation(replacement.sessionManager.getBranch());
+    assert.equal(tracked?.phase, "implementing");
+    assert.ok(tracked);
+    assert.equal(tracked.version, 3);
+    assert.deepEqual(tracked.document, ready.document);
+    assert.equal(tracked.hash, planHash(plan));
+    assert.equal("revisions" in tracked, false);
+    assert.equal("plan" in tracked, false);
     const transferred = f.requests.at(-1);
     assert.ok(transferred);
     const users = transferred.filter((message) => message.role === "user");
@@ -856,12 +973,14 @@ test("fresh review uses command newSession/withSession and transfers only the fu
       typeof user.content === "string"
         ? user.content
         : user.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+    assert.ok(text.startsWith("Implement the reviewed plan below."));
     assert.ok(text.includes(plan));
+    assert.ok(text.includes(ready.document.path));
     assert.equal(JSON.stringify(transferred).includes("Private planning discussion"), false);
     assert.equal(JSON.stringify(replacement.sessionManager.getEntries()).includes("not-for-implementation"), false);
     assert.equal(getCurrentSystemPrompt(transferred).includes(instructions), false);
-    assert.deepEqual(toolNames(transferred), [...defaultTools, ...IMPLEMENTATION_HELPERS].sort());
-    assert.equal(await readFile(ready.revision.path, "utf8"), plan);
+    assert.deepEqual(toolNames(transferred), ["read", "write", ...IMPLEMENTATION_HELPERS].sort());
+    assert.equal(await f.readPlan(ready.document), plan);
   } finally {
     await f.dispose();
   }
@@ -885,7 +1004,7 @@ test("real edit activation, terminating planning review, implementation continua
     const first = await f.complete();
     const before = f.requests.length;
     f.queueTool("plan_mode_edit", {
-      path: first.revision.path,
+      path: first.document.path,
       edits: [{ oldText: "Inspect the affected code.", newText: "Inspect the parser." }],
     });
     await session.prompt("Localize the inspection step.");
@@ -893,28 +1012,31 @@ test("real edit activation, terminating planning review, implementation continua
     const second = stateOf(session);
     assert.ok(second.kind === "ready");
     const secondPlan = plan.replace("Inspect the affected code.", "Inspect the parser.");
-    assert.equal(second.revision.revision, 2);
-    assert.equal(second.revision.history?.parent.revision, 1);
-    assert.equal(await readFile(first.revision.path, "utf8"), plan);
-    assert.ok((await readFile(second.revision.path, "utf8")).endsWith(secondPlan));
+    assert.equal(second.document.id, first.document.id);
+    assert.equal(second.document.path, first.document.path);
+    assert.equal(second.document.name, first.document.name);
+    assert.equal(second.workflow.hash, planHash(secondPlan));
+    assert.equal(await f.readPlan(first.document), secondPlan);
     assert.equal(f.reviewPlan.mock.calls.length, 2);
     assert.equal(f.reviewPlan.mock.calls.at(-1)?.[1], secondPlan);
     const result = session.messages.findLast((message) => message.role === "toolResult");
     assert.ok(result?.role === "toolResult");
     assert.equal(result.isError, false);
     const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
-    assert.ok(text.includes(second.revision.path));
+    assert.ok(text.includes(second.document.path));
     assert.equal(text.includes(secondPlan), false);
     const readyLeaf = session.sessionManager.getLeafId();
     assert.ok(readyLeaf);
     f.choose("here");
+    const beforeKickoff = f.requests.length;
     await session.prompt("/plan");
+    await vi.waitFor(() => assert.equal(f.requests.length, beforeKickoff + 1));
     await session.waitForIdle();
     assert.deepEqual(session.getActiveToolNames(), [...baselineTools, ...IMPLEMENTATION_HELPERS]);
     assert.equal(session.getActiveToolNames().filter((name) => name === "plan_mode_edit").length, 1);
     const beforeEdit = f.requests.length;
     f.queueTool("plan_mode_edit", {
-      path: second.revision.path,
+      path: second.document.path,
       edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
     });
     await session.prompt("Include Unicode verification before proceeding.");
@@ -922,23 +1044,32 @@ test("real edit activation, terminating planning review, implementation continua
     const tracked = restoreImplementation(session.sessionManager.getBranch());
     assert.ok(tracked);
     assert.equal(tracked.phase, "implementing");
-    assert.equal(tracked.revisions.length, 2);
-    assert.equal(tracked.revisions[0].plan, secondPlan);
-    const latest = tracked.revisions[1];
-    assert.equal(latest.revision.revision, 3);
-    assert.equal(latest.revision.history?.reason, undefined);
-    assert.equal(latest.plan, secondPlan.replace("Verify the result.", "Verify Unicode parsing."));
+    assert.equal(tracked.version, 3);
+    assert.deepEqual(tracked.document, second.document);
+    const latestPlan = secondPlan.replace("Verify the result.", "Verify Unicode parsing.");
+    assert.equal(tracked.hash, planHash(latestPlan));
+    assert.equal(await f.readPlan(tracked.document), latestPlan);
+    assert.equal("revisions" in tracked, false);
+    assert.equal("plan" in tracked, false);
+    await assertSingleFile(tracked.document);
     assert.equal(f.reviewPlan.mock.calls.length, 3, "only the manual implementation choice opened another review");
     session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
     await session.compact();
+    // Recovery reads disk even when branch tracking still holds the previous fingerprint.
+    const diskPlan = `${latestPlan}\n\nExternal current requirement.`;
+    const raw = await readFile(tracked.document.path, "utf8");
+    await writeFile(tracked.document.path, raw.replace(latestPlan, diskPlan));
     f.queueTool("plan_mode_implementation_status");
     await session.prompt("Recover the current plan after compaction.");
     assert.ok(session.getActiveToolNames().includes("plan_mode_edit"));
     const status = session.messages.findLast((message) => message.role === "toolResult");
     assert.ok(status?.role === "toolResult");
     assert.equal(status.isError, false);
-    assert.ok(JSON.stringify(status.content).includes(latest.revision.path));
-    assert.ok(JSON.stringify(status.content).includes("Not supplied"));
+    const statusText = status.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+    assert.ok(statusText.includes(tracked.document.path));
+    assert.ok(statusText.includes(diskPlan));
+    assert.ok(statusText.includes(planHash(diskPlan)));
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.hash, planHash(diskPlan));
     const implementationLeaf = session.sessionManager.getLeafId();
     assert.ok(implementationLeaf);
     await session.prompt("/plan exit");
@@ -949,19 +1080,31 @@ test("real edit activation, terminating planning review, implementation continua
       [...planningTools].sort(),
       "implementation restoration must not strip the shared edit helper from planning",
     );
+    // Branch restoration restores ownership, not historical file contents. Re-review
+    // the live file to refresh the earlier planning branch's optimistic-write hash.
+    await session.prompt("/plan");
+    assert.equal(f.reviewPlan.mock.calls.at(-1)?.[1], diskPlan);
     f.queueTool("plan_mode_edit", {
-      path: second.revision.path,
+      path: second.document.path,
       edits: [{ oldText: "Inspect the parser.", newText: "Inspect the lexer." }],
     });
     await session.prompt("Revise this earlier planning branch instead.");
     const branch = stateOf(session);
     assert.ok(branch.kind === "ready");
-    assert.equal(branch.revision.revision, 4);
-    assert.equal(branch.revision.history?.parent.revision, 2);
+    const branchPlan = diskPlan.replace("Inspect the parser.", "Inspect the lexer.");
+    assert.equal(branch.document.id, first.document.id);
+    assert.equal(branch.document.path, first.document.path);
+    assert.equal(branch.workflow.hash, planHash(branchPlan));
+    assert.equal(await f.readPlan(branch.document), branchPlan);
     assert.equal(restoreImplementation(session.sessionManager.getBranch()), undefined);
     await session.navigateTree(implementationLeaf, { summarize: false });
-    assert.deepEqual(restoreImplementation(session.sessionManager.getBranch())?.revisions, tracked.revisions);
+    assert.deepEqual(restoreImplementation(session.sessionManager.getBranch())?.document, tracked.document);
+    assert.equal(await f.readPlan(tracked.document), branchPlan, "navigation must not roll back the shared file");
     assert.deepEqual(session.getActiveToolNames(), [...baselineTools, ...IMPLEMENTATION_HELPERS]);
+    f.queueTool("plan_mode_implementation_status");
+    await session.prompt("Read the live plan on this restored implementation branch.");
+    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.hash, planHash(branchPlan));
+    await assertSingleFile(branch.document);
     assert.equal(f.runtime.session.extensionRunner.getToolDefinition("plan_mode_edit")?.executionMode, "sequential");
     await f.runtime.newSession();
     assert.equal(f.runtime.session.getActiveToolNames().includes("plan_mode_edit"), false);
@@ -1003,12 +1146,12 @@ test("real planning save helpers reject sibling batches and nested relays; imple
         name === "plan_mode_complete"
           ? { plan: `${plan}\n\nNew requirement.` }
           : {
-              path: first.revision.path,
+              path: first.document.path,
               edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
             };
       f.queueBatch([
         { name, arguments: input },
-        { name: "read", arguments: { path: first.revision.path } },
+        { name: "read", arguments: { path: first.document.path } },
       ]);
       await session.prompt("Try saving alongside an inspection call.");
       const blocked = session.messages.findLast(
@@ -1022,21 +1165,24 @@ test("real planning save helpers reject sibling batches and nested relays; imple
       assert.equal(nestedError, true, "a trusted orchestrator cannot hide a planning finalization call");
       const current = stateOf(session);
       assert.ok(current.kind === "planning");
-      assert.deepEqual(current.workflow.parent, first.revision);
-      assert.equal(await readFile(first.revision.path, "utf8"), plan);
-      assert.deepEqual(await readdir(dirname(first.revision.path)), [basename(first.revision.path)]);
+      assert.deepEqual(current.workflow.document, first.document);
+      assert.equal(current.workflow.hash, planHash(plan));
+      assert.equal(await f.readPlan(first.document), plan);
+      await assertSingleFile(first.document);
       assert.equal(f.reviewPlan.mock.calls.length, 1, "rejected saves must not schedule review");
     }
     // A standalone retry still works, and only planning imposes this turn-ending protocol.
     await f.complete();
     f.choose("here");
+    const beforeKickoff = f.requests.length;
     await session.prompt("/plan");
+    await vi.waitFor(() => assert.equal(f.requests.length, beforeKickoff + 1));
     await session.waitForIdle();
     const baseline = restoreImplementation(session.sessionManager.getBranch());
     assert.ok(baseline);
     target = "plan_mode_edit";
     input = {
-      path: baseline.revisions[0].revision.path,
+      path: baseline.document.path,
       edits: [{ oldText: "Verify the result.", newText: "Verify Unicode parsing." }],
     };
     nestedError = undefined;
@@ -1047,10 +1193,29 @@ test("real planning save helpers reject sibling batches and nested relays; imple
     assert.equal(f.requests.length, before + 2, "nested implementation edits do not end the turn");
     const revised = restoreImplementation(session.sessionManager.getBranch());
     assert.ok(revised);
-    assert.equal(revised.revisions.length, 2);
-    assert.deepEqual(revised.revisions[0], baseline.revisions[0]);
-    assert.equal(revised.revisions[1].plan, plan.replace("Verify the result.", "Verify Unicode parsing."));
+    const revisedPlan = plan.replace("Verify the result.", "Verify Unicode parsing.");
+    assert.deepEqual(revised.document, baseline.document);
+    assert.equal(revised.hash, planHash(revisedPlan));
+    assert.equal(await f.readPlan(baseline.document), revisedPlan);
+    assert.equal("revisions" in revised, false);
+    assert.equal("plan" in revised, false);
     assert.equal(f.reviewPlan.mock.calls.length, 3);
+    // Broad implementation updates use the same complete-body schema, without a reason.
+    const replacement = "# New implementation body\n\nImplement the replacement requirements.";
+    const beforeUpdate = f.requests.length;
+    f.queueTool("plan_mode_update", { plan: replacement });
+    await session.prompt("Replace the implementation plan with this complete body.");
+    assert.equal(f.requests.length, beforeUpdate + 2);
+    const updated = restoreImplementation(session.sessionManager.getBranch());
+    assert.ok(updated);
+    assert.equal(updated.document.id, baseline.document.id);
+    assert.equal(updated.document.path, baseline.document.path);
+    assert.equal(updated.document.name, baseline.document.name);
+    assert.equal(updated.document.title, "New implementation body");
+    assert.equal(updated.hash, planHash(replacement));
+    assert.equal(await f.readPlan(baseline.document), replacement);
+    await assertSingleFile(updated.document);
+    assert.equal(f.reviewPlan.mock.calls.length, 3, "implementation replacement does not open another review");
   } finally {
     await f.dispose();
   }

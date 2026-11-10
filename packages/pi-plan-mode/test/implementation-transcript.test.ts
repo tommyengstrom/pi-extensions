@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { test } from "vitest";
-import { IMPLEMENTATION_ENTRY, INPUT_ENTRY, VERIFICATION_MESSAGE } from "../src/implementation-state.js";
+import {
+  createImplementation,
+  IMPLEMENTATION_ENTRY,
+  INPUT_ENTRY,
+  restoreImplementation,
+  VERIFICATION_MESSAGE,
+} from "../src/implementation-state.js";
 import { implementationTranscript, writeTranscriptArtifact } from "../src/implementation-transcript.js";
 import { planHash } from "../src/plan-store.js";
+import { planDocument } from "./support.js";
 
 const phase = (id: string, value: string, implementation = "impl") => ({
   id,
@@ -92,17 +99,38 @@ test("context edits never resurrect omitted text, attachment gaps and missing st
 });
 
 test("transcript artifacts are private, complete, and disposable", async () => {
-  const snapshot = implementationTranscript(
+  const transcript = implementationTranscript(
     [phase("start", "implementing"), message("large", "assistant", "large\n".repeat(20_000))],
     "impl",
   );
-  const artifact = await writeTranscriptArtifact(snapshot, new AbortController().signal);
-  assert.equal(await readFile(artifact.path, "utf8"), snapshot.document);
+  const artifact = await writeTranscriptArtifact(transcript, new AbortController().signal);
+  assert.equal(await readFile(artifact.path, "utf8"), transcript.document);
   assert.equal((await stat(artifact.directory)).mode & 0o077, 0);
   assert.equal((await stat(artifact.path)).mode & 0o077, 0);
   await artifact.dispose();
   await assert.rejects(stat(artifact.path), /ENOENT/);
   const aborted = new AbortController();
   aborted.abort();
-  await assert.rejects(writeTranscriptArtifact(snapshot, aborted.signal), /abort/i);
+  await assert.rejects(writeTranscriptArtifact(transcript, aborted.signal), /abort/i);
+});
+
+test("v3 implementation entries retain only a document locator and hash, not approved-plan copies", () => {
+  const document = planDocument();
+  const plan = "# Current target\n\nImplement blue.";
+  const state = createImplementation(
+    { projectRoot: "/project", storage: { kind: "repo" }, previousTools: ["read", "write"], toolIdentities: [] },
+    document,
+    plan,
+  );
+  assert.equal(state.version, 3);
+  assert.equal(state.phase, "implementing");
+  assert.deepEqual(state.document, document);
+  assert.equal(state.hash, planHash(plan));
+  assert.equal("revisions" in state, false);
+  assert.equal("plan" in state, false);
+  const entry = { type: "custom", customType: IMPLEMENTATION_ENTRY, data: state };
+  assert.deepEqual(restoreImplementation([entry]), state);
+  assert.equal(JSON.stringify(entry).includes(plan), false);
+  for (const invalid of [{ version: 1 }, { document: undefined }, { hash: "bad" }])
+    assert.throws(() => restoreImplementation([{ ...entry, data: { ...state, ...invalid } }]), /Invalid|Legacy/);
 });

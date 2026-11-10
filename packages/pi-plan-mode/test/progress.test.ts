@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
-import { createImplementation, snapshot } from "../src/implementation-state.js";
+import { createImplementation } from "../src/implementation-state.js";
 import { implementationTranscript } from "../src/implementation-transcript.js";
+import { type PlanStore, planHash } from "../src/plan-store.js";
 import { createProgressController, PROGRESS_WIDGET, progressBullets, progressEvidence } from "../src/progress.js";
 import { OBSERVER_INSTRUCTIONS, type ProgressRequest } from "../src/progress-runner.js";
 import { DEFAULT_PROGRESS, type PlanModeSettings } from "../src/settings.js";
-import { createMockContext } from "./support.js";
+import { createMockContext, planDocument } from "./support.js";
 
 afterEach(() => vi.useRealTimers());
 function fixture() {
   vi.useFakeTimers();
+  let plan = "# Plan\nImplement tests.";
   const state = createImplementation(
-    { projectRoot: "/project", previousTools: [], toolIdentities: [] },
-    snapshot(
-      { revision: 1, path: "/plan.md", series: "plan", title: "Plan", createdAt: "today" } as never,
-      "# Plan\nImplement tests.",
-    ),
+    { projectRoot: "/project", storage: { kind: "repo" }, previousTools: [], toolIdentities: [] },
+    planDocument(),
+    plan,
   );
   const transcript = implementationTranscript([], state.id);
   const ctx = createMockContext({
@@ -26,8 +26,20 @@ function fixture() {
   });
   const calls: Array<ProgressRequest & ReturnType<typeof Promise.withResolvers<string>>> = [];
   let available = true;
+  const snapshot = () => (available ? { state, plan, transcript } : undefined);
+  const createStore = async (): Promise<PlanStore> => ({
+    projectRoot: state.projectRoot,
+    directory: "/plans",
+    storage: { kind: "repo" },
+    read: async () => plan,
+    list: async () => [state.document],
+    save: async () => {
+      throw new Error("Unexpected progress write");
+    },
+  });
   const controller = createProgressController({
-    snapshot: () => (available ? { state, transcript } : undefined),
+    createStore,
+    snapshot,
     readSettings: async () => ({}),
     runner: (request) => {
       const deferred = Promise.withResolvers<string>();
@@ -43,6 +55,12 @@ function fixture() {
     controller,
     calls,
     lines,
+    snapshot,
+    createStore,
+    changePlan: (body: string) => {
+      plan = body;
+      state.hash = planHash(body);
+    },
     disappear: () => {
       available = false;
     },
@@ -80,18 +98,21 @@ test("immediate RPC assessment, capability constraint, no-change suppression and
   f.controller.close();
 });
 
-test("revision invalidation discards late results and schedules current evidence", async () => {
+test("same-document hash invalidation discards late results and assesses current contents", async () => {
   const f = fixture();
+  const document = structuredClone(f.state.document);
   f.controller.toggle(f.ctx);
   await vi.advanceTimersByTimeAsync(0);
-  f.state.revisions.push(snapshot({ ...f.state.revisions[0].revision, revision: 2 }, "# New plan"));
+  f.changePlan("# New plan");
   f.controller.mark();
-  assert.match(f.lines(), /stale.*revised/);
-  f.calls[0].resolve("OLD REVISION");
+  assert.match(f.lines(), /stale/);
+  assert.deepEqual(f.state.document, document);
+  f.calls[0].resolve("OLD CONTENTS");
   await vi.advanceTimersByTimeAsync(30_000);
-  assert.doesNotMatch(f.lines(), /OLD REVISION/);
+  assert.doesNotMatch(f.lines(), /OLD CONTENTS/);
   assert.equal(f.calls.length, 2);
   assert.match(f.calls[1].prompt, /New plan/);
+  assert.doesNotMatch(f.calls[1].prompt, /Implement tests/);
   f.controller.close();
   f.calls[1].resolve("late");
 });
@@ -166,7 +187,7 @@ test("missing model never launches a child; print/json and inactive tracking ref
   f.controller.toggle(f.ctx);
   await vi.advanceTimersByTimeAsync(0);
   assert.equal(f.calls.length, 0);
-  assert.match(f.lines(), /unavailable as a chat model/);
+  assert.match(f.lines(), /unavailable/);
   f.controller.close();
   for (const mode of ["print", "json"]) {
     Object.assign(f.ctx, { mode });
@@ -186,7 +207,8 @@ test("settings are resolved per assessment; cancellation during setup prevents a
   };
   let first = true;
   const controller = createProgressController({
-    snapshot: () => ({ state: f.state, transcript: f.transcript }),
+    snapshot: f.snapshot,
+    createStore: f.createStore,
     readSettings: async () => (first ? settings.promise : configuration),
     runner: async (request) => {
       requests.push(request);

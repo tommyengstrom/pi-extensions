@@ -108,7 +108,7 @@ export function associate(artifacts: PlanArtifacts, reference: ArtifactReference
 }
 export function artifactGuidance(artifacts?: PlanArtifacts): string {
   if (!artifacts) return "";
-  return `\n\nArtifact workspace: ${JSON.stringify(artifacts.workspace.directory)}. Create in a new or empty child directory, not the workspace itself.\nLive artifacts (historical revisions point to current files, not snapshots):\n${artifacts.references.map((r) => `${r.artifactId} · job ${r.jobId} · ${r.status} · ${JSON.stringify(r.directory)}\n${r.paths.map((p) => JSON.stringify(p)).join("\n")}`).join("\n")}`;
+  return `\n\nArtifact workspace: ${JSON.stringify(artifacts.workspace.directory)}. Create in a new or empty child directory, not the workspace itself.\nLive artifacts (references point to current files, not snapshots):\n${artifacts.references.map((r) => `${r.artifactId} · job ${r.jobId} · ${r.status} · ${JSON.stringify(r.directory)}\n${r.paths.map((p) => JSON.stringify(p)).join("\n")}`).join("\n")}`;
 }
 export function artifactRequest(
   pi: ExtensionAPI,
@@ -121,9 +121,7 @@ export function artifactRequest(
     const timeout = setTimeout(
       () =>
         reject(
-          new Error(
-            "Artifact extension unavailable. Load pi-artifacts alongside Plan mode; no ready revision was published.",
-          ),
+          new Error("Artifact extension unavailable. Load pi-artifacts alongside Plan mode; no ready plan was saved."),
         ),
       2000,
     );
@@ -185,7 +183,7 @@ export async function artifactReadiness(
   const pending = references.filter((r) => r.status === "queued" || r.status === "running");
   if (pending.length)
     throw new ArtifactNotReady(
-      `Artifact jobs still pending: ${pending.map((r) => r.jobId).join(", ")}. Continue independent planning, then use artifact_wait before completing the plan. No revision was published.`,
+      `Artifact jobs still pending: ${pending.map((r) => r.jobId).join(", ")}. Continue independent planning, then use artifact_wait before completing the plan. No plan was saved.`,
       { ...artifacts, references },
     );
   const unresolved = references.filter((r) => r.status !== "succeeded" && !artifacts.omittedJobIds?.includes(r.jobId));

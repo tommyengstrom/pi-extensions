@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } fro
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, test, vi } from "vitest";
-import { createPlanStore, storedPlanStorage, validPlanStorage } from "../src/plan-store.js";
+import { createPlanStore, planHash, storedPlanStorage, validPlanStorage } from "../src/plan-store.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
 
 const roots: string[] = [];
@@ -25,86 +25,96 @@ function date(day: number) {
   vi.setSystemTime(new Date(2026, 0, day, 23, 45));
 }
 
-test("new series use the plain repository name, local first-save date, and initial description", async () => {
+test("new documents use repository storage and retain their first-save path across dates and title changes", async () => {
   date(2);
   const { cwd, agent, store } = await fixture();
   assert.equal(store.directory, join(agent, "pi-plan-mode", "my-repo"));
   assert.deepEqual(store.storage, { kind: "repo" });
   const first = await store.save("# A useful plan\n\nOriginal.");
-  assert.equal(basename(first.path), "2026-01-02-a-useful-plan-01.md");
+  assert.equal(basename(first.path), "a-useful-plan.md");
   vi.setSystemTime(new Date(2026, 0, 5, 1));
   const reopened = await createPlanStore(cwd, store.storage, agent);
-  const second = await reopened.save("# Changed title\n\nUpdated.", { series: first.series });
-  assert.equal(basename(second.path), "2026-01-02-a-useful-plan-02.md");
-  await unlink(first.path);
-  await writeFile(join(store.directory, `${first.series}-99.md`), "# Retained revision");
-  const last = await reopened.save("# Another title", { series: first.series });
-  assert.equal(basename(last.path), "2026-01-02-a-useful-plan-100.md");
+  const second = await reopened.save("# Changed title\n\nUpdated.", {
+    document: first,
+    expectedHash: planHash("# A useful plan\n\nOriginal."),
+  });
+  assert.equal(second.path, first.path);
+  assert.equal(second.id, first.id);
+  assert.equal(second.name, first.name);
+  assert.equal(await reopened.read(first), "# Changed title\n\nUpdated.");
+  assert.deepEqual(await reopened.list(), [second]);
   assert.deepEqual(await readdir(cwd), []);
 });
 
-test("series dates use the local calendar rather than the UTC date", async () => {
+test("dates and timezones never appear in new filenames or rename existing files", async () => {
   vi.stubEnv("TZ", "Pacific/Honolulu");
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-01-03T02:00:00Z"));
   const { store } = await fixture();
   const first = await store.save("# Local date");
-  assert.equal(basename(first.path), "2026-01-02-local-date-01.md");
+  assert.equal(basename(first.path), "local-date.md");
   vi.stubEnv("TZ", "Asia/Tokyo");
-  const second = await store.save("# New title", { series: first.series });
-  assert.equal(basename(second.path), "2026-01-02-local-date-02.md");
+  const second = await store.save("# New title", { document: first, expectedHash: planHash("# Local date") });
+  assert.equal(second.path, first.path);
 });
 
-test("same-named checkouts intentionally share new plans but retain separate legacy scopes", async () => {
+test("same-named checkouts intentionally share repo documents but retain separate legacy locations", async () => {
   const { root, cwd, agent, store } = await fixture();
   const other = join(root, "copy", "my-repo");
   await mkdir(other, { recursive: true });
   const shared = await createPlanStore(other, undefined, agent);
   assert.equal(shared.directory, store.directory);
   assert.notEqual(shared.projectRoot, store.projectRoot);
-  const revision = await store.save("# Shared plan");
-  assert.deepEqual(await shared.list(), [revision]);
-  assert.equal(await shared.read(revision), "# Shared plan");
+  const document = await store.save("# Shared plan");
+  assert.deepEqual(await shared.list(), [document]);
+  assert.equal(await shared.read(document), "# Shared plan");
   const legacy = await createPlanStore(cwd, "plans", agent);
   assert.notEqual(legacy.directory, (await createPlanStore(other, "plans", agent)).directory);
 });
 
-test("legacy stores remain unchanged and continuation does not invent dates", async () => {
+test("legacy files are left untouched and excluded; existing-only lookup does not create missing locations", async () => {
   date(2);
   const { cwd, agent, store } = await fixture();
   for (const directory of ["plans", "design/plans"]) {
     const legacy = await createPlanStore(cwd, directory, agent);
-    const first = await legacy.save("# Old plan");
-    const original = await readFile(first.path, "utf8");
-    assert.equal(basename(first.path), "old-plan-01.md");
+    const path = join(legacy.directory, "old-plan-01.md");
+    await writeFile(path, "# Old plan");
     const reopened = await createPlanStore(cwd, legacy.storage, agent, { existingOnly: true });
     vi.setSystemTime(new Date(2026, 4, 10));
-    const second = await reopened.save("# Updated old plan", { series: first.series });
-    assert.equal(basename(second.path), "old-plan-02.md");
-    assert.equal(await readFile(first.path, "utf8"), original);
+    assert.deepEqual(await reopened.list(), []);
+    assert.equal(await readFile(path, "utf8"), "# Old plan");
   }
   assert.deepEqual(await store.list(), []);
   await assert.rejects(createPlanStore(cwd, "missing", agent, { existingOnly: true }), { code: "ENOENT" });
   assert.equal((await readdir(join(agent, "pi-plan-mode"))).includes("missing"), false);
 });
 
-test("dated filename budgets and concurrent same-title saves preserve independent series", async () => {
+test("short filename budgets and concurrent same-title saves preserve independent document identities", async () => {
   date(2);
   const { cwd, agent, store } = await fixture();
   const stores = await Promise.all(Array.from({ length: 6 }, () => createPlanStore(cwd, undefined, agent)));
   const created = await Promise.all(stores.map((storage) => storage.save(`# ${"a".repeat(500)}`)));
-  assert.equal(new Set(created.map((revision) => revision.series)).size, stores.length);
-  assert.ok(created.every((revision) => revision.series.startsWith("2026-01-02-") && revision.series.length <= 120));
-  const first = created[0];
-  const continued = await Promise.all(stores.map((storage) => storage.save("# Continued", { series: first.series })));
-  assert.deepEqual(
-    continued.map((revision) => revision.revision).sort((a, b) => a - b),
-    [2, 3, 4, 5, 6, 7],
+  assert.equal(new Set(created.map((document) => document.id)).size, stores.length);
+  assert.equal(new Set(created.map((document) => document.path)).size, stores.length);
+  assert.ok(
+    created.every(
+      (document) =>
+        !/^\d{4}-\d{2}-\d{2}-/.test(basename(document.path)) && Buffer.byteLength(basename(document.path)) <= 80,
+    ),
   );
-  assert.equal((await store.list()).length, 12);
+  const updated = await Promise.all(
+    stores.map((storage, index) =>
+      storage.save("# Continued", { document: created[index], expectedHash: planHash(`# ${"a".repeat(500)}`) }),
+    ),
+  );
+  assert.deepEqual(
+    updated.map((document) => document.path),
+    created.map((document) => document.path),
+  );
+  assert.equal((await store.list()).length, 6);
 });
 
-test("new-layout directories and files reject symlinks and forged store identities", async () => {
+test("directories and files reject symlinks and forged storage identities", async () => {
   const { root, cwd, agent, store } = await fixture();
   const outside = join(root, "outside");
   await mkdir(outside);
@@ -112,7 +122,7 @@ test("new-layout directories and files reject symlinks and forged store identiti
   await unlink(first.path);
   await writeFile(join(outside, "plan.md"), "# Outside");
   await symlink(join(outside, "plan.md"), first.path);
-  await assert.rejects(store.read(first), /regular files/);
+  await assert.rejects(store.read(first));
   assert.deepEqual(await store.list(), []);
   await rm(store.directory, { recursive: true });
   await symlink(outside, store.directory);
@@ -121,23 +131,27 @@ test("new-layout directories and files reject symlinks and forged store identiti
   assert.equal(validPlanStorage({ kind: "other" }), false);
 });
 
-test("old state locators remain legacy while new states explicitly identify repo storage", async () => {
-  const workflow = { projectRoot: "/project", plansDirectory: "design/plans", instructions: "", previousTools: [] };
-  const old = restorePlanState([
-    { type: "custom", customType: PLAN_STATE_ENTRY, data: { kind: "planning", workflow } },
-  ]);
-  assert.equal(old.kind, "planning");
-  assert.deepEqual(storedPlanStorage(old.workflow), { kind: "legacy", plansDirectory: "design/plans" });
-  const modern = restorePlanState([
-    {
-      type: "custom",
-      customType: PLAN_STATE_ENTRY,
-      data: {
-        kind: "planning",
-        workflow: { projectRoot: "/project", storage: { kind: "repo" }, instructions: "", previousTools: [] },
+test("v3 workflows explicitly capture their selected storage", () => {
+  for (const storage of [{ kind: "repo" }, { kind: "legacy", plansDirectory: "design/plans" }] as const) {
+    const state = restorePlanState([
+      {
+        type: "custom",
+        customType: PLAN_STATE_ENTRY,
+        data: {
+          kind: "planning",
+          workflow: {
+            version: 3,
+            id: "33333333-3333-4333-8333-333333333333",
+            projectRoot: "/project",
+            storage,
+            instructions: "",
+            previousTools: [],
+          },
+        },
       },
-    },
-  ]);
-  assert.ok(modern.kind !== "idle");
-  assert.deepEqual(storedPlanStorage(modern.workflow), { kind: "repo" });
+    ]);
+    assert.equal(state.kind, "planning");
+    if (state.kind !== "planning") throw new Error("Expected workflow");
+    assert.deepEqual(storedPlanStorage(state.workflow), storage);
+  }
 });
