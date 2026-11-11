@@ -8,6 +8,7 @@ import { afterEach, test, vi } from "vitest";
 import { ARTIFACT_TOOLS, type ArtifactReference } from "../src/artifacts.js";
 import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } from "../src/implementation-state.js";
 import type { MenuLifecycle } from "../src/interactive-ui.js";
+import { resolvePlanEditorCommand } from "../src/plan-editor.js";
 import planMode from "../src/plan-mode.js";
 import { createPlanStore, type PlanDocument, type PlanStore, planHash } from "../src/plan-store.js";
 import { readPlanModeBasePrompt } from "../src/planning-instructions.js";
@@ -423,7 +424,7 @@ test("custom storage hints do not redirect new documents and browsing uses the s
   });
   const first = await ready(f);
   assert.ok(first.details.path.startsWith(`${f.agentDir}/pi-plan-mode/project/`));
-  await f.command("save");
+  await f.command("exit");
   const legacyDefault = await createPlanStore(f.cwd, "plans", f.agentDir);
   const legacyCustom = await createPlanStore(f.cwd, "design/plans", f.agentDir);
   const old = await legacyDefault.save("# Legacy default", { name: "legacy-default" });
@@ -825,7 +826,8 @@ test("default naming falls back to the first task, never the plan title or subse
 test("Save for later exits without deleting files and saved plans can be reviewed in another workflow", async () => {
   const f = await fixture();
   const result = await ready(f);
-  await f.command("save");
+  f.choose("save");
+  await f.command("implement");
   assert.equal(f.state().kind, "idle");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
   f.choose("continue");
@@ -836,6 +838,108 @@ test("Save for later exits without deleting files and saved plans can be reviewe
   const updated = await f.execute("plan_mode_complete", { plan: "# Another title\n\nNew brief." });
   assert.equal(updated.details.path, result.details.path);
   assert.equal(await savedBody(f, result.details.path), "# Another title\n\nNew brief.");
+});
+
+test.each(["ready", "follow-up", "retained"] as const)(
+  "implement reviews edited %s documents without regeneration",
+  async (phase) => {
+    const f = await fixture();
+    const saved = await ready(f);
+    if (phase === "follow-up") await f.command("Refine the plan");
+    if (phase === "retained") {
+      f.choose("here");
+      await f.command("");
+      await f.command("exit");
+      f.choose(undefined);
+      const store = await createPlanStore(f.cwd, undefined, f.agentDir);
+      await store.save("# Unrelated newer plan", { name: "unrelated" });
+    }
+    const edited = "# Manual changes\n\nPreserve these exact requirements.";
+    await replaceBody(saved.details.path, edited);
+    const bytes = await readFile(saved.details.path, "utf8");
+    const messages = f.sentUserMessages.length;
+    await f.command("implement");
+    assert.equal(f.reviews.at(-1), edited);
+    assert.equal(f.sentUserMessages.length, messages);
+    assert.equal(await readFile(saved.details.path, "utf8"), bytes);
+    f.choose("here");
+    await f.command("implement");
+    assert.equal(f.sentUserMessages.length, messages + 1);
+    assert.ok(f.sentUserMessages.at(-1)?.text.endsWith(edited));
+    assert.equal(implementationOf(f)?.hash, planHash(edited));
+  },
+);
+
+test("removed commands diagnose without changing files, mode, messages, or completions", async () => {
+  const f = await fixture();
+  const saved = await ready(f);
+  const bytes = await readFile(saved.details.path, "utf8");
+  const before = f.state();
+  const completions = (await f.commands.get("plan")?.getArgumentCompletions?.("")) as { value: string }[];
+  assert.ok(completions?.some((item) => item.value === "implement"));
+  for (const command of ["finalize", "save", "prompt", "cancel", "import", "IMPORT /tmp/old.md"]) {
+    assert.ok(!completions?.some((item) => item.value === command));
+    await f.command(command.toUpperCase());
+    assert.match(f.notifications.at(-1)?.message ?? "", /removed/);
+    assert.deepEqual(f.state(), before);
+    assert.equal(f.sentUserMessages.length, 0);
+    assert.equal(await readFile(saved.details.path, "utf8"), bytes);
+  }
+  await f.command("save bandwidth");
+  assert.equal(f.sentUserMessages.at(-1)?.text, "save bandwidth");
+});
+
+test("planning menus omit finalization and settings still opens planning-instruction editing", async () => {
+  const f = await fixture();
+  await f.command("start");
+  let editing = false;
+  Object.assign((f.ctx as ExtensionContext).ui, {
+    select: async (title: string, options: string[]) => {
+      assert.ok(!options.includes("Finalize plan"));
+      if (title === "Plan settings") {
+        assert.ok(options.includes("Edit planning prompt"));
+        return "Edit planning prompt";
+      }
+      return undefined;
+    },
+    editor: async (title: string) => {
+      assert.match(title, /Planning prompt/);
+      editing = true;
+      return undefined;
+    },
+  });
+  await f.command("");
+  await f.command("settings");
+  assert.equal(editing, true);
+  assert.equal(f.sentUserMessages.length, 0);
+});
+
+test("implement requires a current file, interactive review, idle agent and an unoccupied command gate", async () => {
+  const f = await fixture();
+  await f.command("implement");
+  assert.match(f.notifications.at(-1)?.message ?? "", /No current saved plan/);
+  await f.command("start");
+  await f.command("implement");
+  assert.match(f.notifications.at(-1)?.message ?? "", /No current saved plan/);
+  await f.execute("plan_mode_complete", { plan: PLAN });
+  for (const mode of ["print", "json"] as const) {
+    Object.assign(f.ctx, { mode, hasUI: false });
+    await assert.rejects(async () => f.command("implement"), /TUI or RPC/);
+  }
+  Object.assign(f.ctx, { mode: "rpc", hasUI: true, isIdle: () => false });
+  await f.command("implement");
+  assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+  Object.assign(f.ctx, { isIdle: () => true, hasPendingMessages: () => true });
+  await f.command("implement");
+  assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+  Object.assign(f.ctx, { hasPendingMessages: () => false });
+  f.onReview(async () => {
+    await f.command("implement");
+    assert.match(f.notifications.at(-1)?.message ?? "", /already open/);
+  });
+  await f.command("implement");
+  assert.equal(f.reviews.length, 1);
+  assert.equal(f.sentUserMessages.length, 0);
 });
 
 test("Implement here sends exactly the reviewed text and restores normal tools", async () => {
@@ -849,9 +953,11 @@ test("Implement here sends exactly the reviewed text and restores normal tools",
   assert.equal(f.statuses.get("plan-mode"), "[Implementing untitled-plan]");
 });
 
-test("fresh handoff transfers the plan and plain tracking data, not source history", async () => {
+test("implement fresh transfers manually edited text and plain tracking data, not source history", async () => {
   const f = await fixture();
-  await ready(f);
+  const saved = await ready(f);
+  const edited = "# Manually edited fresh plan";
+  await replaceBody(saved.details.path, edited);
   f.choose("fresh");
   let kickoff = "";
   Object.assign(f.ctx, {
@@ -871,8 +977,9 @@ test("fresh handoff transfers the plan and plain tracking data, not source histo
       return { cancelled: false };
     },
   });
-  await f.command("");
-  assert.ok(kickoff.endsWith(PLAN));
+  await f.command("implement");
+  assert.equal(f.reviews.at(-1), edited);
+  assert.ok(kickoff.endsWith(edited));
   assert.equal(kickoff.includes("Keep personal guidance"), false);
   assert.equal(f.state().kind, "idle", "successful handoff ends source ownership");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
@@ -1063,14 +1170,14 @@ test("handoff rejects contents changed during review and requires a new review",
   const saved = await ready(f);
   f.onReview(() => replaceBody(saved.details.path, "# Changed after review"));
   f.choose("here");
-  await f.command("");
+  await f.command("implement");
   assert.equal(f.sentUserMessages.length, 0);
   assert.equal(f.state().kind, "ready");
   assert.equal(implementationOf(f), undefined);
   assert.match(f.notifications.at(-1)?.message ?? "", /changed during review/);
   assert.equal(await savedBody(f, saved.details.path), "# Changed after review");
   f.onReview(undefined);
-  await f.command("");
+  await f.command("implement");
   assert.equal(f.reviews.at(-1), "# Changed after review");
   assert.ok(f.sentUserMessages.at(-1)?.text.endsWith("# Changed after review"));
   assert.equal(implementationOf(f)?.hash, planHash("# Changed after review"));
@@ -1166,6 +1273,169 @@ test("progress cannot reopen inactive tracking while adherence checking holds th
     vi.useRealTimers();
     await f.emit("session_shutdown");
   }
+});
+
+test("planning can review and reconcile an externally edited current file", async () => {
+  const f = await fixture();
+  await ready(f);
+  const source = f.state();
+  assert.ok(source.kind === "ready");
+  await f.emit("before_agent_start", promptEvent());
+  const raw = await readFile(source.document.path, "utf8");
+  await writeFile(source.document.path, raw.replace("material", "external"));
+  await assert.rejects(
+    f.execute("plan_mode_edit", {
+      path: source.document.path,
+      edits: [{ oldText: "external", newText: "reviewed" }],
+    }),
+    /changed on disk/,
+  );
+  await f.command("");
+  assert.match(f.reviews.at(-1) ?? "", /external decisions/);
+  await f.execute("plan_mode_edit", {
+    path: source.document.path,
+    edits: [{ oldText: "external", newText: "reviewed" }],
+  });
+  assert.match(await readFile(source.document.path, "utf8"), /reviewed decisions/);
+});
+
+test.each(["planning", "implementing", "completed"] as const)(
+  "/plan open edits the current %s plan without changing mode",
+  async (phase) => {
+    const f = await fixture({ automatic: false });
+    if (phase === "planning") await ready(f);
+    else await beginImplementation(f);
+    if (phase === "completed") await f.execute("plan_mode_implementation_complete", {});
+    const planning = f.state();
+    const document = planning.kind === "ready" ? planning.document : implementationOf(f)?.document;
+    assert.ok(document);
+    const tools = f.rawPi.getActiveTools();
+    const status = f.statuses.get("plan-mode");
+    const original = await readFile(document.path, "utf8");
+    await writeFile(document.path, original.replace("material", "external"));
+    Object.assign((f.ctx as ExtensionContext).ui, {
+      editor: async (_title: string, text: string) => {
+        assert.match(text, /external decisions/);
+        assert.ok(!text.includes("pi-plan-document"));
+        return text.replace("external", "human");
+      },
+    });
+    await f.command("open");
+    const raw = await readFile(document.path, "utf8");
+    assert.equal(raw.split("\n")[0], original.split("\n")[0]);
+    assert.match(raw, /human decisions/);
+    assert.deepEqual(f.rawPi.getActiveTools(), tools);
+    assert.equal(f.statuses.get("plan-mode"), status);
+    const state = f.state();
+    assert.equal(
+      state.kind === "idle" ? implementationOf(f)?.hash : state.workflow.hash,
+      planHash(PLAN.replace("material", "human")),
+    );
+    if (phase === "completed") assert.equal(implementationOf(f)?.phase, "completed");
+  },
+);
+
+test.each(["cancel", "conflict", "tree", "invalid"] as const)("/plan open protects the file on %s", async (outcome) => {
+  const f = await fixture();
+  await ready(f);
+  const source = f.state();
+  assert.ok(source.kind === "ready");
+  let expected = await readFile(source.document.path, "utf8");
+  Object.assign((f.ctx as ExtensionContext).ui, {
+    editor: async () => {
+      if (outcome === "cancel") return undefined;
+      if (outcome === "invalid") return "";
+      if (outcome === "conflict") {
+        expected = expected.replace("material", "concurrent");
+        await writeFile(source.document.path, expected);
+      }
+      if (outcome === "tree") await f.emit("session_tree");
+      return "# Human edit";
+    },
+  });
+  await f.command("open");
+  assert.equal(await readFile(source.document.path, "utf8"), expected);
+  assert.equal(f.state().kind, "ready");
+});
+
+test("/plan open in TUI launches the external editor with vi as default", async () => {
+  assert.equal(resolvePlanEditorCommand({}), "vi");
+  assert.equal(resolvePlanEditorCommand({ EDITOR: "nvim" }), "nvim");
+  assert.equal(resolvePlanEditorCommand({ VISUAL: "code --wait", EDITOR: "nvim" }), "code --wait");
+
+  const f = await fixture();
+  await ready(f);
+  const source = f.state();
+  assert.ok(source.kind === "ready");
+  const editorScript = join(f.cwd, "editor.mjs");
+  await writeFile(
+    editorScript,
+    'import { readFileSync, writeFileSync } from "node:fs"; const p = process.argv[2]; writeFileSync(p, readFileSync(p, "utf8").replace("material", "vi-edited"));\n',
+  );
+  const events: string[] = [];
+  const previousVisual = process.env.VISUAL;
+  const previousEditor = process.env.EDITOR;
+  delete process.env.VISUAL;
+  process.env.EDITOR = `${process.execPath} ${editorScript}`;
+  try {
+    Object.assign(f.ctx, { mode: "tui" });
+    Object.assign((f.ctx as ExtensionContext).ui, {
+      custom: async (factory: (...args: unknown[]) => Promise<unknown>) => {
+        let resolved: unknown;
+        await factory(
+          {
+            stop: () => events.push("stop"),
+            start: () => events.push("start"),
+            requestRender: () => events.push("render"),
+          },
+          {},
+          {},
+          (value: unknown) => {
+            resolved = value;
+          },
+        );
+        return resolved;
+      },
+    });
+    await f.command("open");
+    assert.deepEqual(events, ["stop", "start", "render"]);
+    assert.match(await readFile(source.document.path, "utf8"), /vi-edited decisions/);
+  } finally {
+    if (previousVisual === undefined) delete process.env.VISUAL;
+    else process.env.VISUAL = previousVisual;
+    if (previousEditor === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = previousEditor;
+  }
+});
+
+test("status tool cancellation during a read does not persist a refreshed hash", async () => {
+  const entered = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  let defer = false;
+  const f = await fixture({
+    wrapStore: (store) => ({
+      ...store,
+      read: async (document) => {
+        const plan = await store.read(document);
+        if (defer) {
+          entered.resolve();
+          await finish.promise;
+        }
+        return plan;
+      },
+    }),
+  });
+  await beginImplementation(f);
+  const entries = structuredClone(f.entries);
+  const controller = new AbortController();
+  defer = true;
+  const pending = f.execute("plan_mode_implementation_status", {}, controller.signal);
+  const rejected = assert.rejects(pending, /cancelled/);
+  await entered.promise;
+  controller.abort();
+  finish.resolve();
+  await rejected;
+  assert.deepEqual(f.entries, entries);
 });
 
 test("progress refuses non-interactive mode and absent implementation without inference", async () => {
@@ -1280,6 +1550,42 @@ test("verification reads current disk contents, not history or a cached implemen
   assert.equal(implementationOf(f)?.phase, "completed");
   assert.equal(f.statuses.get("plan-mode"), "[Normal]");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+});
+
+test("removed cancel diagnoses during a pending check; dialog dismissal suppresses late results", async () => {
+  const entered = Promise.withResolvers<VerificationInput>();
+  const finished = Promise.withResolvers<VerificationResult>();
+  const dialog = Promise.withResolvers<string | undefined>();
+  const f = await fixture({
+    verify: async (input) => {
+      entered.resolve(input);
+      return finished.promise;
+    },
+  });
+  const saved = await beginImplementation(f);
+  const bytes = await readFile(saved.details.path, "utf8");
+  Object.assign((f.ctx as ExtensionContext).ui, { select: async () => dialog.promise });
+  const pending = f.command("verify");
+  const input = await entered.promise;
+  const entries = f.entries.length;
+  const messages = f.sentUserMessages.length;
+  await f.command("CaNcEl");
+  assert.match(f.notifications.at(-1)?.message ?? "", /removed.*dialog/);
+  assert.equal(input.signal.aborted, false);
+  assert.equal(f.entries.length, entries);
+  assert.equal(f.sentUserMessages.length, messages);
+  assert.equal(await readFile(saved.details.path, "utf8"), bytes);
+  dialog.resolve(undefined);
+  await Promise.resolve();
+  await Promise.resolve();
+  finished.resolve(structuredClone(adherenceResult));
+  await pending;
+  assert.equal(input.signal.aborted, true);
+  assert.equal(
+    f.entries.some((entry) => entry.customType === "pi-plan-check"),
+    false,
+  );
+  assert.equal(f.statuses.get("plan-mode"), "[Normal]");
 });
 
 test("invalid current document prevents verification and session replacement suppresses stale results", async () => {
@@ -1457,7 +1763,7 @@ test("continuing a selected document edits it, not another saved document", asyn
   const f = await fixture({ selectSaved: (documents) => documents.find((document) => document.path === selected) });
   const first = await ready(f);
   selected = first.details.path;
-  await f.command("save");
+  await f.command("exit");
   const store = await createPlanStore(f.cwd, undefined, f.agentDir);
   const alternative = await store.save("# Newer alternative\n\nDifferent requirements.", { name: "alternative" });
   const alternativeBytes = await readFile(alternative.path, "utf8");

@@ -24,12 +24,18 @@
           default = pkgs.mkShell {
             name = "pi-extensions-dev";
 
+            EDITOR = "vi";
+            VISUAL = "vi";
+
             # Bun manages dependencies/scripts; Pi and build/test tools use Node 26.
             packages = with pkgs; [
               nodejs_26
               bun
               process-compose
               git
+              (neovim.override {
+                viAlias = true;
+              })
               bashInteractive
               ripgrep
               fd

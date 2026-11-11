@@ -68,7 +68,6 @@ export interface PlanStore {
 const execFileAsync = promisify(execFile);
 const MAX_PLAN_BYTES = PLAN_MODE_MAX_CHARS * 3 + 32_768;
 const PREFIX = "<!-- pi-plan-document-v3:";
-const OLD_PREFIXES = ["<!-- pi-plan-revision-v1:", "<!-- pi-plan-document-v2:"];
 class InvalidPlanFile extends Error {}
 interface Envelope {
   version: 3;
@@ -267,24 +266,6 @@ export async function createPlanStore(
   return { storage, directory, projectRoot, list, read, save };
 }
 
-/** Read-only explicit import. Strip recognized metadata, never adopt identity or ancestry. */
-export async function readImportedMarkdown(path: string): Promise<string> {
-  let raw = (await readRaw(resolve(path))).replace(/^\uFEFF/, "");
-  for (let depth = 0; depth < 4; depth++) {
-    const prefix = [PREFIX, ...OLD_PREFIXES].find((candidate) => raw.startsWith(candidate));
-    if (!prefix) return body(raw);
-    const end = raw.indexOf(" -->\n");
-    if (end < 0 || end > 32_768) throw new InvalidPlanFile("Invalid imported plan metadata.");
-    try {
-      const value: unknown = JSON.parse(Buffer.from(raw.slice(prefix.length, end), "base64").toString("utf8"));
-      if (!record(value)) throw new Error();
-    } catch {
-      throw new InvalidPlanFile("Invalid imported plan metadata.");
-    }
-    raw = raw.slice(end + 5);
-  }
-  throw new InvalidPlanFile("Too many nested plan envelopes.");
-}
 async function findProjectRoot(cwd: string) {
   const canonical = await realpath(resolve(cwd));
   try {

@@ -175,7 +175,7 @@ test.each(["ok", "minor_issues", "issues", "failure", "cancel"] as const)(
     const savedBytes = await readFile(checked.path, "utf8");
     const pending = f.execute("plan_mode_implementation_complete", {});
     await entered.promise;
-    if (outcome === "cancel") await f.command("cancel");
+    if (outcome === "cancel") await f.emit("before_agent_start", { systemPromptOptions: { sections: {} } });
     await pending;
     assert.equal(f.status(), "[Normal]");
     assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
@@ -279,14 +279,14 @@ test("verification receives only the current on-disk target; missing files canno
   assert.equal(f.status(), "[Normal]");
 });
 
-test("missing import reports failure without creating planning state or a fallback document", async () => {
+test("removed import gives migration guidance without creating planning state or a document", async () => {
   const f = await fixture();
   await f.command(`import ${join(f.cwd, "missing.md")}`);
   assert.equal(f.state().kind, "idle");
   assert.equal(f.status(), "[Normal]");
   assert.deepEqual(await (await f.store()).list(), []);
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
-  assert.ok(f.notifications.some((notice) => /ENOENT|not found|missing/i.test(notice.message)));
+  assert.ok(f.notifications.some((notice) => /removed.*paste the Markdown body/i.test(notice.message)));
 });
 
 test("bare planning waits for the first task; first save waits for naming without creating an empty file", async () => {

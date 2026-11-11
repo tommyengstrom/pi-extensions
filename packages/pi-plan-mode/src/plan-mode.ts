@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import {
@@ -24,6 +24,7 @@ import {
 import { applyPlanEdits, PLAN_MODE_EDIT_PARAMS, PLAN_MODE_EDIT_TOOL_NAME, planModeEdited } from "./edit-tool.js";
 import { implementationPrompt, startFreshImplementation } from "./fresh-implementation.js";
 import { type ImplementationDependencies, registerImplementation } from "./implementation.js";
+import { editPlanDocument } from "./plan-editor.js";
 import { fallbackPlanName, MAX_NAME_TASK_CHARS, requestPlanName } from "./plan-name.js";
 import {
   createPlanStore,
@@ -31,7 +32,6 @@ import {
   type PlanStorage,
   type PlanStore,
   planHash,
-  readImportedMarkdown,
   storedPlanStorage,
 } from "./plan-store.js";
 import {
@@ -67,9 +67,6 @@ interface PlanModeDependencies extends ImplementationDependencies {
   loadUi?(): Promise<InteractiveUi>;
   namePlan?: typeof requestPlanName;
 }
-
-const FINALIZE_REQUEST =
-  "Finish the planning discussion: ask a material remaining question with plan_mode_question, or finalize with plan_mode_complete (complete plan) or plan_mode_edit (localized edit), alone.";
 
 export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeDependencies = {}) {
   let state: PlanState = { kind: "idle" };
@@ -310,7 +307,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       state = { kind: "idle" };
       notify(
         ctx,
-        `${legacyPlanState(ctx.sessionManager.getBranch()) ? "Legacy Plan workflows are not restored." : errorMessage(error)} Start fresh or use /plan import <Markdown path>.`,
+        `${legacyPlanState(ctx.sessionManager.getBranch()) ? "Legacy Plan workflows are not restored." : errorMessage(error)} Start fresh with /plan start and paste the Markdown body text.`,
         "warning",
       );
     }
@@ -635,7 +632,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       if (!operation.isCurrent()) throw new Error("Plan edit cancelled because the session changed.");
       const plan = await store.read(document);
       if (source.workflow.hash && planHash(plan) !== source.workflow.hash)
-        throw new Error("Plan changed on disk. Reopen review before editing it.");
+        throw new Error("Plan changed on disk. Use /plan to review current contents or /plan open to edit them.");
       const edited = await applyPlanEdits(ctx, params, document, plan, operation.signal);
       const saved = await publishPlan(ctx, operation, store, edited.plan, planHash(plan));
       return planModeEdited(saved, edited, true);
@@ -645,8 +642,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   async function review(ctx: ExtensionCommandContext, document?: PlanDocument, store?: PlanStore) {
     if (!ctx.hasUI) throw new Error("Plan review and implementation require TUI or RPC mode.");
     let source: PlanState = state;
-    const selected = document ?? (source.kind === "ready" ? source.document : undefined);
-    if (!selected) throw new Error("No completed plan is ready. Use /plan saved to browse saved plans.");
+    const selected = document ?? (source.kind === "idle" ? undefined : source.workflow.document);
+    if (!selected)
+      throw new Error("No current saved plan. Create one with /plan <request> or choose one through /plan saved.");
     let current = lifecycle(ctx);
     const storage = store ?? (await storeFor(ctx, source.kind !== "idle" ? source.workflow : undefined));
     const plan = await storage.read(selected);
@@ -874,26 +872,27 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   }
 
   pi.registerCommand("plan", {
-    description: "Plan, review saved plans, import Markdown, or implement in a fresh session",
+    description: "Plan, review saved plans, or choose implementation here or in a fresh session",
     getArgumentCompletions: (prefix) =>
-      [
-        "start",
-        "saved",
-        "import",
-        "tools",
-        "settings",
-        "prompt",
-        "finalize",
-        "save",
-        "exit",
-        "verify",
-        "resume",
-        "cancel",
-        "progress",
-      ]
+      ["start", "saved", "implement", "open", "tools", "settings", "exit", "verify", "resume", "progress"]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
+      const removed = /^(finalize|save|prompt|cancel|import(?:\s+.*)?)$/i.exec(args.trim());
+      if (removed) {
+        const command = removed[0].toLowerCase().split(/\s/)[0];
+        const guidance = {
+          finalize: "Use /plan implement to review the saved plan, or continue planning in conversation.",
+          save: "Plans are already saved. Use /plan exit or Save for later in review.",
+          prompt: "Use /plan settings → Edit planning prompt.",
+          import: "Use /plan start and paste the Markdown body text into the planning conversation.",
+          cancel: "Cancel a manual check through its existing dialog; automatic checks use tool-run cancellation.",
+        };
+        const message = `/plan ${command} was removed. ${guidance[command as keyof typeof guidance]}`;
+        if (!ctx.hasUI) throw new Error(message);
+        notify(ctx, message, "warning");
+        return;
+      }
       // Observation is allowed during streaming/queued input and never owns the command gate.
       if (args.trim().toLowerCase() === "progress") {
         try {
@@ -914,10 +913,6 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         // Manual commands supersede any not-yet-presented automatic review.
         pendingReview = undefined;
       }
-      if (args.trim().toLowerCase() === "cancel") {
-        implementation.cancel(ctx);
-        return;
-      }
       if (commandOpen) {
         notify(ctx, "A Plan command is already open.", "warning");
         return;
@@ -932,6 +927,47 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         const command = input.toLowerCase();
         if (internal) {
           await review(ctx);
+          return;
+        }
+        if (command === "implement") {
+          if (state.kind !== "idle") {
+            await review(ctx);
+          } else {
+            const tracked = implementation.state;
+            if (!tracked)
+              throw new Error(
+                "No current saved plan. Create one with /plan <request> or choose one through /plan saved.",
+              );
+            const current = lifecycle(ctx);
+            const store = await makeStore(ctx.cwd, storedPlanStorage(tracked));
+            if (!current.isCurrent()) return;
+            if (store.projectRoot !== tracked.projectRoot)
+              throw new Error("This implementation belongs to a different project.");
+            await review(ctx, tracked.document, store);
+          }
+          return;
+        }
+        if (command === "open") {
+          if (state.kind === "idle") {
+            await implementation.command(command, ctx);
+            return;
+          }
+          const source = state;
+          const document = source.workflow.document;
+          if (!document) throw new Error("No saved plan yet. Complete the initial plan before opening it.");
+          const current = lifecycle(ctx);
+          const store = await storeFor(ctx, source.workflow);
+          if (!current.isCurrent()) return;
+          const edited = await editPlanDocument(ctx, store, document, current);
+          if (edited && current.isCurrent()) {
+            commit({
+              ...source,
+              workflow: { ...state.workflow, ...edited },
+              ...(source.kind === "ready" ? { document: edited.document } : {}),
+            });
+            invalidate();
+            updateStatus(ctx);
+          }
           return;
         }
         if (["verify", "resume"].includes(command)) {
@@ -967,40 +1003,13 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           implementation.detach(ctx);
           return;
         }
-        if (command === "save") {
-          if (state.kind !== "ready") throw new Error("Complete a plan before saving it for later.");
-          const path = state.document.path;
-          await leave(ctx);
-          notify(ctx, `Saved for later: ${path}`);
-          return;
-        }
-        if (command === "finalize") {
-          if (state.kind === "idle") throw new Error("Start Plan mode before requesting finalization.");
-          pi.sendUserMessage(FINALIZE_REQUEST);
-          return;
-        }
-        if (command.startsWith("import ")) {
-          if (state.kind !== "idle") throw new Error("Exit the current workflow before importing Markdown.");
-          const current = lifecycle(ctx);
-          const path = resolve(ctx.cwd, input.slice(7).trim().replace(/^@/, ""));
-          const plan = await readImportedMarkdown(path);
-          const store = await storeFor(ctx);
-          if (!current.isCurrent()) return;
-          const document = await store.save(plan, { name: fallbackPlanName(basename(path, ".md")), ...current });
-          if (current.isCurrent()) await review(ctx, document, store);
-          return;
-        }
         if (command === "start") {
           await enter(ctx);
           return;
         }
-        if (["tools", "settings", "prompt", "saved", ""].includes(command)) {
+        if (["tools", "settings", "saved", ""].includes(command)) {
           if (!ctx.hasUI)
             throw new Error("This Plan menu requires TUI or RPC mode. Use /plan start or /plan <request>.");
-          if (command === "prompt") {
-            await editPlanningPrompt(ctx);
-            return;
-          }
           if (command === "tools") {
             await tools(ctx);
             return;
@@ -1014,7 +1023,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             await browse(ctx);
             return;
           }
-          if (state.kind === "ready") {
+          if (state.kind !== "idle" && state.workflow.document) {
             await review(ctx);
             return;
           }
@@ -1030,7 +1039,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
                   "Tools",
                   "Settings",
                 ]
-              : ["Finalize plan", "Tools", "Save defaults", "Exit planning"],
+              : ["Tools", "Save defaults", "Exit planning"],
             { signal: current.signal },
           );
           if (!current.isCurrent() || !choice) return;
@@ -1045,7 +1054,6 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           else if (choice === "Resume implementation") await implementation.command("resume", ctx);
           else if (choice === "Tools") await tools(ctx);
           else if (choice === "Settings" || choice === "Save defaults") await settingsMenu(ctx);
-          else if (choice === "Finalize plan") pi.sendUserMessage(FINALIZE_REQUEST);
           else await leave(ctx);
           return;
         }

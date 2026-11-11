@@ -683,7 +683,7 @@ test("real-runtime TUI smoke: automatic document review, dismissal, reopening, t
   }
 });
 
-test("finalize and later replacements automatically present review without control-text model requests", async () => {
+test("ordinary planning and later replacements automatically present review without control-text model requests", async () => {
   const f = await fixture();
   const started = Promise.withResolvers<void>();
   const unsubscribe = f.runtime.session.subscribe((event) => {
@@ -693,9 +693,7 @@ test("finalize and later replacements automatically present review without contr
     const session = f.runtime.session;
     await session.prompt("/plan start");
     f.queueTool("plan_mode_complete", { plan });
-    await session.prompt("/plan finalize");
-    // The command's sendUserMessage is fire-and-forget. In Pi 1.5.1 its async
-    // input/auth preflight can still be idle; observe the run before awaiting settlement.
+    await session.prompt("Finish the plan.");
     await started.promise;
     await session.waitForIdle();
     assert.equal(f.reviewPlan.mock.calls.length, 1);
@@ -759,7 +757,7 @@ test("tree navigation restores planning, ready, and idle from the active branch 
 });
 
 test.each([undefined, "save", "continue", "here"] as const)(
-  "command review action %s does not replace the session",
+  "implement reviews manual disk edits and action %s does not replace the session",
   async (action) => {
     const f = await fixture();
     try {
@@ -767,17 +765,20 @@ test.each([undefined, "save", "continue", "here"] as const)(
       const previous = session.getActiveToolNames();
       await session.prompt("/plan start");
       const ready = await f.complete();
+      const edited = plan.replace("Inspect the affected code.", "Preserve the manually edited requirements.");
+      const bytes = await readFile(ready.document.path, "utf8");
+      await writeFile(ready.document.path, bytes.replace(plan, edited));
       f.choose(action);
-      await session.prompt("/plan");
+      await session.prompt("/plan implement");
       await session.waitForIdle();
       assert.equal(f.runtime.session, session);
       assert.equal(f.newSessions.length, 0);
-      assert.equal(f.reviewPlan.mock.calls.length, 2, "manual /plan reopens the dismissed automatic review");
-      assert.equal(f.reviewPlan.mock.calls[1]?.[1], plan);
+      assert.equal(f.reviewPlan.mock.calls.length, 2, "implement reopens the dismissed automatic review");
+      assert.equal(f.reviewPlan.mock.calls[1]?.[1], edited);
       assert.deepEqual(f.reviewPlan.mock.calls[1]?.[2], ready.document);
-      assert.equal(await f.readPlan(ready.document), plan);
+      assert.equal(await f.readPlan(ready.document), edited);
       if (action === undefined) {
-        assert.deepEqual(stateOf(session), ready);
+        assert.equal(stateOf(session).kind, "ready");
         assert.equal(f.requests.length, 1);
       } else if (action === "save") {
         assert.equal(stateOf(session).kind, "idle");
@@ -787,7 +788,7 @@ test.each([undefined, "save", "continue", "here"] as const)(
         assert.equal(f.requests.length, 2);
         const request = f.requests.at(-1);
         assert.ok(request);
-        assert.ok(JSON.stringify(request).includes("Inspect the affected code."));
+        assert.ok(JSON.stringify(request).includes("Preserve the manually edited requirements."));
         assert.equal(stateOf(session).kind, action === "continue" ? "planning" : "idle");
         assert.equal(getCurrentSystemPrompt(request).includes(instructions), action === "continue");
         if (action === "here") assert.deepEqual(session.getActiveToolNames(), [...previous, ...IMPLEMENTATION_HELPERS]);

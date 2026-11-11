@@ -35,13 +35,13 @@ Each `oldText` must uniquely match a non-overlapping region of the current plan.
 
 Associated background artifacts must finish before either planning save can publish or schedule review. Failed/cancelled/interrupted work needs retry or explicit user agreement with `/plan artifacts omit <jobId>`; partial output is not a successful artifact. Implementation plan updates are not gated on artifact readiness. Artifact references remain live files, not historical snapshots.
 
-The completion result displays the plan and saved path; the edit result displays only the diff and same path. Either save makes the plan ready, while the footer stays `[Planning stem]`. In TUI or RPC, review opens automatically after the agent fully settles, including when completion follows `/plan finalize`. It does **not** start implementation or automatically retry finalization.
+The completion result displays the plan and saved path; the edit result displays only the diff and same path. Either save makes the plan ready, while the footer stays `[Planning stem]`. In TUI or RPC, review opens automatically after the agent fully settles. It does **not** start implementation or automatically retry finalization.
 
 Review shows the full saved document, including its name, path, and artifact references, together with all four actions immediately below the plan viewport. There is no intermediate confirmation or separate action menu. Configured Up/Down keys select actions; Page Up/Page Down and Home/End scroll the plan, as does the mouse wheel over the document. Space opens search; search input/navigation takes precedence until search is closed. The configured confirmation key explicitly executes the selected action, never merely opening review. Closing the screen leaves the plan ready and does not authorize implementation. Small terminals compact metadata and hints first, then keep the selected action reachable. RPC includes all four actions with the first document page, pagination, and Close; paging never implements. Open `/plan` to reopen review or if automatic presentation was interrupted. Aborted runs, superseding work, and session replacement cancel pending automatic presentation. Restoring a ready supported session or navigating its history does not reopen old reviews automatically.
 
 The combined review always starts with **Implement in fresh session** selected, followed by **Implement here**, **Save for later**, and **Continue planning**. It never remembers a previous implementation destination as the next default. Initial implementation uses the exact reviewed text even if the file changes afterwards; updates must still detect stale-read conflicts, and verification uses a fresh disk snapshot, not that reviewed text.
 
-If the model stops without completing, `/plan finalize` explicitly asks it to resolve a remaining material question or call the completion tool. Ordinary prose and legacy `<proposed_plan>` blocks are not completion signals.
+If the model stops without completing, request further planning through normal conversation. Ordinary prose and legacy `<proposed_plan>` blocks are not completion signals.
 
 ## Implement fresh or here
 
@@ -53,7 +53,9 @@ A successful handoff ends Plan mode in the source session, while the plan remain
 
 **Implement here** must be selected explicitly after review. It leaves Plan mode, restores preexisting tool availability before enabling implementation helpers, and sends the reviewed plan in the current session. Its existing conversation remains available, so use fresh implementation when you want isolation from planning context. Neither destination inherits planning's allowlist as an implementation restriction.
 
-There is no `/plan implement` shortcut around document review.
+`/plan implement` opens this review directly for the active workflow's saved document, including after a planning follow-up, or the retained implementation record when planning is inactive. It never selects an unrelated recent plan. It reads current disk contents without rewriting or asking the model to regenerate the plan. Only an explicit implementation choice sends a kickoff containing that reviewed text; changes while review is open require another review. With no current document, create a plan or choose one through `/plan saved`.
+
+This is initial implementation/handoff, not `/plan resume`: resume only reactivates tracking without a model request. `/plan open` edits without activating implementation. External-editor support and stronger synchronization before subsequent AI planning revisions remain separate follow-up work; this command does not protect against every later AI rewrite.
 
 ## Track, complete, and verify implementation
 
@@ -69,7 +71,15 @@ At check start, the checker reads and snapshots the current plan file as its **s
 
 Verification captures its identity and branch-scoped transcript, then durably marks tracking completed before any asynchronous work. This removes implementation-only helpers without changing ordinary parent tools or applying the planning allowlist. The checker still shows `[Verifying stem]`; completed tracking is not a passing adherence report. Reload/tree restoration of that boundary yields `[Normal]`. Navigation to another branch instead restores that branch's own workflow, without writes from the abandoned checker.
 
-**Every verification exit returns to actual normal mode**: success, execution failure, cancellation, and invalidation all leave a detached/completed implementation record, not active implementation with a normal-looking footer. Use `/plan verify` explicitly for another check of that record. Use `/plan resume` **before sending further fixes or plan changes**: it opens a new tracked segment without including intervening unrelated conversation and does not itself send a model request. Starting new planning creates an independent workflow. `/plan cancel` cancels a check even while its command is open. See [adherence checks](./adherence-checks.md) for evidence scope and limitations.
+**Every verification exit returns to actual normal mode**: success, execution failure, cancellation, and invalidation all leave a detached/completed implementation record, not active implementation with a normal-looking footer. Use `/plan verify` explicitly for another check of that record. Use `/plan resume` **before sending further fixes or plan changes**: it opens a new tracked segment without including intervening unrelated conversation and does not itself send a model request. Starting new planning creates an independent workflow. Cancel interactive manual checks through their existing dialog. See [adherence checks](./adherence-checks.md) for evidence scope and limitations.
+
+## Open and edit the current plan
+
+`/plan open` opens the current saved plan body in your external editor in TUI (`$VISUAL`, `$EDITOR`, or `vi` by default) or Pi's editable text dialog in RPC. It works while planning, during implementation, and with a retained completed/detached implementation record. Save/submit to update the same file atomically; cancel or exit non-zero to leave it unchanged. The document identity, name, path, and artifact metadata are preserved. Empty/invalid text and concurrent file changes are rejected rather than overwriting the file. Navigation or session replacement invalidates the editor's pending save.
+
+Opening a plan requires an idle agent and no other Plan command open. It does not create an initial plan, send a model request, authorize implementation, or resume completed tracking. Editing an implementation record clears its prior check/completion markers but preserves its phase; use `/plan resume` explicitly to continue implementation.
+
+Bare `/plan` also reopens review whenever the active planning workflow has a saved document, including after a planning follow-up. Review reads current disk contents and refreshes the expected hash, so external edits can be reconciled without leaving the workflow. You can instead use `/plan open` to edit those current contents yourself. If editing directly on disk, preserve the metadata envelope.
 
 ## Mode footer and reported progress
 
@@ -77,11 +87,11 @@ The exact coordinated footer labels are `[Normal]`, `[Planning]`, `[Planning ste
 
 `/plan progress` toggles the separate inline panel above the editor during tracked implementation, even while the agent is running, messages are queued, or another Plan command is open. It does not acquire the shared command gate; other commands retain their idle restrictions. The idle menu offers **Show plan progress**. Opening without active tracking explains how to implement a reviewed plan or `/plan resume`. Verification closes the panel at start and `/plan progress` cannot reopen it during checking or afterward until explicit `/plan resume`. TUI and RPC are supported; print/JSON refuse.
 
-Observation runs only while enabled. Each changed-evidence or changed-plan assessment costs a separate provider request, with a 30-second minimum between starts and only one child at a time. Summaries are bounded, transcript-only reported progress, not independent verification. Close to cancel immediately; errors stop retries until close/reopen. Completion retains a stopped label and last summary, while session/branch changes, exit, reload and shutdown clear it. Resuming never reopens it. `/plan cancel` still cancels only adherence verification. See [live reported progress](../README.md#live-reported-progress) for privacy and evidence boundaries, and [settings](./settings.md) for model defaults and availability.
+Observation runs only while enabled. Each changed-evidence or changed-plan assessment costs a separate provider request, with a 30-second minimum between starts and only one child at a time. Summaries are bounded, transcript-only reported progress, not independent verification. Close to cancel immediately; errors stop retries until close/reopen. Completion retains a stopped label and last summary, while session/branch changes, exit, reload and shutdown clear it. Resuming never reopens it. See [live reported progress](../README.md#live-reported-progress) for privacy and evidence boundaries, and [settings](./settings.md) for model defaults and availability.
 
-## Save, browse, continue, and import
+## Save, browse, and continue
 
-`/plan save` requires a completed plan. It leaves Plan mode without starting implementation; it is not the initial disk save, since completion already wrote the file. **Save for later** in review has the same purpose.
+Plans are already persisted. **Save for later** in review leaves Plan mode without starting implementation and preserves the saved file; `/plan exit` also preserves saved plans.
 
 From outside an active workflow, run `/plan saved`. The browser lists current-format named plans at the configured storage location, without series grouping or older-revision selectors. Selecting one opens document review before any implementation action. Legacy revision files are excluded.
 
@@ -94,13 +104,7 @@ From outside an active workflow, run `/plan saved`. The browser lists current-fo
 
 These are two independent plans, not revisions. Naming leaves storage configuration and captured current-format workflow paths unchanged. The repo-name default still shares plans among same-named checkouts. The [settings reference](./settings.md#plan-storage-and-legacy-locations) explains storage boundaries.
 
-Workflows and document envelopes are version 3. Legacy workflow state is rejected without file modification; it is not resumed or silently migrated. To reuse an old document, explicitly run:
-
-```text
-/plan import /path/to/legacy-plan.md
-```
-
-Import reads Markdown, strips the legacy envelope, saves a new independent current-format named plan, and opens review. It does not import ancestry, reasons, approval, or implementation tracking. The source stays unchanged. Collision handling protects existing files, and import itself never authorizes implementation.
+Workflows and document envelopes are version 3. Legacy workflow state is rejected without file modification; it is not resumed, imported, or silently migrated. To reuse old content, start fresh with `/plan start` and paste the Markdown body text into the planning conversation, without its legacy envelope.
 
 `/plan exit` leaves Plan mode and restores preexisting tool availability without deleting saved plans. During implementation it detaches tracking and closes the transcript segment; its record remains available to explicit `/plan verify` or `/plan resume`. To browse while planning, exit the current workflow first. Exit does not save an unfinished draft.
 
@@ -108,10 +112,10 @@ Import reads Markdown, strips the legacy envelope, saves a new independent curre
 
 ## Busy state and non-interactive use
 
-All `/plan` command routes except `/plan cancel` and `/plan progress` require an idle agent and no pending messages, including prompts, finalization, tool changes, import, save, exit, resume, and manual verification. Wait for the run to settle before retrying a rejected command. Do not confuse this with automatic implementation: a completed planning run remains ready until you choose an action.
+All active `/plan` command routes except `/plan progress` require an idle agent and no pending messages, including prompts, implementation review, tool changes, exit, resume, and manual verification. Wait for the run to settle before retrying a rejected command. Do not confuse this with automatic implementation: a completed planning run remains ready until you choose an action.
 
-Menus, saved browsing, review, and implementation selection require TUI or RPC. Print and JSON modes can use `/plan start`, `/plan <prompt>`, `/plan finalize`, `/plan save`, and `/plan exit` when their state requirements are met. Structured questions without interactive UI fall back to concise plain-text questions or explicitly stated low-risk assumptions. Resume in TUI or RPC to review a saved plan and select implementation.
+Menus, saved browsing, review, and implementation selection require TUI or RPC. Print and JSON modes can use `/plan start`, `/plan <prompt>`, and `/plan exit` when their state requirements are met. Structured questions without interactive UI fall back to concise plain-text questions or explicitly stated low-risk assumptions. Resume in TUI or RPC to review a saved plan and select implementation.
 
 Tracked `/plan verify` and `/plan resume` also work in print/JSON mode without a selection dialog; automatic completion checks return their report as the terminating tool result. Model/authentication failures and cancellation never count as successful verification. All check outcomes return to normal mode.
 
-The supported public routes are `start`, `saved`, `import <Markdown path>`, `tools`, `settings`, `prompt`, `progress`, `finalize`, `save`, `exit`, `verify`, `resume`, `cancel`, and `artifacts omit <jobId>`. Removed `show`, `export`, `off`, and `implement` words are not aliases; other arguments are planning prompts. Reserved `__review` control arguments are internal one-shot dispatches, not planning prompts or public implementation shortcuts.
+The supported public routes are `start`, `saved`, `open`, `implement`, `tools`, `settings`, `progress`, `exit`, `verify`, `resume`, and `artifacts omit <jobId>`. Removed exact commands `finalize`, `save`, `prompt`, `cancel`, and `import` (including `import <path>`) return migration guidance, case-insensitively, even while another command is open. Ordinary multiword requests such as `/plan save bandwidth` remain planning prompts. `show`, `export`, and `off` are not aliases; other arguments are planning prompts. Reserved `__review` control arguments are internal one-shot dispatches, not planning prompts or public implementation shortcuts.

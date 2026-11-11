@@ -54,7 +54,7 @@ export function savePlanModePrompt(text: string, original: string, path = planMo
   if (Buffer.byteLength(text, "utf8") > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)
     throw new Error("Planning prompt exceeds the 64 KiB limit.");
   if (readOptionalMarkdown(path, "prompt", false) !== original)
-    throw new Error("Planning prompt changed on disk. Reopen /plan prompt before saving.");
+    throw new Error("Planning prompt changed on disk. Reopen /plan settings → Edit planning prompt before saving.");
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, text, {

@@ -15,6 +15,7 @@ import {
   VERIFICATION_MESSAGE,
 } from "./implementation-state.js";
 import { implementationTranscript } from "./implementation-transcript.js";
+import { editPlanDocument } from "./plan-editor.js";
 import { createPlanStore, type PlanDocument, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
 import { createProgressController, progressSnapshot } from "./progress.js";
 import type { ProgressRunner } from "./progress-runner.js";
@@ -155,7 +156,7 @@ export function registerImplementation(
       if (ctx.hasUI)
         ctx.ui.notify(
           sanitizeTerminalText(
-            `${legacyImplementationState(manager.getBranch()) ? "Legacy implementation tracking is not restored." : errorMessage(error)} Start fresh or use /plan import <Markdown path>.`,
+            `${legacyImplementationState(manager.getBranch()) ? "Legacy implementation tracking is not restored." : errorMessage(error)} Start fresh with /plan start and paste the Markdown body text.`,
           ),
           "warning",
         );
@@ -426,9 +427,9 @@ export function registerImplementation(
       "Read the current tracked plan file after compaction or whenever its contents are uncertain. Does not modify the file.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     renderResult: renderPlanModeCompletion,
-    async execute(_id, _params, _signal, _update, ctx) {
+    async execute(_id, _params, signal, _update, ctx) {
       const source = requireImplementation(ctx);
-      const op = planOperation(ctx);
+      const op = planOperation(ctx, signal);
       const store = await ownedStore(ctx, source);
       const plan = await store.read(source.document);
       if (!op.isCurrent()) throw new Error("Plan read cancelled.");
@@ -554,6 +555,23 @@ export function registerImplementation(
       );
     },
     async command(command: string, ctx: ExtensionContext): Promise<boolean> {
+      if (command === "open") {
+        if (!state || owner !== ctx.sessionManager) throw new Error("No current plan to open.");
+        const source = state;
+        const manager = ctx.sessionManager;
+        const version = generation;
+        const current = {
+          isCurrent: () => owner === manager && generation === version && state === source,
+        };
+        const store = await ownedStore(ctx, source);
+        if (!current.isCurrent()) return true;
+        const edited = await editPlanDocument(ctx, store, source.document, current);
+        if (edited && current.isCurrent()) {
+          commit({ ...source, ...edited, lastCheck: undefined, completion: undefined });
+          status(ctx);
+        }
+        return true;
+      }
       if (command === "verify") {
         const manager = ctx.sessionManager;
         const result = await check(ctx);

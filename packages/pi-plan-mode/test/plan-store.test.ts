@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test, vi } from "vitest";
-import { createPlanStore, type PlanStore, planHash, readImportedMarkdown } from "../src/plan-store.js";
+import { createPlanStore, type PlanStore, planHash } from "../src/plan-store.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs/promises")>()),
@@ -301,32 +301,6 @@ test("discovery accepts only valid v3 documents, never legacy Markdown, metadata
       await writeFile(join(store.directory, name), content);
     await mkdir(join(store.directory, "directory.md"));
     assert.deepEqual(await store.list(), [document]);
-  });
-});
-
-test("imports read current Markdown, strip legacy envelopes, and never create or silently recover missing files", async () => {
-  await withStore(async ({ root, store }) => {
-    const path = join(root, "import.md");
-    const history = {
-      version: 1,
-      parent: { series: "old", revision: 1, hash: planHash(PLAN) },
-      reason: "Earlier change",
-    };
-    for (const [prefix, metadata] of [
-      ["pi-plan-revision-v1", history],
-      ["pi-plan-document-v2", { version: 2, history }],
-    ] as const) {
-      const bytes = `<!-- ${prefix}:${Buffer.from(JSON.stringify(metadata)).toString("base64")} -->\n${PLAN}`;
-      await writeFile(path, bytes);
-      assert.equal(await readImportedMarkdown(path), PLAN);
-      assert.equal(await readFile(path, "utf8"), bytes);
-    }
-    await writeFile(path, "# Current external contents");
-    assert.equal(await readImportedMarkdown(path), "# Current external contents");
-    assert.deepEqual(await store.list(), []);
-    await unlink(path);
-    await assert.rejects(readImportedMarkdown(path), /ENOENT/);
-    assert.deepEqual(await store.list(), []);
   });
 });
 

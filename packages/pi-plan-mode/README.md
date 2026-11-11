@@ -6,7 +6,7 @@ Explore a codebase, resolve important questions, and review an implementation-re
 
 ## Load this fork
 
-This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts are not supported. Version 3 workflows and plan-document envelopes reject legacy state without modifying its files; use explicit Markdown import rather than restoring an old workflow. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
+This checkout contains an unreleased fork targeting current Pi APIs, tested against **Pi 1.5.0**. Older hosts are not supported. Version 3 workflows and plan-document envelopes reject legacy state without modifying its files; start fresh with `/plan start` and paste the Markdown body text into the planning conversation, without its legacy envelope, rather than restoring an old workflow. The retained npm name and badge identify the upstream package; installing it does not install this checkout's implementation.
 
 Install this fork together with artifacts and thinking shortcuts using `pi install git:github.com/tommyengstrom/pi-extensions`, then restart or `/reload`. Git installation builds the runtime automatically with Node and npm; Bun and manual preparation are not consumer requirements. See the [workspace installation guide](../../README.md#install-from-github) for updates and pinning.
 
@@ -76,22 +76,19 @@ untrusted HTML details.
 | `/plan start` | Enter Plan mode without sending a model message. |
 | `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
 | `/plan saved` | Browse current-format named plans outside an active workflow. |
-| `/plan import <Markdown path>` | Import Markdown as a new independent plan, stripping a legacy envelope, then review it; leave the source unchanged. |
+| `/plan open` | Open the current saved plan in the external editor in TUI (`$VISUAL`, `$EDITOR`, or `vi`) or Pi's editable text dialog in RPC; save the same file without changing mode. |
+| `/plan implement` | Review the current on-disk plan and explicitly choose implementation here or in a fresh session. |
 | `/plan tools` | Configure future planning tools in normal mode, current planning tools while idle, or the isolated checker selection during implementation. |
-| `/plan settings` | Set tool defaults, checker options, independent progress model/reasoning, or the Naming model. |
-| `/plan prompt` | Edit the user planning prompt; create it from the default if missing. |
+| `/plan settings` | Edit future-workflow planning instructions, tool defaults, checker options, independent progress model/reasoning, or the Naming model. |
 | `/plan progress` | Toggle reported progress above the editor, including while the agent is busy. |
 | `/plan verify` | Check this session's recorded implementation against its current plan file with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or detachment, before sending fixes. |
-| `/plan cancel` | Cancel an in-progress adherence check. |
-| `/plan finalize` | Ask the active planner to resolve a remaining material question or submit the complete plan. |
-| `/plan save` | Leave a completed workflow with its already-saved plan available for later. |
 | `/plan artifacts omit <jobId>` | Explicitly agree to omit a failed/cancelled/interrupted artifact from readiness. |
 | `/plan exit` | Leave Plan mode and restore preexisting tool availability; saved files remain. |
 
-Commands require an idle agent with no queued messages, except `/plan cancel` and `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
+Commands require an idle agent with no queued messages, except `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
 
-There is no direct `implement` route, and no `show`, `export`, or `off` aliases. Implementation is selected only after document review. Exact subcommand arguments choose routes; other text is a planning request, so `/plan start a migration` is a prompt. See [command workflows](./docs/command-workflows.md).
+`/plan implement` reads the active workflow's saved file (including planning follow-ups), or the retained implementation record when planning is inactive. It does not regenerate the plan or send a model request until an explicit choice; both destinations use the reviewed current text. Changes during review require another review. `/plan resume` only reactivates tracking without a model request; `/plan open` only edits. There are no `show`, `export`, or `off` aliases. Removed `finalize`, `save`, `prompt`, `cancel`, and `import <path>` commands give migration guidance. Cancel manual checks through their dialog. Other text remains a planning request, including `/plan save bandwidth`. See [command workflows](./docs/command-workflows.md).
 
 ## Mode footer
 
@@ -140,7 +137,7 @@ Naming is an **early, separate request** using only the task text, capped at **4
 
 By default naming uses the configured progress model (`openai/gpt-6-luna` by default), with the lowest reasoning level that model supports. `settings.naming.model` is an independent override, exposed as **Naming model** in `/plan settings`; changing it does not change progress, the main agent, or the checker. **Cost and privacy:** naming is an additional provider request that sends bounded task text to that provider, even before a plan is saved. It does not send planning context. See [settings](./docs/settings.md) for reset and failure behavior.
 
-Workflows and plan-document envelopes use **version 3**. Legacy state is rejected without rewriting, migrating, or deleting files. Legacy revision files are excluded from `/plan saved`; there is no implicit continuation or ancestry recovery. Use `/plan import <Markdown path>` to strip a legacy envelope and create a new independent current-format plan for review. The source is unchanged, and import never authorizes implementation. There is no separate saved-plan index or session-local slot.
+Workflows and plan-document envelopes use **version 3**. Legacy state is rejected without rewriting, migrating, or deleting files. Legacy revision files are excluded from `/plan saved`; there is no implicit continuation or ancestry recovery. Start fresh with `/plan start` and paste Markdown body text into the planning conversation, without a legacy envelope. There is no automatic import or legacy adoption. There is no separate saved-plan index or session-local slot.
 
 ## Review and implementation
 
@@ -161,7 +158,7 @@ A successful handoff ends restricted planning in the source session and establis
 
 During tracked implementation, `/plan progress` toggles a compact panel above the editor; the idle `/plan` menu also offers **Show plan progress**. TUI and RPC use the same string-array widget. In RPC, explicitly enabling the panel counts as visibility even if the client ignores widgets. Print/JSON commands refuse without launching an observer.
 
-Opening assesses immediately, then only changed recorded implementation evidence or changed plan contents triggers another assessment, at least 30 seconds between starts. One short-lived Pi subprocess runs at a time. The previous summary remains visible while updating; the panel identifies its snapshot time and plan snapshot, not a live verification result. Closing cancels work immediately. Errors stop automatic retries: correct configuration, then close and reopen. Completion stops observation and retains the last summary labeled **completed tracking; not verified**. Session replacement, branch navigation, reload/shutdown, or leaving implementation clears it. Resume never reopens it automatically. `/plan cancel` affects adherence checking only. This panel is separate from the mode-only footer.
+Opening assesses immediately, then only changed recorded implementation evidence or changed plan contents triggers another assessment, at least 30 seconds between starts. One short-lived Pi subprocess runs at a time. The previous summary remains visible while updating; the panel identifies its snapshot time and plan snapshot, not a live verification result. Closing cancels work immediately. Errors stop automatic retries: correct configuration, then close and reopen. Completion stops observation and retains the last summary labeled **completed tracking; not verified**. Session replacement, branch navigation, reload/shutdown, or leaving implementation clears it. Resume never reopens it automatically. This panel is separate from the mode-only footer.
 
 **Cost and privacy:** each assessment is a separate provider request. The complete current plan, bounded recent branch-scoped implementation transcript, and fallible previous summary go to the selected progress provider. Planning, abandoned branches, other implementations, and prior adherence reports are excluded by the existing transcript exporter; context edits/provenance boundaries are preserved. Omitted history and unavailable evidence are marked. A plan too large for the conservative budget fails rather than being silently cut. Observer output is neither injected into the implementing agent nor persisted as implementation evidence.
 
@@ -187,7 +184,7 @@ RPC uses sequential selection/editor dialogs. If interactive questions are unava
 
 Initial plans and broad rewrites use a standalone `plan_mode_complete` call with a nonempty complete plan, at most 50,000 JavaScript characters. Localized edits use `plan_mode_edit` with exactly Pi's `{path, edits: [{oldText, newText}]}` shape, targeting only the current named plan. Each replacement must uniquely match a non-overlapping region. Its result shows a diff and the same saved path rather than echoing the full plan. There are no change-reason fields or new revision paths.
 
-In planning, either save tool is a standalone, top-level final action: nested or batched saves are rejected. Success marks the plan ready, terminates the turn, and schedules the usual review. During tracked implementation, editing updates the same file while preserving tracking; work continues without a new approval dialog. User-requested changes must be saved before implementation; agent-discovered material scope changes still require user authorization. Use `plan_mode_update` for complete implementation-plan replacements. Status/recovery rereads disk, and stale-read/hash conflicts block updates rather than overwriting newer edits. Prose announcements and legacy plan tags do not complete a workflow. `/plan finalize` is an explicit request, not an automatic retry loop.
+In planning, either save tool is a standalone, top-level final action: nested or batched saves are rejected. Success marks the plan ready, terminates the turn, and schedules the usual review. During tracked implementation, editing updates the same file while preserving tracking; work continues without a new approval dialog. User-requested changes must be saved before implementation; agent-discovered material scope changes still require user authorization. Use `plan_mode_update` for complete implementation-plan replacements. Status/recovery rereads disk, and stale-read/hash conflicts block updates rather than overwriting newer edits. Prose announcements and legacy plan tags do not complete a workflow. Request further planning through normal conversation. `/plan implement` avoids regeneration when entering implementation, but stronger synchronization before subsequent AI planning revisions and external-editor support remain separate follow-up work.
 
 ## Settings and guidance
 
@@ -215,7 +212,7 @@ Two optional user-wide Markdown files customize planning (`getAgentDir()` respec
 
 A replacement removes built-in methodology, safety prose, question/completion instructions, and the estimate convention. Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions. Only the extension's `pi_plan_mode` section is replaced—not Pi's overall system prompt, project instructions, or tool declarations. Runtime tool permissions, completion validation, and explicit implementation approval remain enforced; trusted tools are still not sandboxed.
 
-Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, updates, supported session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy workflow state is rejected, not restored with a prompt fallback. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. Use `/plan prompt` or **Settings → Edit planning prompt** to open the replacement in Pi's editor (TUI or RPC). Missing files are created from the built-in default; existing files, including blank files, are preserved. Submitting saves atomically; cancelling leaves the file unchanged (a newly created template remains). Edits apply only to new workflows. There is no watcher or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
+Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, updates, supported session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy workflow state is rejected, not restored with a prompt fallback. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. Use `/plan settings` → **Edit planning prompt** to open the replacement in Pi's editor (TUI or RPC). Missing files are created from the built-in default; existing files, including blank files, are preserved. Submitting saves atomically; cancelling leaves the file unchanged (a newly created template remains). Edits apply only to new workflows. There is no watcher or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
 
 ## License
 
