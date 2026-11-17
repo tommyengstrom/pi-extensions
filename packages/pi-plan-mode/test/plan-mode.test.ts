@@ -10,13 +10,14 @@ import { IMPLEMENTATION_ENTRY, IMPLEMENTATION_HELPERS, restoreImplementation } f
 import type { MenuLifecycle } from "../src/interactive-ui.js";
 import { resolvePlanEditorCommand } from "../src/plan-editor.js";
 import planMode from "../src/plan-mode.js";
+import { fallbackPlanName } from "../src/plan-name.js";
 import { createPlanStore, type PlanDocument, type PlanStore, planHash } from "../src/plan-store.js";
-import { readPlanModeBasePrompt } from "../src/planning-instructions.js";
 import type { ProgressRunner } from "../src/progress-runner.js";
-import { buildPlanModePrompt, DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
+import { buildPlanModePrompt } from "../src/prompt.js";
 import * as settingsModule from "../src/settings.js";
-import { DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
-import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
+import { DEFAULT_TEMPLATE_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
+import { isPlanning, PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
+import { DEFAULT_PLAN_TEMPLATE, listPlanTemplates, resolvePlanTemplate } from "../src/templates.js";
 import type { VerificationInput, VerificationResult } from "../src/verification.js";
 import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
 
@@ -32,11 +33,11 @@ type Action = "fresh" | "here" | "save" | "continue" | undefined;
 async function fixture(
   config: {
     tools?: string[];
+    template?: string;
     shortcuts?: PlanModeSettings["shortcuts"];
     plansDirectory?: string;
     selectSaved?: (documents: PlanDocument[]) => PlanDocument | undefined;
     instructions?: string;
-    basePrompt?: string;
     automatic?: boolean;
     verify?: (input: VerificationInput) => Promise<VerificationResult>;
     progressRunner?: ProgressRunner;
@@ -49,7 +50,6 @@ async function fixture(
   const agentDir = join(root, "agent");
   await mkdir(cwd);
   await mkdir(agentDir);
-  if (config.basePrompt !== undefined) await writeFile(join(agentDir, "pi-plan-mode-prompt.md"), config.basePrompt);
   await writeFile(join(root, "source.jsonl"), "source session");
   const mock = createMockPi({
     activeTools: BASELINE,
@@ -67,6 +67,7 @@ async function fixture(
   let reviewHook: ((lifecycle: MenuLifecycle) => Promise<void>) | undefined;
   let settingsHook: (() => Promise<void>) | undefined;
   const reviews: string[] = [];
+  const activity = { stores: 0, names: 0, instructions: 0, templates: 0 };
   const context = createMockContext({
     mode: "rpc",
     cwd,
@@ -78,6 +79,7 @@ async function fixture(
       getBranch: () => branch ?? mock.entries.map((entry) => ({ type: "custom", ...entry })),
     },
   });
+  const templatesDir = join(agentDir, "pi-plan-mode-templates");
   const dependencies = {
     readSettings: async (): Promise<PlanModeSettings> => {
       await settingsHook?.();
@@ -85,11 +87,23 @@ async function fixture(
         plansDirectory: config.plansDirectory ?? "plans",
         ...(config.shortcuts ? { shortcuts: config.shortcuts } : {}),
         ...(config.tools ? { tools: config.tools } : {}),
+        ...(config.template ? { template: config.template } : {}),
         ...(config.automatic !== undefined ? { verification: { automatic: config.automatic } } : {}),
       };
     },
-    readInstructions: () => instructions,
-    readBasePrompt: () => readPlanModeBasePrompt(join(agentDir, "pi-plan-mode-prompt.md")),
+    readInstructions: () => {
+      activity.instructions++;
+      return instructions;
+    },
+    listTemplates: () => listPlanTemplates(templatesDir),
+    resolveTemplate: (id?: string) => {
+      activity.templates++;
+      return resolvePlanTemplate(id, templatesDir);
+    },
+    namePlan: async (_registry: unknown, task: string) => {
+      activity.names++;
+      return fallbackPlanName(task);
+    },
     verify: config.verify,
     progressRunner: config.progressRunner,
     createStore: async (
@@ -98,6 +112,7 @@ async function fixture(
       _agent?: string,
       options?: Parameters<typeof createPlanStore>[3],
     ) => {
+      activity.stores++;
       const store = await createPlanStore(directory, location, agentDir, options);
       return config.wrapStore?.(store) ?? store;
     },
@@ -156,6 +171,12 @@ async function fixture(
     execute,
     reviews,
     dependencies,
+    activity,
+    explain: (args = "") => {
+      const command = mock.commands.get("explain");
+      assert.ok(command);
+      return command.handler(args, context.ctx);
+    },
     toggle: async () => {
       Object.assign(context.ctx, { mode: "tui" });
       const shortcut = mock.shortcuts.get(config.shortcuts?.togglePlan ?? DEFAULT_TOGGLE_SHORTCUT);
@@ -221,22 +242,445 @@ const adherenceResult: VerificationResult = {
   report: { status: "ok", motivation: "Implemented. See `src/example.ts:1`." },
 };
 
+test("Explain enters, follows up and exits without planning side effects, including print and JSON", async () => {
+  for (const mode of ["rpc", "print", "json"]) {
+    const f = await fixture({ instructions: "MANDATORY PLAN SAVE", template: "detailed-spec" });
+    Object.assign(f.ctx, { mode, hasUI: mode === "rpc" });
+    await f.explain();
+    await f.explain("start");
+    assert.equal(f.state().kind, "explain");
+    assert.equal(f.sentUserMessages.length, 0);
+    await f.explain("How does parsing work?");
+    assert.equal(f.sentUserMessages.at(-1)?.text, "How does parsing work?");
+    for (const text of ["Thanks, that is enough", "Fix that bug"]) {
+      await f.emit("input", { text, source: "interactive" });
+      const event = promptEvent();
+      event.prompt = text;
+      await f.emit("before_agent_start", event);
+      const prompt = event.systemPromptOptions.sections.pi_plan_mode;
+      assert.match(prompt, /EXPLAIN MODE ACTIVE/);
+      assert.match(prompt, /\/explain exit/);
+      assert.doesNotMatch(prompt, /MANDATORY PLAN SAVE|detailed-spec|plan_mode_complete|changed lines|Phase 1/);
+      await f.emit("agent_settled", { aborted: false });
+      assert.equal(f.state().kind, "explain");
+    }
+    assert.deepEqual(f.activity, { stores: 0, names: 0, instructions: 0, templates: 0 });
+    assert.deepEqual(await readdir(f.agentDir), []);
+    assert.equal(f.reviews.length, 0);
+    assert.equal(f.sentUserMessages.length, 1);
+    assert.equal(f.draft(), "Unsent draft");
+    await f.explain("exit");
+    assert.equal(f.state().kind, "idle");
+    assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+    const event = promptEvent();
+    await f.emit("before_agent_start", event);
+    assert.equal(event.systemPromptOptions.sections.pi_plan_mode, undefined);
+  }
+});
+
+test("Explain shares inspection tools and nested gates but denies every planning/implementation helper", async () => {
+  const denied = ["plan_mode_complete", ...IMPLEMENTATION_HELPERS];
+  const f = await fixture({ tools: ["read", "subagent", "nested_read", ...denied, ...ARTIFACT_TOOLS] });
+  await f.explain();
+  for (const name of denied) {
+    assert.ok(!f.rawPi.getActiveTools().includes(name));
+    for (const parentToolCallId of [undefined, "orchestrator"])
+      assert.equal(
+        ((await f.emit("tool_call", { toolName: name, input: {}, parentToolCallId })) as { block: boolean }).block,
+        true,
+      );
+    await assert.rejects(f.execute(name, {}), /not active|Explain|Plan mode/i);
+  }
+  assert.ok(f.rawPi.getActiveTools().includes("plan_mode_question"));
+  assert.equal(await f.emit("tool_call", { toolName: "nested_read", input: {}, parentToolCallId: "relay" }), undefined);
+  assert.equal(
+    ((await f.emit("tool_call", { toolName: "write", input: {}, parentToolCallId: "relay" })) as { block: boolean })
+      .block,
+    true,
+  );
+  assert.equal(await f.emit("tool_call", { toolName: "artifact_create", input: { directory: "/unowned" } }), undefined);
+  const snapshot = f.entries.length;
+  f.rawPi.events.emit("pi-artifacts-reference-v1", {
+    sessionId: "test-parent-session",
+    reference: {
+      version: 1,
+      artifactId: randomUUID(),
+      jobId: randomUUID(),
+      directory: "/unowned",
+      paths: [],
+      status: "running",
+    },
+  });
+  assert.equal(f.entries.length, snapshot);
+  const event = promptEvent();
+  await f.emit("before_agent_start", event);
+  assert.doesNotMatch(event.systemPromptOptions.sections.pi_plan_mode, /Artifact workspace:|wait-at-the-end/);
+  f.chooseTools(["read", "grep"]);
+  await f.command("tools");
+  assert.deepEqual(new Set(f.rawPi.getActiveTools()), new Set(["read", "grep", "plan_mode_question"]));
+  const explain = f.state();
+  assert.equal(explain.kind, "explain");
+  assert.deepEqual(explain.restriction.tools, ["read", "grep"]);
+  await f.command("start");
+  const planning = f.state();
+  assert.equal(planning.kind, "planning");
+  assert.deepEqual(planning.workflow.tools, ["read", "grep"]);
+  assert.deepEqual(planning.workflow.previousTools, BASELINE);
+  assert.equal(planning.workflow.task, undefined);
+  await f.command("exit");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+});
+
+test("Explain structured questions preserve RPC answers, cancellation and noninteractive fallback", async () => {
+  const f = await fixture();
+  await f.explain();
+  const params = {
+    questions: [
+      {
+        id: "focus",
+        header: "Focus",
+        question: "Which part?",
+        options: [
+          { label: "Parser", description: "Parsing code" },
+          { label: "UI", description: "Presentation" },
+        ],
+      },
+    ],
+  };
+  Object.assign(f.ctx, { hasUI: false, mode: "print" });
+  const fallback = await f.execute("plan_mode_question", params);
+  assert.match(JSON.stringify(fallback), /ui_unavailable/);
+  Object.assign(f.ctx, { hasUI: true, mode: "rpc" });
+  const cancelled = await f.execute("plan_mode_question", params);
+  assert.match(JSON.stringify(cancelled), /cancelled/);
+  Object.assign((f.ctx as ExtensionContext).ui, { select: async () => "1. Parser — Parsing code" });
+  const answered = await f.execute("plan_mode_question", params);
+  assert.match(JSON.stringify(answered), /"answer":"Parser"/);
+  assert.equal(f.state().kind, "explain");
+  const opened = Promise.withResolvers<void>();
+  Object.assign((f.ctx as ExtensionContext).ui, {
+    select: async (_title: string, _choices: string[], options: { signal: AbortSignal }) => {
+      opened.resolve();
+      return new Promise<undefined>((resolve) =>
+        options.signal.addEventListener("abort", () => resolve(undefined), { once: true }),
+      );
+    },
+  });
+  const pending = f.execute("plan_mode_question", params);
+  await opened.promise;
+  await f.emit("session_shutdown");
+  assert.match(JSON.stringify(await pending), /cancelled/);
+});
+
+test("Explain restoration and compaction retain captured prompt without storage or naming", async () => {
+  const f = await fixture();
+  await f.explain("Inspect this");
+  const saved = f.entries.map((entry) => ({ type: "custom", ...structuredClone(entry) }));
+  const first = promptEvent();
+  await f.emit("before_agent_start", first);
+  await f.emit("session_compact");
+  await f.emit("agent_settled", { aborted: true });
+  const second = promptEvent();
+  await f.emit("before_agent_start", second);
+  assert.equal(second.systemPromptOptions.sections.pi_plan_mode, first.systemPromptOptions.sections.pi_plan_mode);
+  await f.emit("session_shutdown");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  await f.emit("session_start");
+  assert.equal(f.statuses.get("plan-mode"), "[Explain]");
+  f.branch([]);
+  await f.emit("session_tree");
+  assert.equal(f.statuses.get("plan-mode"), "[Normal]");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  f.branch(saved);
+  await f.emit("session_tree");
+  assert.equal(f.statuses.get("plan-mode"), "[Explain]");
+  const third = promptEvent();
+  await f.emit("before_agent_start", third);
+  assert.equal(third.systemPromptOptions.sections.pi_plan_mode, first.systemPromptOptions.sections.pi_plan_mode);
+  assert.deepEqual(f.activity, { stores: 0, names: 0, instructions: 0, templates: 0 });
+});
+
+test("Plan to Explain retains saved files, cancels owned jobs and invalidates automatic review", async () => {
+  const f = await fixture({ tools: ["read", ...ARTIFACT_TOOLS] });
+  const saved = await ready(f);
+  const bytes = await readFile(saved.details.path, "utf8");
+  const prior = f.state();
+  assert.equal(prior.kind, "ready");
+  assert.ok(prior.workflow.artifacts);
+  const actions: string[] = [];
+  f.rawPi.events.on("pi-artifacts-service-v1", (value) => {
+    const request = value as { action: string; respond(value: unknown): void };
+    actions.push(request.action);
+    request.respond({ version: 1 });
+  });
+  f.rawPi.events.emit("pi-artifacts-reference-v1", {
+    sessionId: "test-parent-session",
+    reference: {
+      version: 1,
+      artifactId: randomUUID(),
+      jobId: randomUUID(),
+      directory: join(prior.workflow.artifacts.workspace.directory, "owned"),
+      paths: [],
+      status: "running",
+    },
+  });
+  await f.explain();
+  await f.emit("agent_settled", { aborted: false });
+  assert.equal(f.state().kind, "explain");
+  assert.ok(actions.includes("cancel"));
+  assert.equal(f.sentUserMessages.length, 0);
+  assert.equal(await readFile(saved.details.path, "utf8"), bytes);
+  await f.command("Plan the next change");
+  const state = f.state();
+  assert.equal(state.kind, "planning");
+  assert.equal(state.workflow.document, undefined);
+  assert.deepEqual(state.workflow.previousTools, BASELINE);
+  assert.equal(f.sentUserMessages.at(-1)?.text, "Plan the next change");
+});
+
+test("Explain menu entry, idle guards, and plan-only guidance", async () => {
+  const f = await fixture();
+  const select = vi.fn(async (_title: string, choices: string[]) =>
+    choices.includes("Start explaining") ? "Start explaining" : undefined,
+  );
+  Object.assign((f.ctx as ExtensionContext).ui, { select });
+  await f.command("");
+  assert.equal(f.state().kind, "explain");
+  assert.equal(f.statuses.get("plan-mode"), "[Explain]");
+  for (const command of ["open", "implement", "saved", "verify", "resume", "artifacts omit missing"]) {
+    await f.command(command);
+    assert.match(f.notifications.at(-1)?.message ?? "", /Explain.*\/plan start/);
+    assert.equal(f.state().kind, "explain");
+  }
+  for (const override of [
+    { isIdle: () => false, hasPendingMessages: () => false },
+    { isIdle: () => true, hasPendingMessages: () => true },
+  ]) {
+    Object.assign(f.ctx, override);
+    await f.explain("exit");
+    await f.explain("Request while busy");
+    assert.equal(f.state().kind, "explain");
+    assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+    assert.deepEqual(f.sentUserMessages, []);
+  }
+});
+
+test("Explain detaches implementation; exit does not resume and explicit resume restores it", async () => {
+  const f = await fixture();
+  await beginImplementation(f);
+  await f.explain();
+  assert.equal(implementationOf(f)?.phase, "detached");
+  const event = promptEvent();
+  await f.emit("before_agent_start", event);
+  assert.equal(event.systemPromptOptions.sections.pi_plan_implementation, undefined);
+  await f.explain("exit");
+  assert.equal(implementationOf(f)?.phase, "detached");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+  await f.command("resume");
+  assert.equal(implementationOf(f)?.phase, "implementing");
+});
+
+test("Explain command shares the async gate and rolls back failed request dispatch", async () => {
+  const f = await fixture();
+  const gate = Promise.withResolvers<void>();
+  f.onSettings(() => gate.promise);
+  const pending = f.explain();
+  await f.command("start");
+  await f.explain("start");
+  assert.equal(f.notifications.filter((item) => item.message.includes("already open")).length, 2);
+  gate.resolve();
+  await pending;
+  const explain = f.state();
+  const tools = f.rawPi.getActiveTools();
+  f.rawPi.sendUserMessage = () => {
+    throw new Error("dispatch failed");
+  };
+  await f.command("New plan");
+  assert.deepEqual(f.state(), explain);
+  assert.deepEqual(f.rawPi.getActiveTools(), tools);
+  await f.explain("exit");
+  await f.explain("Explain request");
+  assert.equal(f.state().kind, "idle");
+  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+});
+
+test("Explain mode transitions preserve the prior restriction on asynchronous settings failures", async () => {
+  const f = await fixture();
+  await f.explain();
+  const before = f.state();
+  const tools = f.rawPi.getActiveTools();
+  f.onSettings(async () => {
+    throw new Error("bad settings");
+  });
+  await f.command("start");
+  assert.deepEqual(f.state(), before);
+  assert.deepEqual(f.rawPi.getActiveTools(), tools);
+  f.onSettings(undefined);
+  await f.command("start");
+  const plan = f.state();
+  const planTools = f.rawPi.getActiveTools();
+  f.onSettings(async () => {
+    throw new Error("bad settings");
+  });
+  await f.explain();
+  assert.deepEqual(f.state(), plan);
+  assert.deepEqual(f.rawPi.getActiveTools(), planTools);
+});
+
+test("a new extension instance restores Explain without consulting plan storage or naming", async () => {
+  const f = await fixture();
+  await f.explain();
+  const state = f.state();
+  await f.emit("session_shutdown");
+  const fresh = createMockPi({ activeTools: BASELINE, allTools: [...BASELINE, "grep", "find", "ls"].map(builtinTool) });
+  await planMode(fresh.pi, {
+    readSettings: async () => ({}),
+    createStore: async () => {
+      throw new Error("Explain must not open storage");
+    },
+    namePlan: async () => {
+      throw new Error("Explain must not name plans");
+    },
+  });
+  for (const handler of fresh.events.get("session_start") ?? []) await handler({}, f.ctx);
+  assert.equal(f.statuses.get("plan-mode"), "[Explain]");
+  assert.deepEqual(f.state(), state);
+  assert.ok(!fresh.rawPi.getActiveTools().includes("write"));
+  const command = fresh.commands.get("explain");
+  assert.ok(command);
+  await command.handler("exit", f.ctx);
+  assert.deepEqual(fresh.rawPi.getActiveTools(), BASELINE);
+});
+
 test("default and configured shortcuts register once; disabling and reload replace the binding", async () => {
   for (const [shortcuts, keys] of [
-    [undefined, [DEFAULT_TOGGLE_SHORTCUT]],
-    [{ togglePlan: "shift+tab" }, ["shift+tab"]],
-    [{ togglePlan: null }, []],
-    [{}, [DEFAULT_TOGGLE_SHORTCUT]],
+    [undefined, [DEFAULT_TOGGLE_SHORTCUT, DEFAULT_TEMPLATE_SHORTCUT]],
+    [{ togglePlan: "shift+tab" }, ["shift+tab", DEFAULT_TEMPLATE_SHORTCUT]],
+    [{ togglePlan: null }, [DEFAULT_TEMPLATE_SHORTCUT]],
+    [{}, [DEFAULT_TOGGLE_SHORTCUT, DEFAULT_TEMPLATE_SHORTCUT]],
+    [{ selectTemplate: "alt+t" }, [DEFAULT_TOGGLE_SHORTCUT, "alt+t"]],
+    [{ selectTemplate: null }, [DEFAULT_TOGGLE_SHORTCUT]],
+    [{ togglePlan: null, selectTemplate: null }, []],
   ] as const) {
     const f = await fixture({ shortcuts });
     assert.deepEqual([...f.shortcuts.keys()], keys);
   }
   const f = await fixture();
   f.dependencies.readSettings = async () => ({ shortcuts: { togglePlan: "alt+p" } });
-  assert.deepEqual([...f.shortcuts.keys()], [DEFAULT_TOGGLE_SHORTCUT]);
+  assert.deepEqual([...f.shortcuts.keys()], [DEFAULT_TOGGLE_SHORTCUT, DEFAULT_TEMPLATE_SHORTCUT]);
   const reloaded = createMockPi();
   await planMode(reloaded.pi, f.dependencies);
-  assert.deepEqual([...reloaded.shortcuts.keys()], ["alt+p"]);
+  assert.deepEqual([...reloaded.shortcuts.keys()], ["alt+p", DEFAULT_TEMPLATE_SHORTCUT]);
+});
+
+test("template shortcut selects without disturbing the draft and rewrites only changed saved templates", async () => {
+  const f = await fixture();
+  Object.assign(f.ctx, { mode: "tui" });
+  const shortcut = f.shortcuts.get(DEFAULT_TEMPLATE_SHORTCUT);
+  assert.ok(shortcut);
+  let selected: string | undefined = "minimal";
+  Object.assign((f.ctx as ExtensionContext).ui, {
+    select: async (title: string, options: string[]) => {
+      assert.equal(title, "Plan template");
+      assert.ok(options.some((option) => option.includes("(current)")));
+      return options.find((option) => option.startsWith(`${selected} `));
+    },
+  });
+  await f.command("start");
+  await shortcut.handler(f.ctx);
+  assert.equal(f.statuses.get("plan-mode"), "[Plan minimal]");
+  assert.equal(f.sentUserMessages.length, 0);
+  const saved = await f.execute("plan_mode_complete", { plan: PLAN });
+  const before = f.state();
+  await shortcut.handler(f.ctx); // Same selection does not incur a rewrite.
+  selected = undefined;
+  await shortcut.handler(f.ctx); // Dismissal leaves readiness intact.
+  assert.deepEqual(f.state(), before);
+  assert.equal(f.sentUserMessages.length, 0);
+  selected = "checklist";
+  await shortcut.handler(f.ctx);
+  assert.equal(f.state().kind, "planning");
+  assert.match(f.sentUserMessages.at(-1)?.text ?? "", /Switch this plan to the "checklist" template/);
+  assert.equal(await savedBody(f, saved.details.path), PLAN);
+  assert.equal(f.draft(), "Unsent draft");
+  const first = promptEvent();
+  await f.emit("before_agent_start", first);
+  const second = promptEvent();
+  await f.emit("before_agent_start", second);
+  assert.equal(first.systemPromptOptions.sections.pi_plan_mode, second.systemPromptOptions.sections.pi_plan_mode);
+  assert.match(first.systemPromptOptions.sections.pi_plan_mode, /## Implementation Checklist/);
+});
+
+test.each(["normal", "explain", "implementing"])(
+  "template shortcut changes only future defaults in %s",
+  async (mode) => {
+    const persist = vi.spyOn(settingsModule, "updatePlanModeSettings").mockResolvedValue({ template: "minimal" });
+    const f = await fixture();
+    if (mode === "explain") await f.explain();
+    if (mode === "implementing") await beginImplementation(f);
+    Object.assign(f.ctx, { mode: "tui" });
+    Object.assign((f.ctx as ExtensionContext).ui, {
+      select: async (title: string, choices: string[]) => {
+        assert.equal(title, "Default plan template");
+        return choices.find((choice) => choice.startsWith("minimal "));
+      },
+    });
+    const before = f.state();
+    const tracked = implementationOf(f);
+    const tools = f.rawPi.getActiveTools();
+    const messages = f.sentUserMessages.length;
+    await f.shortcuts.get(DEFAULT_TEMPLATE_SHORTCUT)?.handler(f.ctx);
+    assert.deepEqual(persist.mock.calls[0]?.[0], { template: "minimal" });
+    assert.deepEqual(f.state(), before);
+    assert.deepEqual(implementationOf(f), tracked);
+    assert.deepEqual(f.rawPi.getActiveTools(), tools);
+    assert.equal(f.sentUserMessages.length, messages);
+  },
+);
+
+test("template shortcut guards busy/non-TUI use, shares the command gate, and cancels stale pickers", async () => {
+  const f = await fixture();
+  const shortcut = f.shortcuts.get(DEFAULT_TEMPLATE_SHORTCUT);
+  assert.ok(shortcut);
+  const select = vi.fn(async () => undefined as string | undefined);
+  Object.assign((f.ctx as ExtensionContext).ui, { select });
+  for (const mode of ["rpc", "print", "json"]) {
+    Object.assign(f.ctx, { mode });
+    await shortcut.handler(f.ctx);
+  }
+  Object.assign(f.ctx, { mode: "tui", isIdle: () => false });
+  await shortcut.handler(f.ctx);
+  Object.assign(f.ctx, { isIdle: () => true, hasPendingMessages: () => true });
+  await shortcut.handler(f.ctx);
+  assert.equal(select.mock.calls.length, 0);
+  Object.assign(f.ctx, { hasPendingMessages: () => false });
+  await f.command("start");
+  const opened = Promise.withResolvers<void>();
+  const chosen = Promise.withResolvers<string | undefined>();
+  let signal: AbortSignal | undefined;
+  Object.assign((f.ctx as ExtensionContext).ui, {
+    select: async (_title: string, _options: string[], options: { signal: AbortSignal }) => {
+      signal = options.signal;
+      opened.resolve();
+      return chosen.promise;
+    },
+  });
+  const pending = shortcut.handler(f.ctx);
+  await opened.promise;
+  await f.toggle();
+  await f.command("exit");
+  await shortcut.handler(f.ctx);
+  assert.equal(f.notifications.filter((notice) => notice.message.includes("already open")).length, 3);
+  const before = f.entries.length;
+  await f.emit("session_shutdown");
+  assert.equal(signal?.aborted, true);
+  chosen.resolve("minimal");
+  await pending;
+  assert.equal(f.entries.length, before);
+  assert.equal(f.sentUserMessages.length, 0);
+  await f.emit("session_start");
+  await f.command("exit"); // Gate was released even after cancellation.
+  assert.equal(f.state().kind, "idle");
 });
 
 test("factory awaits shortcut settings; startup failure keeps commands and tools and reports once", async () => {
@@ -258,12 +702,15 @@ test("factory awaits shortcut settings; startup failure keeps commands and tools
   assert.ok(!errors[0]?.message.includes("\u001b"));
 });
 
-test("toggle enters and leaves directly without messages, review, effort changes, or editor mutation", async () => {
+test("toggle cycles Normal, Explain, Plan, Normal without messages, review, effort changes, or editor mutation", async () => {
   const f = await fixture();
   assert.equal(f.statuses.get("plan-mode"), "[Normal]");
   await f.toggle();
+  assert.equal(f.state().kind, "explain");
+  assert.equal(f.statuses.get("plan-mode"), "[Explain]");
+  await f.toggle();
   assert.equal(f.state().kind, "planning");
-  assert.equal(f.statuses.get("plan-mode"), "[Planning]");
+  assert.equal(f.statuses.get("plan-mode"), "[Plan decision-brief]");
   assert.ok(!f.rawPi.getActiveTools().includes("write"));
   const prompt = promptEvent();
   await f.emit("before_agent_start", prompt);
@@ -292,6 +739,8 @@ test("toggle exits a ready plan without implementation or automatic review and p
   assert.deepEqual(f.sentUserMessages, []);
   assert.deepEqual(f.reviews, []);
   assert.equal(implementationOf(f), undefined);
+  await f.toggle();
+  assert.equal(f.state().kind, "explain");
   await f.toggle();
   const state = f.state();
   assert.equal(state.kind, "planning");
@@ -327,8 +776,9 @@ test("toggle and commands share a gate across asynchronous entry in either direc
     assert.equal(f.notifications.filter((item) => item.message.includes("already open")).length, 2);
     gate.resolve();
     await pending;
-    assert.equal(f.state().kind, "planning");
+    assert.equal(f.state().kind, first === "toggle" ? "explain" : "planning");
     assert.equal(f.entries.filter((entry) => entry.customType === PLAN_STATE_ENTRY).length, 1);
+    if (first === "toggle") await f.toggle();
     await f.toggle();
     assert.equal(f.state().kind, "idle");
   }
@@ -356,7 +806,7 @@ test("toggle revalidates ownership after settings and store awaits", async () =>
       await planMode(f.pi, f.dependencies);
       await f.emit("session_start");
     }
-    const pending = f.toggle();
+    const pending = stage === "settings" ? f.toggle() : f.command("start");
     await reached.promise;
     await f.emit("session_shutdown");
     const other = createMockContext({ mode: "tui", cwd: f.cwd });
@@ -386,9 +836,11 @@ test("failed toggle transitions roll back tools and release the command gate", a
     throw new Error("exit failed");
   };
   await f.toggle();
-  assert.equal(f.state().kind, "planning");
+  assert.equal(f.state().kind, "explain");
   assert.deepEqual(f.rawPi.getActiveTools(), planningTools);
   f.rawPi.appendEntry = append;
+  await f.toggle();
+  assert.equal(f.state().kind, "planning");
   await f.toggle();
   assert.equal(f.state().kind, "idle");
 });
@@ -406,7 +858,7 @@ test("toggle detaches implementation like plan start and rolls it back on entry 
       };
     const messages = f.sentUserMessages.length;
     await f.toggle();
-    assert.equal(f.state().kind, fail ? "idle" : "planning");
+    assert.equal(f.state().kind, fail ? "idle" : "explain");
     assert.equal(implementationOf(f)?.phase, fail ? "implementing" : "detached");
     assert.equal(f.sentUserMessages.length, messages);
   }
@@ -602,7 +1054,7 @@ test("browsing and continuation retain the selected store through implementation
   f.choose("continue");
   await f.command("saved");
   const continued = f.state();
-  assert.ok(continued.kind !== "idle");
+  assert.ok(isPlanning(continued));
   assert.deepEqual(continued.workflow.storage, legacy.storage);
   const result = await f.execute("plan_mode_complete", { plan: PLAN });
   assert.equal(result.details.path, first.path);
@@ -667,17 +1119,23 @@ test("Normal tools persists future defaults without entering planning or changin
   assert.match(f.notifications.at(-1)?.message ?? "", /future planning.*unchanged/);
 });
 
-test.each([undefined, "# Custom protocol\n\nUse a checklist, without estimates."])(
-  "base prompt %s is captured across turns, updates, restoration and new workflows",
-  async (basePrompt) => {
-    const f = await fixture({ basePrompt });
+test.each([undefined, "detailed-spec"])(
+  "template %s is captured across turns, updates, restoration and new workflows",
+  async (templateId) => {
+    const f = await fixture({ template: templateId });
     await f.command("start");
     const captured = f.state();
     assert.equal(captured.kind, "planning");
-    assert.equal(captured.workflow.basePrompt, basePrompt ?? DEFAULT_PLAN_MODE_PROMPT);
-    const expected = buildPlanModePrompt("Keep personal guidance.", captured.workflow.basePrompt);
-    const path = join(f.agentDir, "pi-plan-mode-prompt.md");
-    await writeFile(path, "# Changed on disk");
+    const expectedTemplate = resolvePlanTemplate(templateId);
+    assert.equal(captured.workflow.template, expectedTemplate.id);
+    assert.equal(captured.workflow.templatePrompt, expectedTemplate.content);
+    assert.equal(f.statuses.get("plan-mode"), `[Plan ${expectedTemplate.id}]`);
+    const expected = buildPlanModePrompt("Keep personal guidance.", {
+      content: captured.workflow.templatePrompt,
+    });
+    const templatesDir = join(f.agentDir, "pi-plan-mode-templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, `${expectedTemplate.id}.md`), "# Changed on disk\n\nUse `## Changed`.");
     f.instructions("Changed guidance");
     const assertPrompt = async () => {
       const event = promptEvent();
@@ -703,7 +1161,7 @@ test.each([undefined, "# Custom protocol\n\nUse a checklist, without estimates."
     const second = await f.execute("plan_mode_complete", { plan: body });
     assert.equal(second.details.path, result.details.path);
     const branch = f.entries.map((entry) => ({ type: "custom", ...entry }));
-    await writeFile(path, Buffer.from([0xff]));
+    await writeFile(join(templatesDir, `${expectedTemplate.id}.md`), Buffer.from([0xff]));
     await f.command("exit");
     f.branch(branch);
     await f.emit("session_tree");
@@ -716,23 +1174,28 @@ test.each([undefined, "# Custom protocol\n\nUse a checklist, without estimates."
     await f.emit("session_compact");
     await assertPrompt();
     await f.command("exit");
-    await writeFile(path, "# Changed on disk");
+    await writeFile(join(templatesDir, `${expectedTemplate.id}.md`), "# Changed on disk\n\nUse `## Changed`.");
     await f.command("start");
     const next = promptEvent();
     await f.emit("before_agent_start", next);
     assert.equal(
       next.systemPromptOptions.sections.pi_plan_mode,
-      buildPlanModePrompt("Changed guidance", "# Changed on disk"),
+      buildPlanModePrompt("Changed guidance", { content: "# Changed on disk\n\nUse `## Changed`." }),
     );
   },
 );
 
-test("v3 workflows lacking a base prompt restore the built-in base without consulting today's replacement", async () => {
-  const f = await fixture({ basePrompt: "Today's replacement" });
+test("v3 workflows lacking template fields restore decision-brief without consulting current disk overrides", async () => {
+  const f = await fixture({ template: "detailed-spec" });
+  const templatesDir = join(f.agentDir, "pi-plan-mode-templates");
+  await mkdir(templatesDir, { recursive: true });
+  await writeFile(join(templatesDir, "decision-brief.md"), "# Overridden on disk");
   await f.command("start");
   const state = f.state();
   assert.equal(state.kind, "planning");
-  delete state.workflow.basePrompt;
+  const rawWorkflow = state.workflow as unknown as Record<string, unknown>;
+  delete rawWorkflow.template;
+  delete rawWorkflow.templatePrompt;
   f.branch([{ type: "custom", customType: PLAN_STATE_ENTRY, data: state }]);
   await f.emit("session_tree");
   const event = promptEvent();
@@ -741,21 +1204,24 @@ test("v3 workflows lacking a base prompt restore the built-in base without consu
   await f.execute("plan_mode_complete", { plan: PLAN });
   const restored = f.state();
   assert.equal(restored.kind, "ready");
-  assert.equal(restored.workflow.basePrompt, DEFAULT_PLAN_MODE_PROMPT);
+  assert.equal(restored.workflow.template, DEFAULT_PLAN_TEMPLATE.id);
+  assert.equal(restored.workflow.templatePrompt, DEFAULT_PLAN_TEMPLATE.content);
 });
 
-test("invalid replacement blocks activation without detaching implementation or changing tools", async () => {
+test("invalid user template blocks activation without detaching implementation or changing tools", async () => {
   for (const implementing of [false, true]) {
     const f = await fixture();
     if (implementing) await beginImplementation(f);
     const before = structuredClone(f.entries);
     const tools = f.rawPi.getActiveTools();
-    await writeFile(join(f.agentDir, "pi-plan-mode-prompt.md"), Buffer.from([0xff]));
+    const templatesDir = join(f.agentDir, "pi-plan-mode-templates");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, "decision-brief.md"), Buffer.from([0xff]));
     await f.command("start");
-    assert.match(f.notifications.at(-1)?.message ?? "", /pi-plan-mode-prompt.md.*valid UTF-8/);
+    assert.match(f.notifications.at(-1)?.message ?? "", /decision-brief\.md.*valid UTF-8/);
     assert.deepEqual(f.entries, before);
     assert.deepEqual(f.rawPi.getActiveTools(), tools);
-    await writeFile(join(f.agentDir, "pi-plan-mode-prompt.md"), "Recovered prompt");
+    await writeFile(join(templatesDir, "decision-brief.md"), "# Recovered template\n\nUse `## Overview`.");
     await f.command("start");
     assert.equal(f.state().kind, "planning");
   }
@@ -768,6 +1234,7 @@ test("native prompt section is stable across turns, captures guidance, and is re
   const event = promptEvent();
   await f.emit("before_agent_start", event);
   assert.equal(event.systemPromptOptions.sections.pi_plan_mode, buildPlanModePrompt("Keep personal guidance."));
+  assert.equal(event.systemPromptOptions.sections.pi_plan_mode.includes("Artifact workspace:"), false);
   const second = promptEvent();
   await f.emit("before_agent_start", second);
   assert.deepEqual(event.systemPromptOptions, second.systemPromptOptions);
@@ -820,7 +1287,7 @@ test("default naming falls back to the first task, never the plan title or subse
   assert.equal(state.workflow.task, "Fix Unicode parser");
   assert.equal(state.workflow.name, "fix-unicode-parser");
   assert.match(saved.details.path, /\/fix-unicode-parser\.md$/);
-  assert.equal(f.statuses.get("plan-mode"), "[Planning fix-unicode-parser]");
+  assert.equal(f.statuses.get("plan-mode"), "[Plan decision-brief] fix-unicode-parser");
 });
 
 test("Save for later exits without deleting files and saved plans can be reviewed in another workflow", async () => {
@@ -889,29 +1356,122 @@ test("removed commands diagnose without changing files, mode, messages, or compl
   assert.equal(f.sentUserMessages.at(-1)?.text, "save bandwidth");
 });
 
-test("planning menus omit finalization and settings still opens planning-instruction editing", async () => {
+test("planning menus omit finalization and settings opens default plan template selection", async () => {
   const f = await fixture();
   await f.command("start");
-  let editing = false;
+  let sawTemplateSelect = false;
+  const spy = vi.spyOn(settingsModule, "updatePlanModeSettings").mockResolvedValue({ template: "checklist" });
   Object.assign((f.ctx as ExtensionContext).ui, {
     select: async (title: string, options: string[]) => {
       assert.ok(!options.includes("Finalize plan"));
+      assert.ok(!options.includes("Edit planning prompt"));
       if (title === "Plan settings") {
-        assert.ok(options.includes("Edit planning prompt"));
-        return "Edit planning prompt";
+        assert.ok(options.includes("Default plan template"));
+        return "Default plan template";
       }
-      return undefined;
-    },
-    editor: async (title: string) => {
-      assert.match(title, /Planning prompt/);
-      editing = true;
+      if (title === "Default plan template") {
+        sawTemplateSelect = true;
+        return options.find((option) => option.startsWith("checklist"));
+      }
       return undefined;
     },
   });
   await f.command("");
   await f.command("settings");
-  assert.equal(editing, true);
+  assert.equal(sawTemplateSelect, true);
+  assert.equal(spy.mock.calls.length, 1);
+  assert.deepEqual(spy.mock.calls[0]?.[0], { template: "checklist" });
   assert.equal(f.sentUserMessages.length, 0);
+});
+
+test.each(["frontmatter", "headerless"])(
+  "template %s descriptions are sanitized only at display boundaries",
+  async (format) => {
+    const f = await fixture();
+    const templatesDir = join(f.agentDir, "pi-plan-mode-templates");
+    await mkdir(templatesDir, { recursive: true });
+    const description = "Before\u001b[2Jafter\u001b]52;c;dGVzdA==\u0007 \u202etext";
+    const body = "# [Plan title]\n\n## Changes\n<!-- Preserve comments and Markdown. -->";
+    const markdown =
+      format === "frontmatter"
+        ? `---\nlabel: Custom\ndescription: ${JSON.stringify(description)}\n---\n${body}`
+        : `# Custom\n> ${description}\n\n${body}`;
+    const path = join(templatesDir, "custom.md");
+    await writeFile(path, markdown);
+    const completions = await f.commands.get("plan")?.getArgumentCompletions?.("template custom");
+    assert.deepEqual(completions, [{ value: "template custom", label: "custom", description: "Beforeafter text" }]);
+    assert.equal(resolvePlanTemplate("custom", templatesDir).description, description);
+    await f.command("start");
+    Object.assign((f.ctx as ExtensionContext).ui, {
+      select: async (_title: string, options: string[]) => {
+        const option = "custom — Beforeafter text";
+        assert.ok(options.includes(option));
+        return option;
+      },
+    });
+    await f.command("template");
+    const state = f.state();
+    assert.equal(state.kind, "planning");
+    assert.equal(state.workflow.template, "custom");
+    assert.equal(state.workflow.templatePrompt, format === "frontmatter" ? body : markdown);
+    assert.equal(await readFile(path, "utf8"), markdown);
+  },
+);
+
+test("on-the-fly /plan template switching updates the active workflow before save and triggers an immediate rewrite after save", async () => {
+  const f = await fixture();
+  const templatesDir = join(f.agentDir, "pi-plan-mode-templates");
+  await mkdir(templatesDir, { recursive: true });
+  await writeFile(
+    join(templatesDir, "custom-spec.md"),
+    "# Custom Spec\n> Team custom specification\n\nUse `## Custom Section` and `## Verification`.",
+  );
+
+  const rootCompletions = (await f.commands.get("plan")?.getArgumentCompletions?.("temp")) as { value: string }[];
+  assert.ok(rootCompletions?.some((item) => item.value === "template"));
+  const subCompletions = (await f.commands.get("plan")?.getArgumentCompletions?.("template c")) as {
+    value: string;
+    label: string;
+  }[];
+  assert.deepEqual(
+    subCompletions?.map((item) => item.value),
+    ["template checklist", "template custom-spec"],
+  );
+
+  // 1. Switch template while planning before any plan is saved: updates footer and prompt without sending a message.
+  await f.command("start");
+  assert.equal(f.statuses.get("plan-mode"), "[Plan decision-brief]");
+  await f.emit("input", { text: "Support uploading images", source: "rpc" });
+  assert.equal(f.statuses.get("plan-mode"), "[Plan decision-brief] support-uploading-images");
+  await f.command("template detailed-spec");
+  assert.equal(f.statuses.get("plan-mode"), "[Plan detailed-spec] support-uploading-images");
+  assert.equal(f.sentUserMessages.length, 0);
+  const beforeSavePrompt = promptEvent();
+  await f.emit("before_agent_start", beforeSavePrompt);
+  assert.equal(beforeSavePrompt.systemPromptOptions.sections.pi_plan_mode.includes("## Plan template"), false);
+  assert.match(beforeSavePrompt.systemPromptOptions.sections.pi_plan_mode, /## Affected Files & Interfaces/);
+
+  // 2. Save a plan, then switch template on the fly: transitions to planning, updates footer/prompt, and dispatches rewrite request.
+  const saved = await f.execute("plan_mode_complete", { plan: PLAN });
+  assert.equal(f.state().kind, "ready");
+  assert.equal(f.statuses.get("plan-mode"), "[Plan detailed-spec] support-uploading-images");
+
+  await f.command("template custom-spec");
+  const afterSwitch = f.state();
+  assert.equal(afterSwitch.kind, "planning");
+  if (afterSwitch.kind !== "planning") throw new Error("Expected planning state");
+  assert.equal(afterSwitch.workflow.template, "custom-spec");
+  assert.equal(afterSwitch.workflow.document?.path, saved.details.path);
+  assert.equal(f.statuses.get("plan-mode"), "[Plan custom-spec] support-uploading-images");
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.match(f.sentUserMessages[0]?.text ?? "", /Switch this plan to the "custom-spec" template/);
+  assert.match(f.sentUserMessages[0]?.text ?? "", /plan_mode_complete/);
+  assert.ok((f.sentUserMessages[0]?.text ?? "").endsWith(PLAN));
+
+  const afterSwitchPrompt = promptEvent();
+  await f.emit("before_agent_start", afterSwitchPrompt);
+  assert.equal(afterSwitchPrompt.systemPromptOptions.sections.pi_plan_mode.includes("## Plan template"), false);
+  assert.match(afterSwitchPrompt.systemPromptOptions.sections.pi_plan_mode, /## Custom Section/);
 });
 
 test("implement requires a current file, interactive review, idle agent and an unoccupied command gate", async () => {
@@ -1328,7 +1888,7 @@ test.each(["planning", "implementing", "completed"] as const)(
     assert.equal(f.statuses.get("plan-mode"), status);
     const state = f.state();
     assert.equal(
-      state.kind === "idle" ? implementationOf(f)?.hash : state.workflow.hash,
+      isPlanning(state) ? state.workflow.hash : implementationOf(f)?.hash,
       planHash(PLAN.replace("material", "human")),
     );
     if (phase === "completed") assert.equal(implementationOf(f)?.phase, "completed");
@@ -1980,9 +2540,16 @@ test.each(["plan_mode_complete", "plan_mode_edit"])(
 test("artifact claims are available before save; pending work gates both readiness tools without publication", async () => {
   const f = await fixture({ tools: ["read", ...ARTIFACT_TOOLS] });
   await f.command("start");
+  const event = promptEvent();
+  await f.emit("before_agent_start", event);
+  const prompt = event.systemPromptOptions.sections.pi_plan_mode;
+  assert.match(prompt, /update only associated artifacts/);
+  assert.match(prompt, /Wait for their jobs before using results or saving the plan/);
+  assert.match(prompt, /explicit user agreement to omit it/);
+  assert.match(prompt, /never present partial output as successful/);
+  assert.match(prompt, /Artifact workspace:/);
   const state = f.state();
-  assert.notEqual(state.kind, "idle");
-  if (state.kind === "idle") return;
+  assert.ok(isPlanning(state));
   const workspace = state.workflow.artifacts;
   assert.ok(workspace);
   const reference: ArtifactReference = {
@@ -2032,7 +2599,7 @@ test("failed artifacts require retry or explicit user omission; associations sur
   const f = await fixture({ tools: ["read", ...ARTIFACT_TOOLS] });
   await f.command("start");
   const state = f.state();
-  if (state.kind === "idle") throw new Error("Expected planning");
+  if (!isPlanning(state)) throw new Error("Expected planning");
   assert.ok(state.workflow.artifacts);
   const reference: ArtifactReference = {
     version: 1,
@@ -2057,6 +2624,6 @@ test("failed artifacts require retry or explicit user omission; associations sur
   assert.ok((await readFile(saved.details.path, "utf8")).startsWith("<!-- pi-plan-document-v3:"));
   await f.emit("session_start");
   const restored = f.state();
-  if (restored.kind === "idle") throw new Error("Expected restored workflow");
+  if (!isPlanning(restored)) throw new Error("Expected restored workflow");
   assert.equal(restored.workflow.artifacts?.references[0].artifactId, reference.artifactId);
 });

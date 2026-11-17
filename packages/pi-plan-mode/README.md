@@ -32,7 +32,17 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 4. Review the full saved document, then explicitly choose an action. **Implementation never starts without your choice.** **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative. Dismissal leaves the plan ready; use `/plan` to reopen review or if automatic presentation was interrupted.
 5. Implementation remains tracked. Before implementing requested changes, the agent saves localized edits with `plan_mode_edit` or complete replacements with `plan_mode_update` to the **same file**, then continues without another approval dialog. It finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**, against the current file contents snapshotted at check start. Every check exit returns to actual normal mode. Use `/plan verify` to check the retained record again, or `/plan resume` before requesting further implementation changes.
 
-By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. Each completed plan should include a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Updates change the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
+By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. The built-in templates request a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Updates change the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
+
+## Explain without planning
+
+Use `/explain` or `/explain start` to enter **Explain** without sending a model message, or `/explain <request>` to enter or follow up with a question. Explain grounds conversational answers in repository evidence, discusses alternatives and improvements, and ends naturally in prose or with a useful structured question. It stays active across turns—even after "thanks" or a request to fix something. It creates no saved plan, naming request, readiness review, or implementation observer.
+
+Coding requires an explicit switch: `/explain exit` returns to Normal for ordinary fixes; `/plan start` or `/plan <request>` starts a new approval workflow in the same conversation. Entering Explain from Plan ends that workflow, retains saved files, and cancels its owned background work. Entering Explain during implementation detaches tracking; exiting never resumes it automatically. After leaving, use `/plan resume` or `/plan verify` explicitly for retained records.
+
+Explain shares Plan's inspection defaults, explicit tool trust, and `/plan tools` selection. Plan-writing and implementation helpers are always denied in Explain, even if configured explicitly. This is a workflow restriction, **not an OS sandbox**: trusted tool implementations can still mutate state, but Explain's instructions prohibit mutations and plan creation. Selected artifact tools get no plan workspace, association, readiness protocol, or automatic generation guidance; operations requiring plan ownership may reject.
+
+Explain uses [`prompts/explain.md`](./prompts/explain.md), never the plan prompt, templates, or appended planning files. Its identity, tools, original Normal loadout, and prompt snapshot survive reload, branch navigation, and compaction. Switching Explain → Plan carries the selection and original restoration snapshot forward without reviving an earlier workflow.
 
 ## Background artifacts
 
@@ -62,9 +72,9 @@ mode cancels its outstanding jobs, retaining partial output and history. Adheren
 checking excludes every artifact tool, even when selected for planning; it can inspect
 referenced files without generating artifacts.
 
-Captured and replacement planning prompts are preserved within supported workflows.
-Start a new workflow with the updated default, or deliberately update a replacement
-prompt to include the artifact exception and wait-at-the-end protocol. See the
+When artifact tools are selected, the prompt adds their workspace and readiness rules.
+The template can specify when and how to use artifacts; failed or unfinished jobs still
+cannot be presented as successful artifacts or bypass readiness checks. See the
 [artifact package](../pi-artifacts/README.md) for persistence, cost, tool-boundary, and
 untrusted HTML details.
 
@@ -72,21 +82,25 @@ untrusted HTML details.
 
 | Command | Purpose |
 | --- | --- |
-| `/plan` | Open the planning menu, or review the completed plan. |
+| `/explain` / `/explain start` | Enter Explain without sending a model message. |
+| `/explain <request>` | Enter or follow up conversationally, without editing or saving a plan. |
+| `/explain exit` | Return from Explain to Normal. |
+| `/plan` | Open the mode menu (including Explain), or review the completed plan. |
 | `/plan start` | Enter Plan mode without sending a model message. |
 | `/plan <prompt>` | Start with a request, or send a follow-up to the active planner. |
 | `/plan saved` | Browse current-format named plans outside an active workflow. |
 | `/plan open` | Open the current saved plan in the external editor in TUI (`$VISUAL`, `$EDITOR`, or `vi`) or Pi's editable text dialog in RPC; save the same file without changing mode. |
+| `/plan template [id]` | Choose or switch the active workflow's plan template (triggering an immediate rewrite if a plan is already saved), or set the default template when outside Plan mode. |
 | `/plan implement` | Review the current on-disk plan and explicitly choose implementation here or in a fresh session. |
-| `/plan tools` | Configure future planning tools in normal mode, current planning tools while idle, or the isolated checker selection during implementation. |
-| `/plan settings` | Edit future-workflow planning instructions, tool defaults, checker options, independent progress model/reasoning, or the Naming model. |
+| `/plan tools` | Configure shared future inspection tools in normal mode, current Explain/Plan tools while idle, or the isolated checker selection during implementation. |
+| `/plan settings` | Choose the default plan template, tool defaults, checker options, independent progress model/reasoning, or the Naming model. |
 | `/plan progress` | Toggle reported progress above the editor, including while the agent is busy. |
 | `/plan verify` | Check this session's recorded implementation against its current plan file with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or detachment, before sending fixes. |
 | `/plan artifacts omit <jobId>` | Explicitly agree to omit a failed/cancelled/interrupted artifact from readiness. |
 | `/plan exit` | Leave Plan mode and restore preexisting tool availability; saved files remain. |
 
-Commands require an idle agent with no queued messages, except `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct planning commands and resume in an interactive mode to review and implement.
+Commands require an idle agent with no queued messages, except `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct Explain and planning commands and resume in an interactive mode to review and implement.
 
 `/plan implement` reads the active workflow's saved file (including planning follow-ups), or the retained implementation record when planning is inactive. It does not regenerate the plan or send a model request until an explicit choice; both destinations use the reviewed current text. Changes during review require another review. `/plan resume` only reactivates tracking without a model request; `/plan open` only edits. There are no `show`, `export`, or `off` aliases. Removed `finalize`, `save`, `prompt`, `cancel`, and `import <path>` commands give migration guidance. Cancel manual checks through their dialog. Other text remains a planning request, including `/plan save bandwidth`. See [command workflows](./docs/command-workflows.md).
 
@@ -95,8 +109,9 @@ Commands require an idle agent with no queued messages, except `/plan progress`.
 The coordinated footer is exactly one of these labels:
 
 - `[Normal]`
-- `[Planning]` — before a name is available.
-- `[Planning stem]` — for example, `[Planning support-uploading-images]`, including while ready for review.
+- `[Explain]`
+- `[Plan <template>]` — before a name is available, for example `[Plan decision-brief]`.
+- `[Plan <template>] stem` — for example, `[Plan decision-brief] support-uploading-images`, including while ready for review.
 - `[Implementing stem]`
 - `[Verifying stem]`
 
@@ -104,17 +119,19 @@ The coordinated footer is exactly one of these labels:
 
 ## Keyboard toggle
 
-**Alt+M** toggles directly between planning and normal mode while the agent is idle with no queued messages. Entering behaves like `/plan start`; leaving restores the previous tools without opening review, sending a prompt, or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
+**Alt+Shift+M** opens the template picker directly, with the current template marked. Before the first save, selection changes the active plan's template without a model request. After a save, choosing a different template requests a rewrite at the same path. Cancelling or selecting the unchanged current template does nothing. Outside Plan mode, it changes the default for future plans without switching modes. Like Alt+M, it requires an idle agent, no queued messages, and no open Plan command.
+
+**Alt+M** cycles **Normal → Explain → Plan → Normal** while the agent is idle with no queued messages. Transitions send no request; leaving restores the original Normal tools without opening review or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
 
 Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
 
 ```json
 {
-  "shortcuts": { "togglePlan": "shift+tab" }
+  "shortcuts": { "togglePlan": "shift+tab", "selectTemplate": "alt+shift+m" }
 }
 ```
 
-Set `togglePlan` to `null` to disable the shortcut; remove the override to restore **Alt+M**. Run `/reload` or restart Pi after changing it, then check `/hotkeys`. There is no shortcut settings-menu editor or watcher.
+Set either `togglePlan` or `selectTemplate` to `null` to disable that shortcut; remove its override to restore **Alt+M** or **Alt+Shift+M**, respectively. Run `/reload` or restart Pi after changing it, then check `/hotkeys`. There is no shortcut settings-menu editor or watcher.
 
 **Shift+Tab requires an extra step:** Pi reserves it for `app.thinking.cycle`. Merge `"app.thinking.cycle": []` into `<getAgentDir()>/keybindings.json` (preserving other bindings), or move that action to another key, then reload. The default Alt+M needs no global binding changes, though your own bindings or other extensions can still conflict; Pi's conflict diagnostics apply.
 
@@ -205,14 +222,13 @@ Checks return a simple verdict—**OK** (green), **Minor issues** (yellow), or *
 
 The checker compares repository evidence with the **current plan contents snapshotted at check start**, its sole plan target. A missing plan file is an explicit error; there is no fallback to reviewed text, approved ancestry, or session-cached contents. Later edits are not covered by that result. Scoped implementation user messages and on-demand transcript inspection supply context, not another plan baseline. This content goes to the selected checker provider. It is **not a general code review**, and findings never trigger an automatic repair loop. Every check exit leaves normal mode with a detached/completed record. See [adherence checks](./docs/adherence-checks.md) for transcript scope, limitations, and tool compatibility.
 
-Two optional user-wide Markdown files customize planning (`getAgentDir()` respects `PI_CODING_AGENT_DIR`):
+The complete prompts are [`prompts/plan.md`](./prompts/plan.md) and [`prompts/explain.md`](./prompts/explain.md). They are not assembled from instruction fragments. Plan mode appends the selected template body and optional user guidance unchanged after the plan prompt. The plan prompt tells the model to include every template section in order and follow its HTML comments. Only safety, tool permissions, saving, and approval remain general workflow rules:
 
-- `pi-plan-mode-prompt.md` replaces the **entire extension planning prompt** when nonblank. Missing or blank selects the built-in default in [`src/prompt.ts`](./src/prompt.ts), which is the starting point for customization.
-- `pi-plan-mode.md` appends guidance to the selected base prompt; existing guidance files keep that role.
+- Built-in templates live in [`templates/`](./templates/): `decision-brief` (default), `detailed-spec`, `checklist`, and `minimal`. Each has a YAML metadata header and a ready-plan Markdown skeleton with real headings. HTML comments specify section semantics and limits; the planner fills the skeleton without copying those comments or metadata into the finished plan.
+- User-defined templates can be added or used to override built-ins as `<getAgentDir()>/pi-plan-mode-templates/<id>.md` (lowercase kebab-case `<id>`, bounded 64 KiB UTF-8 Markdown).
+- `pi-plan-mode.md` appends optional user guidance to the core planning protocol and selected template.
 
-A replacement removes built-in methodology, safety prose, question/completion instructions, and the estimate convention. Custom prompt authors must supply their desired read-only planning and question/completion protocol instructions. Only the extension's `pi_plan_mode` section is replaced—not Pi's overall system prompt, project instructions, or tool declarations. Runtime tool permissions, completion validation, and explicit implementation approval remain enforced; trusted tools are still not sandboxed.
-
-Both files are bounded UTF-8 Markdown (64 KiB each), read and snapshotted when a workflow starts. Invalid or unreadable files block activation. Follow-ups, updates, supported session restoration, tree navigation, and compaction retain the snapshots rather than rereading edits. Legacy workflow state is rejected, not restored with a prompt fallback. To reset, remove or empty the replacement file, then exit and start a new workflow; remove or empty the guidance file too for unaugmented defaults. Use `/plan settings` → **Edit planning prompt** to open the replacement in Pi's editor (TUI or RPC). Missing files are created from the built-in default; existing files, including blank files, are preserved. Submitting saves atomically; cancelling leaves the file unchanged (a newly created template remains). Edits apply only to new workflows. There is no watcher or project-local override. See the [settings reference](./docs/settings.md) for details and guidance examples.
+Use `/plan template` or `/plan template <id>` during planning to switch templates on the fly. When a saved plan already exists in the active workflow, switching templates immediately asks the planner to rewrite the current plan into the new template format and save it to the same file via `plan_mode_complete`. Outside Plan mode (or via `/plan settings` → **Default plan template**), template selection updates `"template"` in `pi-plan-mode.json` for future workflows. See the [settings reference](./docs/settings.md) for template authoring and guidance details.
 
 ## License
 

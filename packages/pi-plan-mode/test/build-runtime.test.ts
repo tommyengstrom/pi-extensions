@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "vitest";
@@ -60,6 +60,20 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     } = await import("@earendil-works/pi-coding-agent");
     const output = join(root, "dist");
     await builder.buildRuntime({ outputDirectory: output });
+    // Model a package install: only runtime, manifest and shipped Markdown assets,
+    // with no src directory. The marker proves lookup uses this package's assets.
+    const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+    assert.ok(manifest.files.includes("prompts"));
+    assert.ok(manifest.files.includes("templates"));
+    await writeFile(join(root, "package.json"), JSON.stringify(manifest));
+    await cp(join(packageRoot, "prompts"), join(root, "prompts"), { recursive: true });
+    await cp(join(packageRoot, "templates"), join(root, "templates"), { recursive: true });
+    const promptPath = join(root, "prompts", "plan.md");
+    const promptMarker = "Packaged prompt marker.";
+    await writeFile(promptPath, `${await readFile(promptPath, "utf8")}\n${promptMarker}\n`);
+    const templatePath = join(root, "templates", "decision-brief.md");
+    const template = `${await readFile(templatePath, "utf8")}\nPackaged asset marker.\n`;
+    await writeFile(templatePath, template);
     await mkdir(agentDir, { recursive: true });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
     const loader = new DefaultResourceLoader({
@@ -103,6 +117,22 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     }
     const previousTools = session.getActiveToolNames();
     await session.prompt("/plan start");
+    const started = await runner.emitBeforeAgentStart(
+      {
+        messageType: "custom",
+        message: { role: "custom", customType: "test", content: "Continue", display: false, timestamp: Date.now() },
+      },
+      { cwd: root, sections: {} },
+    );
+    assert.ok(started.systemPromptOptions.sections.pi_plan_mode?.includes(promptMarker));
+    const captured = session.sessionManager
+      .getBranch()
+      .findLast((entry) => entry.type === "custom" && entry.customType === "pi-plan-state");
+    assert.ok(captured?.type === "custom");
+    assert.equal(
+      (captured.data as { workflow: { templatePrompt: string } }).workflow.templatePrompt,
+      template.slice(template.indexOf("\n---\n") + 5).trim(),
+    );
     assert.deepEqual(
       new Set(session.getActiveToolNames()),
       new Set(["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),

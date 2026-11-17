@@ -4,7 +4,7 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 
 ## Packages
 
-- [`packages/pi-plan-mode`](packages/pi-plan-mode): read-only `/plan` collaboration mode.
+- [`packages/pi-plan-mode`](packages/pi-plan-mode): restricted `/explain` conversation and `/plan` approval workflows; **Alt+M** cycles Normal → Explain → Plan → Normal.
 - [`packages/pi-artifacts`](packages/pi-artifacts): background text artifact agents with confined native writes and persistent feedback conversations.
 - [`packages/pi-thinking-shortcuts`](packages/pi-thinking-shortcuts): Codex-style **Alt+,** / **Alt+.** to decrease/increase thinking effort.
 - [`packages/pi-tui-kit`](packages/pi-tui-kit): the internal UI library used by Plan mode for menus, questionnaires, status widgets, and other terminal interactions.

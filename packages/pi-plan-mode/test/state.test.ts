@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import { planHash } from "../src/plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "../src/planning-instructions.js";
-import { DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
+import { DEFAULT_EXPLAIN_PROMPT } from "../src/prompt.js";
 import { PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
+import { DEFAULT_PLAN_TEMPLATE, resolvePlanTemplate } from "../src/templates.js";
 import { planDocument } from "./support.js";
 
 function workflow(base: Record<string, unknown> = {}) {
@@ -24,25 +25,44 @@ function restore(base: Record<string, unknown>) {
   return restorePlanState([entry({ kind: "planning", workflow: workflow(base) })]);
 }
 
-test("absent base prompts default once in memory and valid captured prompts preserve exact text", () => {
-  for (const basePrompt of [
-    undefined,
-    DEFAULT_PLAN_MODE_PROMPT,
-    "# Custom\r\n\n  Literal Markdown  ",
-    "é".repeat(32768),
-  ]) {
-    const state = restore(basePrompt === undefined ? {} : { basePrompt });
+test("absent template fields default to decision-brief and valid captured templates preserve exact text", () => {
+  const detailed = resolvePlanTemplate("detailed-spec");
+  for (const [input, expectedId, expectedPrompt] of [
+    [{}, DEFAULT_PLAN_TEMPLATE.id, DEFAULT_PLAN_TEMPLATE.content],
+    [{ basePrompt: "legacy v3 basePrompt" }, DEFAULT_PLAN_TEMPLATE.id, DEFAULT_PLAN_TEMPLATE.content],
+    [{ template: "detailed-spec" }, "detailed-spec", detailed.content],
+    [
+      { template: "custom-template", templatePrompt: "# Custom\r\n\n  Literal Markdown  " },
+      "custom-template",
+      "# Custom\r\n\n  Literal Markdown  ",
+    ],
+    [{ template: "custom-template", templatePrompt: "é".repeat(32768) }, "custom-template", "é".repeat(32768)],
+  ] as const) {
+    const state = restore(input);
     assert.equal(state.kind, "planning");
     if (state.kind !== "planning") throw new Error("Expected planning");
-    assert.equal(state.workflow.basePrompt, basePrompt ?? DEFAULT_PLAN_MODE_PROMPT);
+    assert.equal(state.workflow.template, expectedId);
+    assert.equal(state.workflow.templatePrompt, expectedPrompt);
+    assert.equal("basePrompt" in state.workflow, false);
     assert.equal(state.workflow.instructions, "Captured guidance");
     assert.equal(state.workflow.version, 3);
   }
 });
 
-test("invalid persisted base prompts reject the workflow rather than substituting defaults", () => {
-  for (const basePrompt of [null, false, 42, {}, [], "", " \n\t", "é".repeat(MAX_PLAN_MODE_INSTRUCTIONS_BYTES / 2 + 1)])
-    assert.throws(() => restore({ basePrompt }), /Invalid/);
+test("invalid persisted template fields reject the workflow rather than substituting defaults", () => {
+  for (const template of [null, false, 42, {}, [], "", "UpperCase", "invalid_name", "a".repeat(65)])
+    assert.throws(() => restore({ template }), /Invalid/);
+  for (const templatePrompt of [
+    null,
+    false,
+    42,
+    {},
+    [],
+    "",
+    " \n\t",
+    "é".repeat(MAX_PLAN_MODE_INSTRUCTIONS_BYTES / 2 + 1),
+  ])
+    assert.throws(() => restore({ templatePrompt }), /Invalid/);
 });
 
 test("ready restores a document locator and hash without embedding Markdown or ancestry", () => {
@@ -69,6 +89,34 @@ test("latest explicit idle or malformed entry wins; prose never reconstructs pla
   assert.deepEqual(restorePlanState([{ type: "message", message: { role: "assistant", content: "# Plan" } }]), {
     kind: "idle",
   });
+});
+
+test("Explain restores independently of v3 workflows and rejects malformed restrictions", () => {
+  const restriction = {
+    version: 1,
+    id: "explain-id",
+    previousTools: ["read", "write"],
+    tools: ["grep"],
+    prompt: DEFAULT_EXPLAIN_PROMPT,
+  };
+  const original = { kind: "explain", restriction };
+  const restored = restorePlanState([entry(original)]);
+  assert.deepEqual(restored, original);
+  assert.notEqual(restored, original);
+  assert.equal("workflow" in restored, false);
+  for (const invalid of [
+    { version: 2 },
+    { id: "" },
+    { previousTools: [42] },
+    { tools: null },
+    { prompt: "" },
+    { prompt: "é".repeat(MAX_PLAN_MODE_INSTRUCTIONS_BYTES) },
+  ])
+    assert.throws(
+      () => restorePlanState([entry({ kind: "explain", restriction: { ...restriction, ...invalid } })]),
+      /Invalid Explain/,
+    );
+  assert.deepEqual(restorePlanState([entry(original), entry({ kind: "idle" })]), { kind: "idle" });
 });
 
 test("invalid version, storage, hashes and tool lists cannot restore current ownership", () => {

@@ -55,6 +55,24 @@ test("empty tools means helpers only; null removes the custom selection", async 
   });
 });
 
+test("template setting round-trips kebab-case names, supports null reset, and rejects invalid names", async () => {
+  await withSettings(async (settingsPath) => {
+    for (const template of ["decision-brief", "detailed-spec", "custom-user-template"]) {
+      assert.deepEqual(await updatePlanModeSettings({ template }, { settingsPath }), { template });
+      assert.deepEqual(await readPlanModeSettings(settingsPath), { template });
+    }
+    assert.deepEqual(await updatePlanModeSettings({ template: null }, { settingsPath }), {});
+    const document = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(Object.hasOwn(document, "template"), false);
+    for (const invalid of ["", "UpperCase", "with_underscore", "with space", "a".repeat(65)]) {
+      await assert.rejects(
+        updatePlanModeSettings({ template: invalid }, { settingsPath }),
+        /Invalid pi-plan-mode settings: template/,
+      );
+    }
+  });
+});
+
 test("updates preserve unknown fields without interpreting retired settings", async () => {
   await withSettings(async (settingsPath) => {
     const unknown = { thinkingLevel: "invalid-retired-value", safeSubcommands: 42, future: { enabled: true } };
@@ -96,6 +114,27 @@ test("shortcut settings canonicalize overrides, preserve unknown fields, and sup
       shortcuts: { future: true },
       toggleShortcut: "ctrl+m",
     });
+  });
+});
+
+test("template shortcut canonicalizes, persists, disables, and protects invalid settings", async () => {
+  await withSettings(async (settingsPath) => {
+    await writeFile(settingsPath, JSON.stringify({ shortcuts: { selectTemplate: "ALT+SHIFT+M", future: true } }));
+    assert.deepEqual(await readPlanModeSettings(settingsPath), { shortcuts: { selectTemplate: "shift+alt+m" } });
+    await updatePlanModeSettings({ template: "minimal" }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      shortcuts: { selectTemplate: "shift+alt+m", future: true },
+      template: "minimal",
+    });
+    await writeFile(settingsPath, JSON.stringify({ shortcuts: { selectTemplate: null } }));
+    assert.deepEqual(await readPlanModeSettings(settingsPath), { shortcuts: { selectTemplate: null } });
+    for (const selectTemplate of [false, [], "", "not-a-key", "CTRL+M"]) {
+      const bytes = JSON.stringify({ shortcuts: { selectTemplate } });
+      await writeFile(settingsPath, bytes);
+      await assert.rejects(readPlanModeSettings(settingsPath), /Invalid shortcuts.selectTemplate/);
+      await assert.rejects(updatePlanModeSettings({ template: "minimal" }, { settingsPath }), /Invalid/);
+      assert.equal(await readFile(settingsPath, "utf8"), bytes);
+    }
   });
 });
 

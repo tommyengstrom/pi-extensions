@@ -15,6 +15,8 @@
   "files": [
     "src",
     "dist",
+    "prompts",
+    "templates",
     "docs",
     "README.md",
     "CHANGELOG.md",

@@ -125,6 +125,27 @@ async function implementing(f: Awaited<ReturnType<typeof fixture>>) {
   return document;
 }
 
+test("entering Explain cancels pending Plan naming and rejects its late result", async () => {
+  const entered = Promise.withResolvers<AbortSignal>();
+  const named = Promise.withResolvers<string>();
+  const f = await fixture(undefined, async (_registry, _task, _settings, signal) => {
+    entered.resolve(signal);
+    return named.promise;
+  });
+  await f.command("Name this future plan");
+  const signal = await entered.promise;
+  const command = f.commands.get("explain");
+  assert.ok(command);
+  await command.handler("start", f.ctx);
+  assert.equal(signal.aborted, true);
+  assert.equal(f.state().kind, "explain");
+  const snapshot = structuredClone(f.entries);
+  named.resolve("late-name");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.entries, snapshot);
+  assert.equal(f.status(), "[Explain]");
+});
+
 test("unified status follows Normal, unnamed/named Planning, Implementing, Verifying and Normal exactly", async () => {
   const entered = Promise.withResolvers<void>();
   const completed = Promise.withResolvers<VerificationResult>();
@@ -134,10 +155,10 @@ test("unified status follows Normal, unnamed/named Planning, Implementing, Verif
   });
   assert.equal(f.status(), "[Normal]");
   await f.command("start");
-  assert.equal(f.status(), "[Planning]");
+  assert.equal(f.status(), "[Plan decision-brief]");
   await f.emit("input", { text: "Add blue feature", source: "interactive" });
   await f.execute("plan_mode_complete", { plan: PLAN });
-  assert.equal(f.status(), "[Planning blue-feature]");
+  assert.equal(f.status(), "[Plan decision-brief] blue-feature");
   assert.equal(f.naming.length, 1);
   f.choose("here");
   await f.command("");
@@ -180,7 +201,7 @@ test.each(["ok", "minor_issues", "issues", "failure", "cancel"] as const)(
     assert.equal(f.status(), "[Normal]");
     assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
     await f.command("start");
-    assert.equal(f.status(), "[Planning]");
+    assert.equal(f.status(), "[Plan decision-brief]");
     await f.execute("plan_mode_complete", { plan: "# Independent plan" });
     const next = f.state();
     assert.ok(next.kind === "ready");
@@ -294,7 +315,7 @@ test("bare planning waits for the first task; first save waits for naming withou
   const f = await fixture(undefined, async () => named.promise);
   await f.command("start");
   assert.equal(f.naming.length, 0);
-  assert.equal(f.status(), "[Planning]");
+  assert.equal(f.status(), "[Plan decision-brief]");
   await f.emit("input", { text: "Support uploading images", source: "interactive" });
   await f.emit("input", { text: "This later task must not be sent to naming", source: "interactive" });
   assert.deepEqual(f.naming, ["Support uploading images"]);
@@ -302,12 +323,12 @@ test("bare planning waits for the first task; first save waits for naming withou
   assert.deepEqual(await (await f.store()).list(), []);
   named.resolve("support-uploading-images");
   await saving;
-  assert.equal(f.status(), "[Planning support-uploading-images]");
+  assert.equal(f.status(), "[Plan decision-brief] support-uploading-images");
   const state = f.state();
   assert.ok(state.kind === "ready");
   assert.equal(state.workflow.task, "Support uploading images");
   await f.emit("session_tree");
-  assert.equal(f.status(), "[Planning support-uploading-images]");
+  assert.equal(f.status(), "[Plan decision-brief] support-uploading-images");
   assert.equal(f.naming.length, 1);
 });
 
@@ -337,7 +358,7 @@ test.each(["exit", "replacement", "shutdown"] as const)("late naming is discarde
   assert.deepEqual(await (await f.store()).list(), []);
   if (event !== "shutdown") {
     await f.command("start");
-    assert.equal(f.status(), "[Planning]");
+    assert.equal(f.status(), "[Plan decision-brief]");
   }
 });
 
@@ -403,7 +424,7 @@ test.each(["resolve", "reject"] as const)(
     assert.equal(f.status(), "[Implementing blue-feature]");
     await f.command("exit");
     await f.command("start");
-    assert.equal(f.status(), "[Planning]");
+    assert.equal(f.status(), "[Plan decision-brief]");
     await f.execute("plan_mode_complete", { plan: "# Independent plan" });
     const next = f.state();
     assert.ok(next.kind === "ready");

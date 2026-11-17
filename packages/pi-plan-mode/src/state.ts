@@ -1,7 +1,7 @@
 import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
 import { type PlanDocument, type PlanStorage, validPlanDocument, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
-import { DEFAULT_PLAN_MODE_PROMPT } from "./prompt.js";
+import { BUILTIN_PLAN_TEMPLATES, DEFAULT_PLAN_TEMPLATE, validTemplateName } from "./templates.js";
 
 export const PLAN_STATE_ENTRY = "pi-plan-state";
 export interface PlanWorkflow {
@@ -16,15 +16,34 @@ export interface PlanWorkflow {
   plansDirectory?: string;
   storage?: PlanStorage;
   instructions: string;
-  basePrompt?: string;
+  template: string;
+  templatePrompt: string;
   previousTools: string[];
   tools?: string[];
   artifacts?: PlanArtifacts;
 }
+export interface ExplainSession {
+  version: 1;
+  id: string;
+  previousTools: string[];
+  tools?: string[];
+  prompt: string;
+}
 export type PlanState =
   | { kind: "idle" }
+  | { kind: "explain"; restriction: ExplainSession }
   | { kind: "planning"; workflow: PlanWorkflow }
   | { kind: "ready"; workflow: PlanWorkflow; document: PlanDocument };
+
+export function isPlanning(state: PlanState): state is Extract<PlanState, { workflow: PlanWorkflow }> {
+  return state.kind === "planning" || state.kind === "ready";
+}
+export function isRestricted(state: PlanState): state is Exclude<PlanState, { kind: "idle" }> {
+  return state.kind !== "idle";
+}
+export function restrictedSession(state: Exclude<PlanState, { kind: "idle" }>): PlanWorkflow | ExplainSession {
+  return state.kind === "explain" ? state.restriction : state.workflow;
+}
 
 function latest(entries: readonly unknown[]) {
   for (let index = entries.length - 1; index >= 0; index--) {
@@ -39,6 +58,7 @@ export function legacyPlanState(entries: readonly unknown[]): boolean {
   return (
     record(value) &&
     value.kind !== "idle" &&
+    value.kind !== "explain" &&
     (!record(value.workflow) ||
       value.workflow.version !== 3 ||
       "revision" in value ||
@@ -53,10 +73,38 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
     );
   const value = latest(entries);
   if (value === undefined || (record(value) && value.kind === "idle")) return { kind: "idle" };
+  if (record(value) && value.kind === "explain") {
+    const restriction = value.restriction;
+    if (
+      !record(restriction) ||
+      restriction.version !== 1 ||
+      !text(restriction.id) ||
+      !names(restriction.previousTools) ||
+      (restriction.tools !== undefined && !names(restriction.tools)) ||
+      typeof restriction.prompt !== "string" ||
+      !restriction.prompt.trim() ||
+      Buffer.byteLength(restriction.prompt) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES
+    )
+      throw new Error("Invalid Explain session state. No files were changed.");
+    return {
+      kind: "explain",
+      restriction: {
+        version: 1,
+        id: restriction.id,
+        previousTools: [...restriction.previousTools],
+        ...(restriction.tools !== undefined ? { tools: [...restriction.tools] } : {}),
+        prompt: restriction.prompt,
+      },
+    };
+  }
   if (!record(value) || !["planning", "ready"].includes(String(value.kind)) || !validWorkflow(value.workflow))
     throw new Error("Invalid v3 Plan workflow state. No files were changed.");
-  const workflow: PlanWorkflow = structuredClone(value.workflow);
-  workflow.basePrompt ??= DEFAULT_PLAN_MODE_PROMPT;
+  const workflow: PlanWorkflow & { basePrompt?: unknown } = structuredClone(value.workflow);
+  delete workflow.basePrompt;
+  workflow.template ??= DEFAULT_PLAN_TEMPLATE.id;
+  workflow.templatePrompt ??=
+    BUILTIN_PLAN_TEMPLATES.find((candidate) => candidate.id === workflow.template)?.content ??
+    DEFAULT_PLAN_TEMPLATE.content;
   if (value.kind === "planning") return { kind: "planning", workflow };
   if (
     !validPlanDocument(value.document) ||
@@ -81,10 +129,11 @@ function validWorkflow(value: unknown): value is PlanWorkflow {
     !validPlanStorage(value.storage ?? { kind: "legacy", plansDirectory: value.plansDirectory }) ||
     typeof value.instructions !== "string" ||
     Buffer.byteLength(value.instructions) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
-    (value.basePrompt !== undefined &&
-      (typeof value.basePrompt !== "string" ||
-        !value.basePrompt.trim() ||
-        Buffer.byteLength(value.basePrompt) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
+    (value.template !== undefined && !validTemplateName(value.template)) ||
+    (value.templatePrompt !== undefined &&
+      (typeof value.templatePrompt !== "string" ||
+        !value.templatePrompt.trim() ||
+        Buffer.byteLength(value.templatePrompt) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
     !names(value.previousTools) ||
     (value.tools !== undefined && !names(value.tools)) ||
     (value.name !== undefined && !name(value.name)) ||

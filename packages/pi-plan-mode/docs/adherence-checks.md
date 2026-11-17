@@ -46,7 +46,7 @@ TUI manual checks show a cancellable dialog and progress status. RPC uses suppor
 
 ## Mode footer and progress
 
-The coordinated mode footer uses exactly `[Normal]`, `[Planning]`, `[Planning stem]`, `[Implementing stem]`, and `[Verifying stem]`. Here `stem` is the current filename without `.md`, including any numeric collision suffix. `[Planning]` applies before naming; readiness for review remains `[Planning stem]`. Checking uses `[Verifying stem]`; every exit restores `[Normal]` and actual normal mode. Command hints and verification results never appear in the footer.
+The coordinated mode footer uses exactly `[Normal]`, `[Explain]`, `[Plan <template>]`, `[Plan <template>] stem`, `[Implementing stem]`, and `[Verifying stem]`. Here `stem` is the current filename without `.md`, including any numeric collision suffix. `[Plan <template>]` applies before naming; readiness for review remains `[Plan <template>] stem`. Checking uses `[Verifying stem]`; every exit restores `[Normal]` and actual normal mode. Command hints and verification results never appear in the footer.
 
 Reported implementation progress remains a separate panel above the editor, controlled by `/plan progress`. Verification closes it at start; inactive tracking cannot reopen an observer during checking or afterward until explicit `/plan resume`. It is transcript-only observation, not repository verification. Completion stops the observer with its last summary labeled **completed tracking; not verified**; leaving implementation and session/branch changes clear it, and resume does not reopen it automatically. See [live reported progress](../README.md#live-reported-progress) for timing, costs, privacy, and evidence boundaries.
 

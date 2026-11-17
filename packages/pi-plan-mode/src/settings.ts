@@ -6,6 +6,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { canonicalizeConfiguredKey } from "@narumitw/pi-tui-kit/key-matching";
 import { planDirectoryComponents } from "./plan-store.js";
+import { validTemplateName } from "./templates.js";
 
 export interface VerificationSettings {
   automatic: boolean;
@@ -23,10 +24,11 @@ export const DEFAULT_PROGRESS: ProgressSettings = {
 };
 
 export const DEFAULT_TOGGLE_SHORTCUT: KeyId = "alt+m";
+export const DEFAULT_TEMPLATE_SHORTCUT: KeyId = "shift+alt+m";
 
 export interface PlanModeSettings {
   /** Omission uses the default binding; null disables it. Loaded once per extension instance. */
-  shortcuts?: { togglePlan?: KeyId | null };
+  shortcuts?: { togglePlan?: KeyId | null; selectTemplate?: KeyId | null };
   verification?: VerificationSettings;
   progress?: Partial<ProgressSettings>;
   /** Independent naming request; omission follows the configured progress model. */
@@ -35,6 +37,8 @@ export interface PlanModeSettings {
   plansDirectory?: string;
   /** Omitted means canonical read-only built-ins; an empty list means helpers only. */
   tools?: string[];
+  /** Omitted uses the built-in decision-brief template. */
+  template?: string;
 }
 
 const MAX_SETTINGS_BYTES = 64 * 1024;
@@ -57,6 +61,7 @@ export async function updatePlanModeSettings(
     naming?: { model?: ProgressSettings["model"] | null };
     plansDirectory?: string;
     tools?: readonly string[] | null;
+    template?: string | null;
     verification?: { automatic?: boolean; model?: VerificationSettings["model"] | null };
   },
   options: { settingsPath?: string; signal?: AbortSignal } = {},
@@ -70,12 +75,18 @@ export async function updatePlanModeSettings(
   const naming = patch.naming ? structuredClone(patch.naming) : undefined;
   const tools =
     patch.tools === undefined || patch.tools === null ? patch.tools : parseSettings({ tools: patch.tools }).tools;
+  const template =
+    patch.template === undefined || patch.template === null
+      ? patch.template
+      : parseSettings({ template: patch.template }).template;
   return enqueueMutation(settingsPath, async () => {
     signal?.throwIfAborted();
     const document = await readDocument(settingsPath);
     if (plansDirectory !== undefined) document.plansDirectory = plansDirectory;
     if (tools === null) delete document.tools;
     else if (tools !== undefined) document.tools = tools;
+    if (template === null) delete document.template;
+    else if (template !== undefined) document.template = template;
     if (progress) {
       const next = { ...(document.progress as SettingsDocument | undefined), ...progress };
       for (const key of ["model", "thinkingLevel"] as const) if (next[key] === null) delete next[key];
@@ -96,8 +107,11 @@ export async function updatePlanModeSettings(
     // Persist normalized owned fields without dropping unrelated settings.
     if (settings.plansDirectory !== undefined) document.plansDirectory = settings.plansDirectory;
     if (settings.tools !== undefined) document.tools = settings.tools;
-    if (settings.shortcuts?.togglePlan !== undefined) {
-      (document.shortcuts as SettingsDocument).togglePlan = settings.shortcuts.togglePlan;
+    if (settings.template !== undefined) document.template = settings.template;
+    for (const name of ["togglePlan", "selectTemplate"] as const) {
+      if (settings.shortcuts?.[name] !== undefined) {
+        (document.shortcuts as SettingsDocument)[name] = settings.shortcuts[name];
+      }
     }
     await publishSettings(settingsPath, document, signal);
     return settings;
@@ -126,12 +140,13 @@ function parseSettings(value: unknown): PlanModeSettings {
       throw new Error("Invalid shortcuts settings: expected an object");
     const shortcuts = value as SettingsDocument;
     settings.shortcuts = {};
-    if (Object.hasOwn(shortcuts, "togglePlan")) {
-      const key = shortcuts.togglePlan === null ? null : canonicalizeConfiguredKey(shortcuts.togglePlan);
-      if (key === undefined) throw new Error("Invalid shortcuts.togglePlan: expected a Pi key binding or null");
+    for (const name of ["togglePlan", "selectTemplate"] as const) {
+      if (!Object.hasOwn(shortcuts, name)) continue;
+      const key = shortcuts[name] === null ? null : canonicalizeConfiguredKey(shortcuts[name]);
+      if (key === undefined) throw new Error(`Invalid shortcuts.${name}: expected a Pi key binding or null`);
       if (key === "ctrl+m")
-        throw new Error("Invalid shortcuts.togglePlan: Ctrl+M aliases Enter and would intercept prompt submission");
-      settings.shortcuts.togglePlan = key;
+        throw new Error(`Invalid shortcuts.${name}: Ctrl+M aliases Enter and would intercept prompt submission`);
+      settings.shortcuts[name] = key;
     }
   }
   if (Object.hasOwn(document, "verification")) {
@@ -189,6 +204,13 @@ function parseSettings(value: unknown): PlanModeSettings {
     }
     // Names are exact identifiers, not patterns or shell policy fragments.
     settings.tools = [...new Set(tools)];
+  }
+  if (Object.hasOwn(document, "template")) {
+    const template = document.template;
+    if (!validTemplateName(template)) {
+      throw new Error("Invalid pi-plan-mode settings: template must be a lowercase kebab-case name");
+    }
+    settings.template = template;
   }
   return settings;
 }

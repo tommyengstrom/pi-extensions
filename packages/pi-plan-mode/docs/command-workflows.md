@@ -2,15 +2,29 @@
 
 [Back to README](../README.md#commands)
 
+## Explain conversationally
+
+`/explain` and `/explain start` enter without sending a model message. `/explain <request>` enters or follows up. Answers end naturally in prose or with a useful structured question; no saved plan or completion ritual is required. Explain remains active across ordinary turns. Requests for fixes do not authorize edits: use `/explain exit` for ordinary coding or `/plan start` / `/plan <request>` for a new approval workflow.
+
+Explain shares the selected inspection tools and retains the original Normal tool snapshot through Explain → Plan. `/plan tools` changes its current selection; future defaults remain shared. Only the question helper is available: every plan-writing and implementation helper is denied even if explicitly selected. Plan-only document, review, saved-plan, verify, and resume commands explain how to switch first.
+
+Plan → Explain ends the old workflow, preserves saved files, and cancels owned work. Entering Explain detaches implementation tracking; exiting returns to Normal, never automatically resumed implementation. Explain creates no naming request, storage, artifact ownership, readiness event, or progress observer. Its separate built-in prompt ignores planning customization files and survives reload/tree navigation and compaction with the branch-local restriction state. This is a workflow restriction, not an OS sandbox: explicitly trusted tools retain their capabilities, but must only be used for non-mutating inspection.
+
+Direct Explain commands work in print/JSON; questions retain the existing plain-text fallback. They share Plan's idle/no-queued-message requirement and asynchronous command gate.
+
 ## Start and choose tools
 
 `/plan start` enters Plan mode without sending a model message. `/plan <prompt>` starts with a request or sends a follow-up to the active planner. Only an exact subcommand selects its route: `/plan start a migration` is a planning prompt. There is no startup flag. New planning is independent; it does not silently resume a detached/completed implementation record.
 
 `/plan tools` opens a searchable tool selector. In normal mode, applying it configures future planning without starting a workflow or changing active tools. During planning or while a plan is ready, it changes that workflow's tools without requiring an exit/restart. During implementation it may change only the isolated checker selection, never the main agent's tools. Wait until the agent is idle before opening it. Cancelling leaves the selection unchanged.
 
-The required question/completion/edit helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. The planning allowlist applies only in planning. Preexisting tool availability is restored when planning ends, before implementation helpers are enabled. The checker applies its own read-only policy in isolation, without changing parent tools. See [tool selection and trust](./settings.md#tool-selection-and-trust).
+The required question/completion/edit helpers are fixed, not optional picker rows. The strict defaults are canonical built-in `read`, `grep`, `find`, and `ls`. Nondefault selections require explicit trust confirmation because they can mutate files or external state. Unknown/hidden configured tools remain unavailable; the picker retains those names rather than silently dropping them. The inspection allowlist applies in Plan and Explain. Preexisting tool availability is restored when planning ends, before implementation helpers are enabled. The checker applies its own read-only policy in isolation, without changing parent tools. See [tool selection and trust](./settings.md#tool-selection-and-trust).
 
 `/plan settings` edits future-workflow defaults, not the current planning selection. Its choices include default tools, reset to strict inspection tools, automatic adherence checks, the checker model, independent progress model/reasoning (including defaults/reset), **Naming model**, and editing the planning prompt. Naming does not change the configured storage location.
+
+## Choose a template
+
+**Alt+Shift+M** opens `/plan template`'s picker directly; `/plan template <id>` selects by ID. The current template is marked. Before a plan is saved, switching changes the captured template and footer without a model request. After a save, switching requests a rewrite of the current plan into the selected format at the same path. Cancelling or selecting the unchanged active template does nothing. Outside Plan mode, selection changes future defaults without entering planning or detaching implementation. The shortcut shares the idle/no-queued-message requirement and command gate; RPC and noninteractive callers use commands.
 
 ## Name early, save later
 
@@ -35,7 +49,7 @@ Each `oldText` must uniquely match a non-overlapping region of the current plan.
 
 Associated background artifacts must finish before either planning save can publish or schedule review. Failed/cancelled/interrupted work needs retry or explicit user agreement with `/plan artifacts omit <jobId>`; partial output is not a successful artifact. Implementation plan updates are not gated on artifact readiness. Artifact references remain live files, not historical snapshots.
 
-The completion result displays the plan and saved path; the edit result displays only the diff and same path. Either save makes the plan ready, while the footer stays `[Planning stem]`. In TUI or RPC, review opens automatically after the agent fully settles. It does **not** start implementation or automatically retry finalization.
+The completion result displays the plan and saved path; the edit result displays only the diff and same path. Either save makes the plan ready, while the footer stays `[Plan <template>] stem`. In TUI or RPC, review opens automatically after the agent fully settles. It does **not** start implementation or automatically retry finalization.
 
 Review shows the full saved document, including its name, path, and artifact references, together with all four actions immediately below the plan viewport. There is no intermediate confirmation or separate action menu. Configured Up/Down keys select actions; Page Up/Page Down and Home/End scroll the plan, as does the mouse wheel over the document. Space opens search; search input/navigation takes precedence until search is closed. The configured confirmation key explicitly executes the selected action, never merely opening review. Closing the screen leaves the plan ready and does not authorize implementation. Small terminals compact metadata and hints first, then keep the selected action reachable. RPC includes all four actions with the first document page, pagination, and Close; paging never implements. Open `/plan` to reopen review or if automatic presentation was interrupted. Aborted runs, superseding work, and session replacement cancel pending automatic presentation. Restoring a ready supported session or navigating its history does not reopen old reviews automatically.
 
@@ -63,7 +77,7 @@ The agent saves user-requested plan changes **before** implementing them: use `p
 
 `plan_mode_implementation_status` reads the authoritative current plan from disk, including after compaction or recovery. Updates compare the expected read hash with disk before writing; a stale-read conflict requires a fresh read and reconciliation, not an overwrite. A missing plan file is an explicit error, not permission to recreate it from a cached baseline.
 
-Question/completion helpers are active only in planning; edit is active in planning and tracked implementation; update/status/implementation-completion helpers are active only during tracked implementation. Helpers are inactive outside their applicable workflow and never exposed to the adherence checker.
+The question helper is active in Plan and Explain; completion is active only in planning; edit is active in planning and tracked implementation; update/status/implementation-completion helpers are active only during tracked implementation. Helpers are inactive outside their applicable workflow and never exposed to the adherence checker.
 
 `plan_mode_implementation_complete` must be called alone. It closes implementation tracking and runs a fresh adherence check automatically unless disabled in settings. Ordinary prose and agent pauses do not trigger checks. Findings are reported directly, without automatic fixes or another main-agent response.
 
@@ -83,7 +97,7 @@ Bare `/plan` also reopens review whenever the active planning workflow has a sav
 
 ## Mode footer and reported progress
 
-The exact coordinated footer labels are `[Normal]`, `[Planning]`, `[Planning stem]`, `[Implementing stem]`, and `[Verifying stem]`. `stem` is the filename without `.md`, including any collision suffix; `[Planning]` is used before naming. Ready-for-review remains planning. Every verification exit shows `[Normal]` and leaves actual normal mode. The footer contains no command hints, progress text, or verification results. The active planning prompt banner is **PLAN MODE ACTIVE**.
+The exact coordinated footer labels are `[Normal]`, `[Explain]`, `[Plan <template>]`, `[Plan <template>] stem`, `[Implementing stem]`, and `[Verifying stem]`. `stem` is the filename without `.md`, including any collision suffix; `[Plan <template>]` is used before naming. Ready-for-review remains `[Plan <template>] stem`. Every verification exit shows `[Normal]` and leaves actual normal mode. The footer contains no command hints, progress text, or verification results. The active planning prompt banner is **PLAN MODE ACTIVE**.
 
 `/plan progress` toggles the separate inline panel above the editor during tracked implementation, even while the agent is running, messages are queued, or another Plan command is open. It does not acquire the shared command gate; other commands retain their idle restrictions. The idle menu offers **Show plan progress**. Opening without active tracking explains how to implement a reviewed plan or `/plan resume`. Verification closes the panel at start and `/plan progress` cannot reopen it during checking or afterward until explicit `/plan resume`. TUI and RPC are supported; print/JSON refuse.
 
@@ -108,7 +122,7 @@ Workflows and document envelopes are version 3. Legacy workflow state is rejecte
 
 `/plan exit` leaves Plan mode and restores preexisting tool availability without deleting saved plans. During implementation it detaches tracking and closes the transcript segment; its record remains available to explicit `/plan verify` or `/plan resume`. To browse while planning, exit the current workflow first. Exit does not save an unfinished draft.
 
-**Alt+M** enters like `/plan start` or leaves planning directly when idle with no queued messages or open Plan command. It preserves the editor draft and files, does not open review or send a model message, and never starts implementation. See the [keyboard toggle](../README.md#keyboard-toggle) for rebinding, reload requirements, and reserved-key limitations.
+**Alt+M** cycles **Normal → Explain → Plan → Normal** when idle with no queued messages or open Plan/Explain command. It preserves the editor draft and files, does not open review or send a model message, and never starts implementation. See the [keyboard toggle](../README.md#keyboard-toggle) for rebinding, reload requirements, and reserved-key limitations.
 
 ## Busy state and non-interactive use
 
@@ -118,4 +132,4 @@ Menus, saved browsing, review, and implementation selection require TUI or RPC. 
 
 Tracked `/plan verify` and `/plan resume` also work in print/JSON mode without a selection dialog; automatic completion checks return their report as the terminating tool result. Model/authentication failures and cancellation never count as successful verification. All check outcomes return to normal mode.
 
-The supported public routes are `start`, `saved`, `open`, `implement`, `tools`, `settings`, `progress`, `exit`, `verify`, `resume`, and `artifacts omit <jobId>`. Removed exact commands `finalize`, `save`, `prompt`, `cancel`, and `import` (including `import <path>`) return migration guidance, case-insensitively, even while another command is open. Ordinary multiword requests such as `/plan save bandwidth` remain planning prompts. `show`, `export`, and `off` are not aliases; other arguments are planning prompts. Reserved `__review` control arguments are internal one-shot dispatches, not planning prompts or public implementation shortcuts.
+The supported public routes are `start`, `saved`, `open`, `implement`, `template [id]`, `tools`, `settings`, `progress`, `exit`, `verify`, `resume`, and `artifacts omit <jobId>`. Removed exact commands `finalize`, `save`, `prompt`, `cancel`, and `import` (including `import <path>`) return migration guidance, case-insensitively, even while another command is open. Ordinary multiword requests such as `/plan save bandwidth` remain planning prompts. `show`, `export`, and `off` are not aliases; other arguments are planning prompts. Reserved `__review` control arguments are internal one-shot dispatches, not planning prompts or public implementation shortcuts.

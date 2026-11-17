@@ -337,8 +337,13 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
     const shortcuts = runner.getShortcuts(bindings);
     const toggle = shortcuts.get("alt+m");
     assert.ok(toggle);
-    assert.match(toggle.description ?? "", /planning and normal/);
-    assert.equal(shortcuts.size, 1);
+    assert.match(toggle.description ?? "", /Normal → Explain → Plan → Normal/);
+    assert.equal(shortcuts.size, 2);
+    assert.ok(shortcuts.has("shift+alt+m"));
+    assert.equal(matchesKey("\u001b[109;4u", "shift+alt+m"), true);
+    assert.equal(matchesKey("\u001b[109;4u", "alt+m"), false);
+    assert.equal(matchesKey("\r", "shift+alt+m"), false);
+    assert.equal(matchesKey("\u001b[200~pasted\u001b[109;4u\u001b[201~", "shift+alt+m"), false);
     for (const enter of ["\r", "\n", "\u001b[13u"]) assert.equal(matchesKey(enter, "alt+m"), false);
     assert.equal(matchesKey("\u001b[200~pasted\u001b[109;3u\u001b[201~", "alt+m"), false);
     assert.equal(matchesKey("\u001b[109;3u", "alt+m"), true);
@@ -347,22 +352,26 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
     const context = { ...runner.createContext(), mode: "tui" as const };
     const previousTools = f.runtime.session.getActiveToolNames();
     await toggle.handler(context);
+    assert.equal(stateOf(f.runtime.session).kind, "explain");
+    assertStatus(f, "[Explain]");
+    await toggle.handler(context);
     assert.equal(stateOf(f.runtime.session).kind, "planning");
-    assertStatus(f, "[Planning]");
+    assertStatus(f, "[Plan decision-brief]");
     await toggle.handler(context);
     assert.equal(stateOf(f.runtime.session).kind, "idle");
     assertStatus(f, "[Normal]");
     assert.deepEqual(f.runtime.session.getActiveToolNames(), previousTools);
     assert.equal(f.requests.length, 0);
     // A user's reserved binding wins over the extension default.
-    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "alt+m" }).size, 0);
+    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "alt+m" }).has("alt+m"), false);
+    assert.equal(runner.getShortcuts({ ...bindings, "app.model.select": "shift+alt+m" }).has("shift+alt+m"), false);
   } finally {
     await f.dispose();
   }
   const custom = await fixture(undefined, { togglePlan: "shift+tab" });
   try {
     const runner = custom.runtime.session.extensionRunner;
-    assert.equal(runner.getShortcuts(bindings).size, 0);
+    assert.equal(runner.getShortcuts(bindings).has("shift+tab"), false);
     assert.equal(runner.getShortcuts({ ...bindings, "app.thinking.cycle": [] }).has("shift+tab"), true);
   } finally {
     await custom.dispose();
@@ -494,7 +503,7 @@ test("entrypoint registers inactive helpers and selects real core inspection too
   }
 });
 
-test("a file replacement uses the configured agent directory and survives real compaction unchanged", async () => {
+test("a user template override uses the configured agent directory and survives real compaction unchanged", async () => {
   const f = await fixture((pi) => {
     pi.on("session_before_compact", (event) => ({
       compaction: {
@@ -504,9 +513,11 @@ test("a file replacement uses the configured agent directory and survives real c
       },
     }));
   });
-  const path = join(agentDir, "pi-plan-mode-prompt.md");
+  const templatesDir = join(agentDir, "pi-plan-mode-templates");
+  const path = join(templatesDir, "decision-brief.md");
   try {
-    await writeFile(path, "# Custom protocol\n\nPlan as a checklist.");
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(path, "# Custom template\n\nPlan as a custom checklist.");
     const session = f.runtime.session;
     await session.prompt("/plan start");
     await session.prompt("First planning turn.");
@@ -514,10 +525,10 @@ test("a file replacement uses the configured agent directory and survives real c
     assert.ok(first);
     const section = f.promptOptions.at(-1)?.section;
     assert.ok(section);
-    assert.ok(section.startsWith("# Custom protocol"));
+    assert.ok(section.includes("# Custom template\n\nPlan as a custom checklist."));
+    assert.equal(section.includes("## Plan template"), false);
     assert.ok(section.includes(instructions));
-    assert.equal(section.includes("CODEX-LIKE"), false);
-    await writeFile(path, "# Edited protocol");
+    await writeFile(path, "# Edited template\n\nUpdated sections.");
     await session.prompt("Second planning turn.");
     assert.deepEqual(f.requests.at(-1)?.slice(0, first.length), first);
     session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
@@ -529,9 +540,63 @@ test("a file replacement uses the configured agent directory and survives real c
     await session.prompt("/plan exit");
     await session.prompt("/plan start");
     await session.prompt("New workflow.");
-    assert.ok(f.promptOptions.at(-1)?.section?.startsWith("# Edited protocol"));
+    assert.ok(f.promptOptions.at(-1)?.section?.includes("# Edited template\n\nUpdated sections."));
   } finally {
-    await rm(path, { force: true });
+    await rm(templatesDir, { recursive: true, force: true });
+    await f.dispose();
+  }
+});
+
+test("Explain preserves native prompt prefixes, compaction and branch ownership until explicit transitions", async () => {
+  const f = await fixture((pi) => {
+    pi.on("session_before_compact", (event) => ({
+      compaction: {
+        summary: "Explaining code, not implementing.",
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+      },
+    }));
+  });
+  try {
+    const session = f.runtime.session;
+    const baseline = session.getActiveToolNames();
+    await session.prompt("Normal turn.");
+    const normal = session.sessionManager.getLeafId();
+    assert.ok(normal);
+    await session.prompt("/explain");
+    assert.equal(f.requests.length, 1);
+    const explain = session.sessionManager.getLeafId();
+    assert.ok(explain);
+    await session.prompt("Explain the repository.");
+    const first = f.requests.at(-1);
+    assert.ok(first);
+    const section = f.promptOptions.at(-1)?.section;
+    assert.ok(section);
+    assert.match(section, /EXPLAIN MODE ACTIVE/);
+    assert.doesNotMatch(section ?? "", /plan_mode_complete|Runtime smoke instructions/);
+    await session.prompt("Thanks. Now fix it.");
+    assert.deepEqual(f.requests.at(-1)?.slice(0, first.length), first);
+    assert.equal(stateOf(session).kind, "explain");
+    assertStatus(f, "[Explain]");
+    session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    await session.compact();
+    await session.prompt("Still explaining.");
+    assert.equal(f.promptOptions.at(-1)?.section, section);
+    assert.ok(getCurrentSystemPrompt(f.requests.at(-1) ?? []).includes(section));
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), ["read", "grep", "find", "ls", "plan_mode_question"].sort());
+    assert.equal(f.reviewPlan.mock.calls.length, 0);
+    await session.navigateTree(normal, { summarize: false });
+    assertStatus(f, "[Normal]");
+    assert.deepEqual(session.getActiveToolNames(), baseline);
+    await session.navigateTree(explain, { summarize: false });
+    assertStatus(f, "[Explain]");
+    await session.prompt("/plan start");
+    assert.equal(stateOf(session).kind, "planning");
+    await session.prompt("Now plan.");
+    assert.match(f.promptOptions.at(-1)?.section ?? "", /PLAN MODE ACTIVE/);
+    await session.prompt("/plan exit");
+    assert.deepEqual(session.getActiveToolNames(), baseline);
+  } finally {
     await f.dispose();
   }
 });
@@ -599,7 +664,7 @@ test("completion saves the full Markdown, terminates, and automatically opens re
     const text = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     assert.ok(text.includes(plan));
     assert.ok(text.includes(ready.document.path));
-    assertStatus(f, `[Planning ${ready.document.name}]`);
+    assertStatus(f, `[Plan decision-brief] ${ready.document.name}`);
     assert.equal(f.reviewPlan.mock.calls.length, 1);
     assert.equal(f.loadUi.mock.calls.length, 1);
     assert.equal(f.reviewPlan.mock.calls[0]?.[1], plan);
@@ -742,7 +807,7 @@ test("tree navigation restores planning, ready, and idle from the active branch 
     assert.deepEqual(session.getActiveToolNames().sort(), [...planningTools].sort());
     await session.navigateTree(readyLeaf, { summarize: false });
     assert.deepEqual(stateOf(session), ready);
-    assertStatus(f, `[Planning ${ready.document.name}]`);
+    assertStatus(f, `[Plan decision-brief] ${ready.document.name}`);
     await session.navigateTree(root, { summarize: false });
     assert.equal(stateOf(session).kind, "idle");
     assert.deepEqual(session.getActiveToolNames(), previous);

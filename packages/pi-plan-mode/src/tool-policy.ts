@@ -1,5 +1,8 @@
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 
+import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
+
+export const EXPLAIN_DENIED_HELPERS: readonly string[] = ["plan_mode_complete", ...IMPLEMENTATION_HELPERS];
 export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"] as const;
 const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 
@@ -34,13 +37,16 @@ export function defaultPlanTools(tools: readonly ToolInfo[]): string[] {
 export function resolvePlanTools(
   tools: readonly ToolInfo[],
   selected?: readonly string[],
+  mode: "plan" | "explain" = "plan",
 ): { allowed: string[]; active: string[]; unavailable: string[] } {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  const requested = new Set([...(selected ?? defaultPlanTools(tools)), ...PLAN_HELPER_NAMES]);
+  const helpers = mode === "explain" ? ["plan_mode_question"] : PLAN_HELPER_NAMES;
+  const requested = new Set([...(selected ?? defaultPlanTools(tools)), ...helpers]);
   const allowed: string[] = [];
   const active: string[] = [];
   const unavailable: string[] = [];
   for (const name of requested) {
+    if (mode === "explain" && EXPLAIN_DENIED_HELPERS.includes(name)) continue;
     const tool = byName.get(name);
     // Helpers must be registered just like every other tool; their names alone
     // do not establish availability or bypass the current host loadout.

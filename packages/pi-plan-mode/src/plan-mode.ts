@@ -34,14 +34,8 @@ import {
   planHash,
   storedPlanStorage,
 } from "./plan-store.js";
-import {
-  openPlanModePrompt,
-  planModePromptPath,
-  readPlanModeBasePrompt,
-  readPlanModeInstructions,
-  savePlanModePrompt,
-} from "./planning-instructions.js";
-import { buildPlanModePrompt } from "./prompt.js";
+import { readPlanModeInstructions } from "./planning-instructions.js";
+import { buildPlanModePrompt, DEFAULT_EXPLAIN_PROMPT } from "./prompt.js";
 import {
   answerPlanModeQuestions,
   normalizePlanModeQuestionParams,
@@ -50,19 +44,38 @@ import {
   planModeQuestionCancelled,
 } from "./question-tool.js";
 import {
+  DEFAULT_TEMPLATE_SHORTCUT,
   DEFAULT_TOGGLE_SHORTCUT,
   type PlanModeSettings,
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
-import { legacyPlanState, PLAN_STATE_ENTRY, type PlanState, type PlanWorkflow, restorePlanState } from "./state.js";
-import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools, standaloneToolCall } from "./tool-policy.js";
+import {
+  type ExplainSession,
+  isPlanning,
+  isRestricted,
+  legacyPlanState,
+  PLAN_STATE_ENTRY,
+  type PlanState,
+  type PlanWorkflow,
+  restorePlanState,
+  restrictedSession,
+} from "./state.js";
+import { DEFAULT_PLAN_TEMPLATE_ID, listPlanTemplates, type PlanTemplate, resolvePlanTemplate } from "./templates.js";
+import {
+  defaultPlanTools,
+  EXPLAIN_DENIED_HELPERS,
+  PLAN_HELPER_NAMES,
+  resolvePlanTools,
+  standaloneToolCall,
+} from "./tool-policy.js";
 
 type InteractiveUi = typeof import("./interactive-ui.js");
 interface PlanModeDependencies extends ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   readInstructions?(): string;
-  readBasePrompt?(): string;
+  listTemplates?(): PlanTemplate[];
+  resolveTemplate?(id?: string): PlanTemplate;
   createStore?: typeof createPlanStore;
   loadUi?(): Promise<InteractiveUi>;
   namePlan?: typeof requestPlanName;
@@ -81,7 +94,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     naming = undefined;
   }
   function startNaming(ctx: ExtensionContext, task: string) {
-    if (state.kind === "idle" || state.workflow.name || state.workflow.task || !task.trim()) return;
+    if (!isPlanning(state) || state.workflow.name || state.workflow.task || !task.trim()) return;
     const workflow = { ...state.workflow, task: task.slice(0, MAX_NAME_TASK_CHARS) };
     commit({ ...state, workflow });
     const owner = ctx.sessionManager;
@@ -107,7 +120,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         naming === request &&
         session === owner &&
         !controller.signal.aborted &&
-        live.kind !== "idle" &&
+        isPlanning(live) &&
         live.workflow.id === workflow.id
       ) {
         try {
@@ -121,7 +134,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     })();
   }
   async function resolveName() {
-    if (state.kind === "idle") throw new Error("No active planning workflow.");
+    if (!isPlanning(state)) throw new Error("No active planning workflow. Use /plan start.");
     if (state.workflow.name) return state.workflow.name;
     if (naming?.id === state.workflow.id) return naming.promise;
     return fallbackPlanName(state.workflow.task ?? "untitled plan");
@@ -136,6 +149,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       }
     | undefined;
   const readSettings = dependencies.readSettings ?? readPlanModeSettings;
+  const listTemplates = dependencies.listTemplates ?? listPlanTemplates;
+  const resolveTemplate = dependencies.resolveTemplate ?? resolvePlanTemplate;
   const makeStore = dependencies.createStore ?? createPlanStore;
   const loadUi = dependencies.loadUi ?? (() => import("./interactive-ui.js"));
 
@@ -165,13 +180,15 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (session !== ctx.sessionManager || !ctx.hasUI) return;
     const tracked = implementation.state;
     const text =
-      state.kind !== "idle"
-        ? `[Planning${state.workflow.name ? ` ${state.workflow.name}` : ""}]`
-        : implementation.checking(ctx) && tracked
-          ? `[Verifying ${tracked.document.name}]`
-          : implementation.active(ctx) && tracked
-            ? `[Implementing ${tracked.document.name}]`
-            : "[Normal]";
+      state.kind === "explain"
+        ? "[Explain]"
+        : isPlanning(state)
+          ? `[Plan ${state.workflow.template}]${state.workflow.name ? ` ${state.workflow.name}` : ""}`
+          : implementation.checking(ctx) && tracked
+            ? `[Verifying ${tracked.document.name}]`
+            : implementation.active(ctx) && tracked
+              ? `[Implementing ${tracked.document.name}]`
+              : "[Normal]";
     ctx.ui.setStatus("plan-mode", terminalText(text));
   }
 
@@ -194,14 +211,21 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     return resolved;
   }
 
+  function restrictionTools(next: Exclude<PlanState, { kind: "idle" }>) {
+    if (isPlanning(next)) return planTools(next.workflow);
+    const resolved = resolvePlanTools(pi.getAllTools(), next.restriction.tools, "explain");
+    if (!resolved.active.includes(PLAN_MODE_QUESTION_TOOL_NAME))
+      throw new Error("The question helper must be registered and available.");
+    return resolved;
+  }
+
   function transition(next: PlanState, ctx: ExtensionContext) {
     const oldTools = pi.getActiveTools();
-    const tools =
-      next.kind !== "idle"
-        ? planTools(next.workflow).active
-        : state.kind !== "idle"
-          ? state.workflow.previousTools
-          : oldTools;
+    const tools = isRestricted(next)
+      ? restrictionTools(next).active
+      : isRestricted(state)
+        ? restrictedSession(state).previousTools
+        : oldTools;
     try {
       pi.setActiveTools(tools);
       commit(next);
@@ -213,7 +237,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       }
       throw error;
     }
-    if (next.kind === "idle") cancelNaming();
+    if (!isPlanning(next)) cancelNaming();
     invalidate();
     updateStatus(ctx);
   }
@@ -236,7 +260,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     } = {},
   ) {
     idle(ctx);
-    if (state.kind !== "idle") return lifecycle(ctx);
+    if (isPlanning(state)) return lifecycle(ctx);
+    const prior = state;
     const current = lifecycle(ctx);
     const settings = await readSettings();
     if (!current.isCurrent()) return;
@@ -244,7 +269,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!current.isCurrent()) return;
     idle(ctx);
     const instructions = (dependencies.readInstructions ?? readPlanModeInstructions)();
-    const basePrompt = (dependencies.readBasePrompt ?? readPlanModeBasePrompt)();
+    const resolvedTemplate = resolveTemplate(settings.template ?? DEFAULT_PLAN_TEMPLATE_ID);
     const previousImplementation = implementation.state;
     let workflow: PlanWorkflow;
     try {
@@ -260,9 +285,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           references: [],
         },
         instructions,
-        basePrompt,
-        previousTools: pi.getActiveTools(),
-        ...((options.tools ?? settings.tools) ? { tools: options.tools ?? settings.tools } : {}),
+        template: resolvedTemplate.id,
+        templatePrompt: resolvedTemplate.content,
+        previousTools: prior.kind === "explain" ? prior.restriction.previousTools : pi.getActiveTools(),
+        ...((options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools))
+          ? { tools: options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools) }
+          : {}),
         ...(options.document ? { document: options.document, name: options.document.name, hash: options.hash } : {}),
       };
       if (workflow.artifacts && !workflow.artifacts.workspace.directory)
@@ -278,18 +306,54 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     return lifecycle(ctx);
   }
 
+  async function enterExplain(ctx: ExtensionContext) {
+    idle(ctx);
+    if (state.kind === "explain") return lifecycle(ctx);
+    const current = lifecycle(ctx);
+    const settings = await readSettings();
+    if (!current.isCurrent()) return;
+    idle(ctx);
+    const prior = state;
+    const selected = isRestricted(prior) ? restrictedSession(prior).tools : settings.tools;
+    if (isPlanning(prior)) {
+      await cancelArtifacts(ctx, prior.workflow);
+      if (!current.isCurrent()) return;
+      idle(ctx);
+    }
+    const previousImplementation = implementation.state;
+    try {
+      if (previousImplementation?.phase === "implementing") implementation.detach(ctx);
+      const restriction: ExplainSession = {
+        version: 1,
+        id: randomUUID(),
+        prompt: DEFAULT_EXPLAIN_PROMPT,
+        previousTools: isRestricted(prior) ? restrictedSession(prior).previousTools : pi.getActiveTools(),
+        ...(selected ? { tools: selected } : {}),
+      };
+      transition({ kind: "explain", restriction }, ctx);
+    } catch (error) {
+      if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
+      throw error;
+    }
+    return lifecycle(ctx);
+  }
+
+  async function cancelArtifacts(ctx: ExtensionContext, workflow: PlanWorkflow) {
+    await artifactRequest(
+      pi,
+      ctx,
+      "cancel",
+      collectArtifactReferences(ctx, workflow.artifacts)
+        ?.references.filter((r) => r.status === "queued" || r.status === "running")
+        .map((r) => r.jobId) ?? [],
+    );
+  }
+
   async function leave(ctx: ExtensionContext) {
     idle(ctx);
     const current = lifecycle(ctx);
-    if (state.kind !== "idle") {
-      await artifactRequest(
-        pi,
-        ctx,
-        "cancel",
-        collectArtifactReferences(ctx, state.workflow.artifacts)
-          ?.references.filter((r) => r.status === "queued" || r.status === "running")
-          .map((r) => r.jobId) ?? [],
-      );
+    if (isRestricted(state)) {
+      if (isPlanning(state)) await cancelArtifacts(ctx, state.workflow);
       if (current.isCurrent()) transition({ kind: "idle" }, ctx);
     }
   }
@@ -299,7 +363,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     cancelNaming();
     invalidate();
     // Tree navigation does not replace the extension instance. Release its previous loadout first.
-    if (session === ctx.sessionManager && previous.kind !== "idle") pi.setActiveTools(previous.workflow.previousTools);
+    if (session === ctx.sessionManager && isRestricted(previous))
+      pi.setActiveTools(restrictedSession(previous).previousTools);
     session = ctx.sessionManager;
     try {
       state = restorePlanState(ctx.sessionManager.getBranch());
@@ -313,7 +378,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
     const current = lifecycle(ctx);
     try {
-      if (state.kind !== "idle") {
+      if (state.kind === "explain") pi.setActiveTools(restrictionTools(state).active);
+      if (isPlanning(state)) {
         if (state.workflow.task && !state.workflow.name)
           commit({ ...state, workflow: { ...state.workflow, name: fallbackPlanName(state.workflow.task) } });
         const candidate = state;
@@ -335,7 +401,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     } catch (error) {
       if (!current.isCurrent()) return;
       const candidate = state;
-      if (candidate.kind !== "idle") pi.setActiveTools(candidate.workflow.previousTools);
+      if (isRestricted(candidate)) pi.setActiveTools(restrictedSession(candidate).previousTools);
       state = { kind: "idle" };
       notify(ctx, `Plan mode could not be restored: ${errorMessage(error)}`, "error");
     }
@@ -349,7 +415,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       !("sessionId" in value) ||
       !("reference" in value) ||
       !validArtifactReference(value.reference) ||
-      state.kind === "idle" ||
+      !isPlanning(state) ||
       value.sessionId !== session?.getSessionId() ||
       !state.workflow.artifacts
     )
@@ -371,7 +437,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     cancelNaming();
     invalidate();
     try {
-      if (state.kind !== "idle") pi.setActiveTools(state.workflow.previousTools);
+      if (isRestricted(state)) pi.setActiveTools(restrictedSession(state).previousTools);
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus("plan-mode", undefined);
       session = undefined;
@@ -384,12 +450,15 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   pi.on("before_agent_start", (event, ctx) => {
     if (session === ctx.sessionManager && event.messageType === "user") startNaming(ctx, event.prompt);
     invalidate();
-    if (state.kind !== "idle" && session === ctx.sessionManager) {
+    if (state.kind === "explain" && session === ctx.sessionManager) {
+      event.systemPromptOptions.sections.pi_plan_mode = state.restriction.prompt;
+      event.systemPromptOptions.selectedTools = restrictionTools(state).active;
+    } else if (isPlanning(state) && session === ctx.sessionManager) {
       // Set guidance even if persisting the ready-to-planning transition subsequently fails.
       // Native sections survive compaction and use Pi's ordinary prompt/tool deltas.
       const base = state.kind === "ready" ? state.document : state.workflow.document;
       event.systemPromptOptions.sections.pi_plan_mode =
-        buildPlanModePrompt(state.workflow.instructions, state.workflow.basePrompt) +
+        buildPlanModePrompt(state.workflow.instructions, { content: state.workflow.templatePrompt }) +
         (planTools(state.workflow).allowed.some((name) => ARTIFACT_TOOLS.includes(name))
           ? artifactGuidance(state.workflow.artifacts)
           : "") +
@@ -473,12 +542,19 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         };
       return;
     }
-    if (session !== ctx.sessionManager || !planTools(state.workflow).allowed.includes(event.toolName)) {
+    if (state.kind === "explain" && EXPLAIN_DENIED_HELPERS.includes(event.toolName))
       return {
         block: true,
-        reason: `Plan mode blocks '${event.toolName}'. The user can change trusted tools with /plan tools while idle. Each nested call needs its own permission.`,
+        reason:
+          "Explain cannot write plans or use implementation helpers. Use /plan start for planning, or /explain exit before coding or resuming implementation.",
+      };
+    if (!restrictionTools(state).allowed.includes(event.toolName)) {
+      return {
+        block: true,
+        reason: `${state.kind === "explain" ? "Explain" : "Plan"} mode blocks '${event.toolName}'. The user can change trusted tools with /plan tools while idle. Each nested call needs its own permission.`,
       };
     }
+    if (state.kind === "explain") return;
     const scopeError = artifactScope(state.workflow.artifacts, event.toolName, event.input, ctx.cwd);
     if (scopeError) return { block: true, reason: scopeError };
     if (
@@ -496,12 +572,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     label: "Plan question",
     defaultActive: false,
     description:
-      "Ask one to three structured questions while /plan mode is active. Not for ordinary planning outside /plan.",
+      "Ask one to three structured questions while /plan or /explain mode is active. If unavailable or cancelled, ask in plain text when needed.",
     parameters: PLAN_MODE_QUESTION_PARAMS,
     executionMode: "sequential",
     async execute(_id, params, signal, _update, ctx) {
-      if (state.kind === "idle" || session !== ctx.sessionManager) {
-        return planModeQuestionCancelled([], "plan_mode_inactive", "Plan mode is not active.");
+      if (!isRestricted(state) || session !== ctx.sessionManager) {
+        return planModeQuestionCancelled([], "plan_mode_inactive", "Neither Plan nor Explain mode is active.");
       }
       const parsed = normalizePlanModeQuestionParams(params);
       if (!parsed.ok) return planModeQuestionCancelled([], "invalid_input", parsed.error);
@@ -510,7 +586,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       const current = lifecycle(ctx);
       return answerPlanModeQuestions(parsed.questions, ctx, {
         isCurrent: current.isCurrent,
-        isEnabled: () => state.kind !== "idle",
+        isEnabled: () => isRestricted(state),
         signal: AbortSignal.any(
           [current.signal, signal, ctx.signal].filter((value): value is AbortSignal => value !== undefined),
         ),
@@ -519,7 +595,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   });
 
   function planningOperation(ctx: ExtensionContext, name: string, signal?: AbortSignal) {
-    if (state.kind === "idle" || session !== ctx.sessionManager) throw new Error("Plan mode is not active.");
+    if (!isPlanning(state) || session !== ctx.sessionManager)
+      throw new Error("Plan mode is not active. Use /plan start; Explain cannot save plans.");
     if (!standaloneToolCall(ctx, name)) throw new Error("Planning saves must be called alone as a top-level tool.");
     const source = state;
     const current = lifecycle(ctx);
@@ -530,7 +607,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       source,
       signal: combined,
       isCurrent: () =>
-        current.isCurrent() && state.kind !== "idle" && state.workflow.id === source.workflow.id && !combined.aborted,
+        current.isCurrent() && isPlanning(state) && state.workflow.id === source.workflow.id && !combined.aborted,
     };
   }
 
@@ -610,7 +687,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   const implementation = registerImplementation(
     pi,
     dependencies,
-    (ctx) => state.kind !== "idle" && session === ctx.sessionManager,
+    // Implementation must be suppressed in both restricted modes, not only in planning.
+    (ctx) => isRestricted(state) && session === ctx.sessionManager,
     updateStatus,
   );
 
@@ -641,12 +719,14 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
 
   async function review(ctx: ExtensionCommandContext, document?: PlanDocument, store?: PlanStore) {
     if (!ctx.hasUI) throw new Error("Plan review and implementation require TUI or RPC mode.");
+    if (state.kind === "explain")
+      throw new Error("Exit Explain with /explain exit or start planning with /plan start before reviewing plans.");
     let source: PlanState = state;
-    const selected = document ?? (source.kind === "idle" ? undefined : source.workflow.document);
+    const selected = document ?? (isPlanning(source) ? source.workflow.document : undefined);
     if (!selected)
       throw new Error("No current saved plan. Create one with /plan <request> or choose one through /plan saved.");
     let current = lifecycle(ctx);
-    const storage = store ?? (await storeFor(ctx, source.kind !== "idle" ? source.workflow : undefined));
+    const storage = store ?? (await storeFor(ctx, isPlanning(source) ? source.workflow : undefined));
     const plan = await storage.read(selected);
     await artifactReadiness(pi, ctx, selected.artifacts);
     if (!current.isCurrent()) return;
@@ -655,14 +735,14 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       if (!entered?.isCurrent()) return;
       current = entered;
       const planning = state as PlanState;
-      if (planning.kind === "idle") return;
+      if (!isPlanning(planning)) return;
       commit({ kind: "ready", workflow: planning.workflow, document: selected });
       source = state;
       updateStatus(ctx);
     }
     const ui = await loadUi();
     if (!current.isCurrent()) return;
-    if (state.kind !== "idle" && state.workflow.document?.id === selected.id)
+    if (isPlanning(state) && state.workflow.document?.id === selected.id)
       commit({ ...state, workflow: { ...state.workflow, hash: planHash(plan) } });
     const action = await ui.reviewPlan(ctx, plan, selected, current);
     if (!action || !current.isCurrent()) return;
@@ -802,8 +882,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const all = pi.getAllTools();
     const selected =
       (!persistent
-        ? state.kind !== "idle"
-          ? state.workflow.tools
+        ? isRestricted(state)
+          ? restrictedSession(state).tools
           : (implementation.state?.tools ?? settings.tools)
         : settings.tools) ?? defaultPlanTools(all);
     const ui = await loadUi();
@@ -814,7 +894,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (persistent) {
       await updatePlanModeSettings({ tools: chosen }, { signal: current.signal });
       if (current.isCurrent()) notify(ctx, "Tool defaults saved for future planning workflows.");
-    } else if (state.kind !== "idle") {
+    } else if (state.kind === "explain") {
+      transition({ ...state, restriction: { ...state.restriction, tools: chosen } }, ctx);
+    } else if (isPlanning(state)) {
       transition({ ...state, workflow: { ...state.workflow, tools: chosen } }, ctx);
     } else {
       await updatePlanModeSettings({ tools: chosen }, { signal: current.signal });
@@ -824,15 +906,102 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
   }
 
-  async function editPlanningPrompt(ctx: ExtensionContext) {
+  async function applyWorkflowTemplate(
+    ctx: ExtensionContext,
+    selected: PlanTemplate,
+    current: ReturnType<typeof lifecycle>,
+  ) {
+    if (!isPlanning(state)) return;
+    if (state.workflow.template === selected.id && state.workflow.templatePrompt === selected.content) return;
+    const document = state.kind === "ready" ? state.document : state.workflow.document;
+    if (document) {
+      const store = await storeFor(ctx, state.workflow);
+      const plan = await store.read(document);
+      if (!current.isCurrent() || !isPlanning(state)) return;
+      idle(ctx);
+      const previous = state;
+      const workflow: PlanWorkflow = {
+        ...state.workflow,
+        storage: store.storage,
+        template: selected.id,
+        templatePrompt: selected.content,
+        document,
+        name: document.name,
+        hash: planHash(plan),
+      };
+      transition({ kind: "planning", workflow }, ctx);
+      try {
+        pi.sendUserMessage(
+          `Switch this plan to the "${selected.id}" template. Rewrite the current saved plan below to follow the "${selected.id}" template structure and rules, preserving all resolved decisions, context, and scope, then call plan_mode_complete alone with the complete rewritten Markdown plan.\n\n${plan}`,
+        );
+      } catch (error) {
+        transition(previous, ctx);
+        throw error;
+      }
+      return;
+    }
+    commit({
+      ...state,
+      workflow: {
+        ...state.workflow,
+        template: selected.id,
+        templatePrompt: selected.content,
+      },
+    });
+    updateStatus(ctx);
+    notify(ctx, `Plan template set to ${selected.id}.`);
+  }
+
+  async function template(ctx: ExtensionContext, persistent = false, requestedId?: string) {
     const current = lifecycle(ctx);
-    const path = planModePromptPath();
-    const original = openPlanModePrompt(path);
-    const text = await ctx.ui.editor(`Planning prompt: ${terminalText(path)}`, original);
-    if (!current.isCurrent() || text === undefined) return;
+    if (requestedId !== undefined) {
+      const selected = resolveTemplate(requestedId);
+      if (!persistent && isPlanning(state)) {
+        await applyWorkflowTemplate(ctx, selected, current);
+        return;
+      }
+      await updatePlanModeSettings({ template: selected.id }, { signal: current.signal });
+      if (current.isCurrent()) {
+        notify(ctx, `Default plan template set to ${selected.id} for future planning workflows.`);
+      }
+      return;
+    }
+    if (!ctx.hasUI) throw new Error("This Plan menu requires TUI or RPC mode. Use /plan template <id>.");
+    const settings = await readSettings();
+    if (!current.isCurrent()) return;
+    const available = listTemplates();
+    const currentId =
+      !persistent && isPlanning(state) ? state.workflow.template : (settings.template ?? DEFAULT_PLAN_TEMPLATE_ID);
+    const entries = available.map((candidate) => ({
+      candidate,
+      option: terminalText(
+        `${candidate.id}${candidate.id === currentId ? " (current)" : ""} — ${candidate.description}`,
+      ),
+    }));
+    const choice = await ctx.ui.select(
+      persistent || !isPlanning(state) ? "Default plan template" : "Plan template",
+      entries.map((entry) => entry.option),
+      { signal: current.signal },
+    );
+    if (!choice || !current.isCurrent()) return;
     idle(ctx);
-    savePlanModePrompt(text, original, path);
-    notify(ctx, "Planning prompt saved for new workflows. Existing workflows retain their prompt snapshot.");
+    const matched = entries.find(
+      (entry) =>
+        entry.option === choice ||
+        entry.candidate.id === choice ||
+        entry.candidate.label === choice ||
+        choice.startsWith(`${entry.candidate.id} `),
+    )?.candidate;
+    if (!matched) return;
+    const selected = resolveTemplate(matched.id);
+    if (!persistent && isPlanning(state)) {
+      await applyWorkflowTemplate(ctx, selected, current);
+      return;
+    }
+    await updatePlanModeSettings({ template: selected.id }, { signal: current.signal });
+    if (current.isCurrent()) {
+      notify(ctx, `Default plan template set to ${selected.id} for future planning workflows.`);
+    }
   }
 
   async function settingsMenu(ctx: ExtensionContext) {
@@ -841,7 +1010,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       "Plan settings",
       [
         "Default planning tools",
-        "Edit planning prompt",
+        "Default plan template",
         "Reset to strict inspection tools",
         "Automatic adherence checks",
         "Adherence checker model",
@@ -854,7 +1023,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!choice || !current.isCurrent()) return;
     idle(ctx);
     if (choice === "Default planning tools") return tools(ctx, true);
-    if (choice === "Edit planning prompt") return editPlanningPrompt(ctx);
+    if (choice === "Default plan template") return template(ctx, true);
     if (
       [
         "Automatic adherence checks",
@@ -871,12 +1040,83 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (current.isCurrent()) notify(ctx, "Settings saved for future workflows. Existing plan files were not moved.");
   }
 
+  pi.registerCommand("explain", {
+    description: "Explain code and discuss improvements without editing or creating a plan",
+    getArgumentCompletions: (prefix) =>
+      ["start", "exit"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+    handler: async (args, ctx) => {
+      if (commandOpen) {
+        notify(ctx, "A Plan command is already open.", "warning");
+        return;
+      }
+      const manager = ctx.sessionManager;
+      if (!session) session = manager;
+      if (session !== manager) return;
+      commandOpen = true;
+      try {
+        idle(ctx);
+        const input = args.trim();
+        if (input.toLowerCase() === "exit") {
+          if (state.kind === "explain") await leave(ctx);
+          return;
+        }
+        const previous = state;
+        const previousImplementation = implementation.state;
+        const entered = await enterExplain(ctx);
+        if (!entered?.isCurrent()) return;
+        try {
+          if (input && input.toLowerCase() !== "start") pi.sendUserMessage(input);
+        } catch (error) {
+          if (previous.kind !== "explain") {
+            transition(previous, ctx);
+            if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
+          }
+          throw error;
+        }
+      } catch (error) {
+        if (session !== manager) return;
+        if (!ctx.hasUI) throw error;
+        notify(ctx, errorMessage(error), "error");
+      } finally {
+        commandOpen = false;
+      }
+    },
+  });
+
   pi.registerCommand("plan", {
     description: "Plan, review saved plans, or choose implementation here or in a fresh session",
-    getArgumentCompletions: (prefix) =>
-      ["start", "saved", "implement", "open", "tools", "settings", "exit", "verify", "resume", "progress"]
+    getArgumentCompletions: (prefix) => {
+      if (/^template\s+/i.test(prefix)) {
+        const partial = prefix.replace(/^template\s+/i, "").toLowerCase();
+        try {
+          const matches = listTemplates()
+            .filter((candidate) => candidate.id.startsWith(partial))
+            .map((candidate) => ({
+              value: `template ${candidate.id}`,
+              label: candidate.id,
+              description: terminalText(candidate.description),
+            }));
+          return matches.length > 0 ? matches : null;
+        } catch {
+          return null;
+        }
+      }
+      return [
+        "start",
+        "saved",
+        "implement",
+        "open",
+        "template",
+        "tools",
+        "settings",
+        "exit",
+        "verify",
+        "resume",
+        "progress",
+      ]
         .filter((value) => value.startsWith(prefix))
-        .map((value) => ({ value, label: value })),
+        .map((value) => ({ value, label: value }));
+    },
     handler: async (args, ctx) => {
       const removed = /^(finalize|save|prompt|cancel|import(?:\s+.*)?)$/i.exec(args.trim());
       if (removed) {
@@ -884,7 +1124,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         const guidance = {
           finalize: "Use /plan implement to review the saved plan, or continue planning in conversation.",
           save: "Plans are already saved. Use /plan exit or Save for later in review.",
-          prompt: "Use /plan settings → Edit planning prompt.",
+          prompt: "Use /plan template or /plan settings → Default plan template.",
           import: "Use /plan start and paste the Markdown body text into the planning conversation.",
           cancel: "Cancel a manual check through its existing dialog; automatic checks use tool-run cancellation.",
         };
@@ -925,6 +1165,13 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         idle(ctx);
         const input = args.trim();
         const command = input.toLowerCase();
+        if (
+          state.kind === "explain" &&
+          (["implement", "open", "verify", "resume", "saved"].includes(command) || command.startsWith("artifacts "))
+        )
+          throw new Error(
+            "This command needs a plan, not Explain. Use /plan start for a new plan, or /explain exit before accessing retained plans or implementation.",
+          );
         if (internal) {
           await review(ctx);
           return;
@@ -952,6 +1199,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             await implementation.command(command, ctx);
             return;
           }
+          if (!isPlanning(state)) throw new Error("Use /plan start before opening a plan.");
           const source = state;
           const document = source.workflow.document;
           if (!document) throw new Error("No saved plan yet. Complete the initial plan before opening it.");
@@ -962,7 +1210,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           if (edited && current.isCurrent()) {
             commit({
               ...source,
-              workflow: { ...state.workflow, ...edited },
+              workflow: { ...source.workflow, ...edited },
               ...(source.kind === "ready" ? { document: edited.document } : {}),
             });
             invalidate();
@@ -976,7 +1224,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           return;
         }
         if (command.startsWith("artifacts omit ")) {
-          if (state.kind === "idle" || !state.workflow.artifacts) throw new Error("No active artifact workflow.");
+          if (!isPlanning(state) || !state.workflow.artifacts) throw new Error("No active artifact workflow.");
           const jobId = input.slice("artifacts omit ".length).trim();
           const reference = state.workflow.artifacts.references.find((r) => r.jobId === jobId);
           if (!reference) throw new Error("Job is not associated with this plan.");
@@ -1007,6 +1255,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           await enter(ctx);
           return;
         }
+        if (command === "template" || /^template\s+/i.test(input)) {
+          const requestedId = input.slice("template".length).trim();
+          await template(ctx, false, requestedId || undefined);
+          return;
+        }
         if (["tools", "settings", "saved", ""].includes(command)) {
           if (!ctx.hasUI)
             throw new Error("This Plan menu requires TUI or RPC mode. Use /plan start or /plan <request>.");
@@ -1023,7 +1276,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             await browse(ctx);
             return;
           }
-          if (state.kind !== "idle" && state.workflow.document) {
+          if (isPlanning(state) && state.workflow.document) {
             await review(ctx);
             return;
           }
@@ -1032,14 +1285,18 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             "Plan mode",
             state.kind === "idle"
               ? [
+                  "Start explaining",
                   "Start planning",
                   "Saved plans",
                   ...(implementation.active(ctx) ? ["Show plan progress"] : []),
                   ...(implementation.state ? ["Verify implementation", "Resume implementation"] : []),
+                  "Template",
                   "Tools",
                   "Settings",
                 ]
-              : ["Tools", "Save defaults", "Exit planning"],
+              : state.kind === "explain"
+                ? ["Start planning", "Template", "Tools", "Save defaults", "Exit Explain"]
+                : ["Start explaining", "Template", "Tools", "Save defaults", "Exit planning"],
             { signal: current.signal },
           );
           if (!current.isCurrent() || !choice) return;
@@ -1048,10 +1305,12 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
             return;
           }
           idle(ctx);
-          if (choice === "Start planning") await enter(ctx);
+          if (choice === "Start explaining") await enterExplain(ctx);
+          else if (choice === "Start planning") await enter(ctx);
           else if (choice === "Saved plans") await browse(ctx);
           else if (choice === "Verify implementation") await implementation.command("verify", ctx);
           else if (choice === "Resume implementation") await implementation.command("resume", ctx);
+          else if (choice === "Template") await template(ctx);
           else if (choice === "Tools") await tools(ctx);
           else if (choice === "Settings" || choice === "Save defaults") await settingsMenu(ctx);
           else await leave(ctx);
@@ -1065,7 +1324,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           startNaming(ctx, input);
           pi.sendUserMessage(input);
         } catch (error) {
-          if (previous.kind === "idle") {
+          if (!isPlanning(previous)) {
             transition(previous, ctx);
             if (previousImplementation?.phase === "implementing") implementation.rollback(previousImplementation, ctx);
           }
@@ -1089,11 +1348,29 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   // and never fail the whole extension just because its shortcut configuration is invalid.
   try {
     const settings = await readSettings();
-    const shortcut =
-      settings.shortcuts?.togglePlan === undefined ? DEFAULT_TOGGLE_SHORTCUT : settings.shortcuts.togglePlan;
-    if (shortcut !== null) {
-      pi.registerShortcut(shortcut, {
-        description: "Toggle between planning and normal mode",
+    const shortcuts = [
+      {
+        key: settings.shortcuts?.togglePlan === undefined ? DEFAULT_TOGGLE_SHORTCUT : settings.shortcuts.togglePlan,
+        description: "Cycle Normal → Explain → Plan → Normal",
+        run: async (ctx: ExtensionContext) => {
+          if (state.kind === "idle") await enterExplain(ctx);
+          else if (state.kind === "explain") await enter(ctx);
+          else await leave(ctx);
+        },
+      },
+      {
+        key:
+          settings.shortcuts?.selectTemplate === undefined
+            ? DEFAULT_TEMPLATE_SHORTCUT
+            : settings.shortcuts.selectTemplate,
+        description: "Choose plan template",
+        run: (ctx: ExtensionContext) => template(ctx),
+      },
+    ];
+    for (const shortcut of shortcuts) {
+      if (shortcut.key === null) continue;
+      pi.registerShortcut(shortcut.key, {
+        description: shortcut.description,
         handler: async (ctx) => {
           if (ctx.mode !== "tui" || session !== ctx.sessionManager) return;
           if (commandOpen) {
@@ -1104,8 +1381,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           commandOpen = true;
           try {
             idle(ctx);
-            if (state.kind === "idle") await enter(ctx);
-            else await leave(ctx);
+            pendingReview = undefined;
+            await shortcut.run(ctx);
           } catch (error) {
             if (current.isCurrent()) notify(ctx, errorMessage(error), "error");
           } finally {

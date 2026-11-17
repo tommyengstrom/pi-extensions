@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { test } from "vitest";
-import { defaultPlanTools, PLAN_HELPER_NAMES, resolvePlanTools } from "../src/tool-policy.js";
+import { defaultPlanTools, EXPLAIN_DENIED_HELPERS, PLAN_HELPER_NAMES, resolvePlanTools } from "../src/tool-policy.js";
 
 function builtin(name: string, overrides: Partial<ToolInfo> = {}): ToolInfo {
   return {
@@ -147,6 +147,25 @@ test("orchestrator selection does not grant any nested tool names or namespace w
   const allowed = new Set(resolved.allowed);
   for (const name of ["codemode", "mcp__docs__read", ...PLAN_HELPER_NAMES]) assert.equal(allowed.has(name), true);
   for (const name of ["mcp__docs__write", "bash"]) assert.equal(allowed.has(name), false);
+});
+
+test("Explain shares canonical defaults, explicit trust and deferred resolution, but never writing helpers", () => {
+  const tools = [
+    builtin("read"),
+    builtin("grep"),
+    extension("find"),
+    extension("bash"),
+    extension("nested", { exposure: "deferred" }),
+    ...helpers(),
+    ...EXPLAIN_DENIED_HELPERS.map((name) => extension(name)),
+  ];
+  assert.deepEqual(resolvePlanTools(tools, undefined, "explain").active, ["read", "grep", "plan_mode_question"]);
+  assert.deepEqual(resolvePlanTools(tools, ["bash", "nested", ...EXPLAIN_DENIED_HELPERS], "explain"), {
+    allowed: ["bash", "nested", "plan_mode_question"],
+    active: ["bash", "plan_mode_question"],
+    unavailable: [],
+  });
+  assert.deepEqual(resolvePlanTools(tools, [], "explain").active, ["plan_mode_question"]);
 });
 
 test("resolving selections does not mutate the catalogue or caller's selection", () => {

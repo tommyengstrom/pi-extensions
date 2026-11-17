@@ -2,24 +2,33 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, test, vi } from "vitest";
 import {
   MAX_PLAN_MODE_INSTRUCTIONS_BYTES,
-  openPlanModePrompt,
   planModeInstructionsPath,
-  planModePromptPath,
-  readPlanModeInstructions as readGuidance,
-  readPlanModeBasePrompt,
-  savePlanModePrompt,
+  readPlanModeInstructions,
 } from "../src/planning-instructions.js";
-import { DEFAULT_PLAN_MODE_PROMPT } from "../src/prompt.js";
+import {
+  BUILTIN_PLAN_TEMPLATES,
+  DEFAULT_PLAN_TEMPLATE,
+  DEFAULT_PLAN_TEMPLATE_ID,
+  listPlanTemplates,
+  parseUserTemplate,
+  planModeTemplatesDir,
+  resolvePlanTemplate,
+  validTemplateName,
+} from "../src/templates.js";
 
 const agentDir = vi.hoisted(() =>
   vi.fn<() => string>(() => {
     throw new Error("Tests must supply an explicit temporary instructions path");
   }),
 );
-vi.mock("@earendil-works/pi-coding-agent", () => ({ getAgentDir: agentDir }));
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@earendil-works/pi-coding-agent")>()),
+  getAgentDir: agentDir,
+}));
 
 // Keep real temporary-file I/O, while allowing deterministic read failures and stat/read races.
 vi.mock("node:fs", async (importOriginal) => ({
@@ -28,46 +37,11 @@ vi.mock("node:fs", async (importOriginal) => ({
 
 afterEach(() => vi.restoreAllMocks());
 
-test("prompt editing seeds missing files, preserves existing text, and saves safely", () => {
-  const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-prompt-edit-"));
-  const path = join(directory, "nested", "prompt.md");
-  try {
-    assert.equal(openPlanModePrompt(path), DEFAULT_PLAN_MODE_PROMPT);
-    savePlanModePrompt("  custom guidance\n", DEFAULT_PLAN_MODE_PROMPT, path);
-    assert.equal(openPlanModePrompt(path), "  custom guidance\n");
-    assert.throws(() => savePlanModePrompt("overwrite", DEFAULT_PLAN_MODE_PROMPT, path), /changed on disk/);
-    assert.throws(() => savePlanModePrompt("x".repeat(65537), "  custom guidance\n", path), /64 KiB/);
-    assert.equal(fs.readFileSync(path, "utf8"), "  custom guidance\n");
-    fs.writeFileSync(path, "");
-    assert.equal(openPlanModePrompt(path), "");
-    fs.writeFileSync(path, Buffer.from([0xff]));
-    assert.throws(() => openPlanModePrompt(path), /valid UTF-8/);
-    assert.deepEqual(fs.readFileSync(path), Buffer.from([0xff]));
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-describe.each([
-  {
-    name: "guidance",
-    filename: "pi-plan-mode.md",
-    pathFor: planModeInstructionsPath,
-    read: readGuidance,
-    fallback: "",
-  },
-  {
-    name: "replacement",
-    filename: "pi-plan-mode-prompt.md",
-    pathFor: planModePromptPath,
-    read: readPlanModeBasePrompt,
-    fallback: DEFAULT_PLAN_MODE_PROMPT,
-  },
-])("$name Markdown", ({ filename, pathFor, read: readPlanModeInstructions, fallback }) => {
+describe("guidance Markdown", () => {
   function withInstructionsFile(run: (path: string, directory: string) => void) {
     const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-instructions-"));
     try {
-      run(join(directory, filename), directory);
+      run(join(directory, "pi-plan-mode.md"), directory);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -76,17 +50,17 @@ describe.each([
   test("the default path uses Pi's agent directory and the package Markdown basename", () => {
     withInstructionsFile((path, directory) => {
       agentDir.mockReturnValueOnce(directory);
-      assert.equal(pathFor(), path);
+      assert.equal(planModeInstructionsPath(), path);
       agentDir.mockReturnValueOnce(directory);
-      assert.equal(readPlanModeInstructions(), fallback);
+      assert.equal(readPlanModeInstructions(), "");
       assert.deepEqual(fs.readdirSync(directory), []);
     });
   });
 
   test("missing instructions and parents remain absent after a side-effect-free read", () => {
     withInstructionsFile((path, directory) => {
-      assert.equal(readPlanModeInstructions(path), fallback);
-      assert.equal(readPlanModeInstructions(join(directory, "absent", "instructions.md")), fallback);
+      assert.equal(readPlanModeInstructions(path), "");
+      assert.equal(readPlanModeInstructions(join(directory, "absent", "instructions.md")), "");
       assert.deepEqual(fs.readdirSync(directory), []);
     });
   });
@@ -95,7 +69,7 @@ describe.each([
     withInstructionsFile((path) => {
       for (const content of ["", " \t\r\n ", "\uFEFF\n"]) {
         fs.writeFileSync(path, content);
-        assert.equal(readPlanModeInstructions(path), fallback);
+        assert.equal(readPlanModeInstructions(path), "");
         assert.equal(fs.readFileSync(path, "utf8"), content);
       }
     });
@@ -202,5 +176,195 @@ describe.each([
       assert.throws(() => readPlanModeInstructions(path), /Unable to read Plan-mode .*EIO/);
       assert.equal(close.mock.calls.length, 1);
     });
+  });
+});
+
+describe("plan templates catalog and user .md templates", () => {
+  test("built-in catalog defines decision-brief, detailed-spec, checklist, and minimal", () => {
+    assert.equal(DEFAULT_PLAN_TEMPLATE_ID, "decision-brief");
+    assert.equal(DEFAULT_PLAN_TEMPLATE.id, "decision-brief");
+    assert.deepEqual(
+      BUILTIN_PLAN_TEMPLATES.map((template) => template.id),
+      ["decision-brief", "detailed-spec", "checklist", "minimal"],
+    );
+    for (const template of BUILTIN_PLAN_TEMPLATES) {
+      assert.equal(validTemplateName(template.id), true);
+      assert.equal(template.source, "builtin");
+      const path = fileURLToPath(new URL(`../templates/${template.id}.md`, import.meta.url));
+      const markdown = fs.readFileSync(path, "utf8");
+      assert.ok(markdown.startsWith(`---\nlabel: ${template.label}\ndescription: ${template.description}\n---\n`));
+      assert.equal(template.content, markdown.slice(markdown.indexOf("\n---\n") + 5).trim());
+      assert.ok(template.content.startsWith("# [Plan title]\n<!--"));
+      assert.match(template.content, /^## Verification\n<!--/m);
+      assert.match(template.content, /At most 250 characters\./);
+      assert.doesNotMatch(template.content, /Structure the completed|^- `##|^> |^label:|^description:/m);
+      // Every section is real Markdown and carries its semantics in a comment.
+      const headings = template.content.match(/^#{1,3} .+$/gm) ?? [];
+      for (const heading of headings) assert.ok(template.content.includes(`${heading}\n<!--`));
+      assert.ok(template.label.length > 0);
+      assert.ok(template.description.length > 0);
+      assert.match(template.content, /## Verification/);
+      assert.match(template.content, /rough range of changed lines/);
+    }
+  });
+
+  test("frontmatter supplies picker metadata while the exact skeleton and comments remain model-visible", () => {
+    const body = "# [Plan title]\r\n\r\n## Overview\r\n<!-- At most 250 characters. -->\r\n\r\n## Verification";
+    const template = parseUserTemplate(
+      "custom",
+      `---\r\nlabel: Custom spec\r\ndescription: Team specification\r\n---\r\n\r\n${body}\r\n`,
+    );
+    assert.equal(template.label, "Custom spec");
+    assert.equal(template.description, "Team specification");
+    assert.equal(template.content, body);
+    const defaults = parseUserTemplate("my-template", "---\nfuture: true\n---\n# [Plan title]");
+    assert.equal(defaults.label, "My template");
+    assert.equal(defaults.description, "Custom user template");
+  });
+
+  test.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+  ])("empty %s frontmatter uses default metadata and preserves the body", (_name, eol) => {
+    const directory = fs.mkdtempSync(join(tmpdir(), "pi-template-empty-header-"));
+    try {
+      // A later Markdown rule must not be mistaken for the header's closing delimiter.
+      for (const rule of [[], ["", "---"]]) {
+        const body = [
+          "# [Plan title]",
+          "",
+          "## Changes",
+          "<!-- Keep literal. -->",
+          ...rule,
+          "",
+          "## Verification",
+        ].join(eol);
+        const markdown = ["---", "---", "", body, ""].join(eol);
+        const expected = {
+          id: "empty-header",
+          label: "Empty header",
+          description: "Custom user template",
+          content: body,
+          source: "user",
+        };
+        const path = join(directory, "empty-header.md");
+        fs.writeFileSync(path, markdown);
+        assert.deepEqual(parseUserTemplate("empty-header", markdown), expected);
+        assert.deepEqual(resolvePlanTemplate("empty-header", directory), expected);
+        assert.deepEqual(
+          listPlanTemplates(directory).find((template) => template.id === "empty-header"),
+          expected,
+        );
+        assert.equal(fs.readFileSync(path, "utf8"), markdown);
+      }
+      assert.throws(() => parseUserTemplate("empty-header", ["---", "---", ""].join(eol)), /body must not be empty/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("invalid frontmatter and metadata-only templates fail without rewriting files", () => {
+    const directory = fs.mkdtempSync(join(tmpdir(), "pi-template-header-"));
+    try {
+      for (const markdown of [
+        "---\nlabel: Missing end",
+        "---\n- not\n- an object\n---\n# Plan",
+        "---\nlabel: false\n---\n# Plan",
+        "---\ndescription: []\n---\n# Plan",
+        "---\nlabel: ' '\n---\n# Plan",
+        "---\nlabel: [broken\n---\n# Plan",
+        "---\nlabel: No body\n---\n",
+      ]) {
+        const path = join(directory, "custom.md");
+        fs.writeFileSync(path, markdown);
+        assert.throws(() => resolvePlanTemplate("custom", directory));
+        assert.throws(() => listPlanTemplates(directory));
+        assert.equal(fs.readFileSync(path, "utf8"), markdown);
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("user templates directory defaults to <getAgentDir()>/pi-plan-mode-templates without creating it", () => {
+    const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-templates-"));
+    try {
+      agentDir.mockReturnValue(directory);
+      const templatesDir = planModeTemplatesDir();
+      assert.equal(templatesDir, join(directory, "pi-plan-mode-templates"));
+      assert.deepEqual(
+        listPlanTemplates().map((template) => template.id),
+        ["decision-brief", "detailed-spec", "checklist", "minimal"],
+      );
+      assert.equal(resolvePlanTemplate("decision-brief").id, "decision-brief");
+      assert.deepEqual(fs.readdirSync(directory), []);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("user .md templates extend the catalog, override built-ins, and extract heading/blockquote metadata", () => {
+    const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-templates-"));
+    const templatesDir = join(directory, "pi-plan-mode-templates");
+    fs.mkdirSync(templatesDir, { recursive: true });
+    try {
+      fs.writeFileSync(
+        join(templatesDir, "adr-brief.md"),
+        "# ADR Brief\n> Architecture decision record with context and consequences\n\n- `## Context`\n- `## Decision`\n- `## Consequences`",
+      );
+      fs.writeFileSync(join(templatesDir, "plain-custom.md"), "Use `## Summary` and `## Steps`.");
+      fs.writeFileSync(
+        join(templatesDir, "decision-brief.md"),
+        "# Custom Decision Brief\n\n> Overridden default template\n\nUse `## Custom Overview`.",
+      );
+
+      const listed = listPlanTemplates(templatesDir);
+      assert.deepEqual(
+        listed.map((template) => template.id),
+        ["decision-brief", "detailed-spec", "checklist", "minimal", "adr-brief", "plain-custom"],
+      );
+
+      const overridden = resolvePlanTemplate("decision-brief", templatesDir);
+      assert.equal(overridden.source, "user");
+      assert.equal(overridden.label, "Custom Decision Brief");
+      assert.equal(overridden.description, "Overridden default template");
+      assert.match(overridden.content, /## Custom Overview/);
+
+      const adr = resolvePlanTemplate("adr-brief", templatesDir);
+      assert.equal(adr.source, "user");
+      assert.equal(adr.label, "ADR Brief");
+      assert.equal(adr.description, "Architecture decision record with context and consequences");
+
+      const plain = resolvePlanTemplate("plain-custom", templatesDir);
+      assert.equal(plain.source, "user");
+      assert.equal(plain.label, "Plain custom");
+      assert.equal(plain.description, "Custom user template");
+      assert.equal(plain.content, "Use `## Summary` and `## Steps`.");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("invalid template names, unknown IDs, and empty/corrupt user template files fail clearly", () => {
+    const directory = fs.mkdtempSync(join(tmpdir(), "pi-plan-templates-"));
+    const templatesDir = join(directory, "pi-plan-mode-templates");
+    fs.mkdirSync(templatesDir, { recursive: true });
+    try {
+      for (const invalid of ["", "UpperCase", "with_underscore", "with space", "-leading", "trailing-"]) {
+        assert.equal(validTemplateName(invalid), false);
+        assert.throws(() => resolvePlanTemplate(invalid, templatesDir), /Invalid plan template name/);
+      }
+      assert.throws(() => resolvePlanTemplate("nonexistent", templatesDir), /Unknown plan template "nonexistent"/);
+
+      fs.writeFileSync(join(templatesDir, "empty-template.md"), "   \n\t ");
+      assert.throws(() => resolvePlanTemplate("empty-template", templatesDir), /must not be empty/);
+      assert.throws(() => listPlanTemplates(templatesDir), /must not be empty/);
+
+      fs.rmSync(join(templatesDir, "empty-template.md"));
+      fs.writeFileSync(join(templatesDir, "Bad_Name.md"), "# Invalid filename");
+      assert.throws(() => listPlanTemplates(templatesDir), /Invalid Plan-mode template filename/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
