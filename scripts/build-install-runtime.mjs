@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { buildRuntime } from "../packages/pi-plan-mode/scripts/build-runtime.mjs";
-import { buildBackgroundRuntimes } from "./build-background-runtime.mjs";
+import { buildBackgroundPackage } from "./build-background-runtime.mjs";
 import { createRuntimeBuilder } from "./runtime-builder.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,8 +67,8 @@ export async function buildTuiKit({ outputDirectory = join(kitRoot, "dist"), val
   }
 }
 
-export async function buildInstallRuntime({ kit, plan, background, herdr } = {}) {
-  await buildBackgroundRuntimes({ background, herdr });
+export async function buildInstallRuntime({ kit, plan, background } = {}) {
+  await buildBackgroundPackage(background);
   await buildTuiKit(kit);
   await buildRuntime(plan);
 }

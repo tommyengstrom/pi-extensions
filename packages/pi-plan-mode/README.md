@@ -46,11 +46,11 @@ Explain uses [`prompts/explain.md`](./prompts/explain.md), never the plan prompt
 
 ## Controlled subagents
 
-When `pi-herdr-core` is loaded, **new** Plan and Explain workflows default-enable its five verified tools: `subagent`, `subagent_query`, `subagent_wait`, `subagent_cancel`, and `subagent_steer`. Names alone do not establish trust: registered package-entrypoint provenance must match. Explicit selections (including `tools: []`) are unchanged. Restored implicit workflows retain their older inspection defaults; new defaults are captured for stable continuation. Exiting restores the prior Normal tool loadout.
+When `pi-herdr-core` is loaded, **new** Plan and Explain workflows default-enable its four verified tools: `subagent`, `subagent_query`, `subagent_wait`, and `subagent_cancel`. Names alone do not establish trust: registered package-entrypoint provenance must match. Explicit selections (including `tools: []`) are unchanged. Restored implicit workflows retain their older inspection defaults; new defaults are captured for stable continuation. Exiting restores the prior Normal tool loadout.
 
 Use `/subagent <query>` for a human delegation request. Children inherit the workflow's exact allowed-name ceiling and guidance, excluding parent-only plan/review/implementation and Plan-associated artifact helpers. Controlled terminal/control-record bookkeeping is permitted, not code mutation or approval. Tool permission changes or mode replacement cancel associated work; ordinary turns retain its scope and prompt. The adherence checker excludes background delegation tools, without changing naming/progress observers.
 
-Ready-plan publication requires associated subagents to stop and relevant pending results to be retrieved or committed to the transcript. Review freezes new launches, steering and automatic continuation. A child result can never approve implementation. Existing replacement prompts are not rewritten automatically: deliberately adopt the new controlled-delegation guidance if using a custom prompt. See [Herdr documentation](../pi-herdr-core/README.md) for Core requirements, limits, result references and cleanup.
+Ready-plan publication requires associated subagents to stop and relevant pending results to be retrieved or committed to the transcript. Review freezes new launches and automatic continuation. A child result can never approve implementation. Existing replacement prompts are not rewritten automatically: deliberately adopt the new controlled-delegation guidance if using a custom prompt. See [Herdr documentation](../pi-herdr-core/README.md) for Core requirements, limits, profiles and result references.
 
 ## Background artifacts
 
@@ -193,7 +193,7 @@ Defaults are independent `progress.model: { "provider": "openai", "id": "gpt-6-l
 
 ## Tools and trust
 
-The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. New workflows additionally enable the five verified Herdr tools when that extension is loaded. Same-name extension overrides are not trusted defaults. The planning allowlist applies **only in planning**. Plan mode temporarily activates the required direct tools and restores preexisting active-tool availability when planning ends, before enabling implementation helpers. It does not narrow normal-mode or implementation tools.
+The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. New workflows additionally enable the four verified Herdr tools when that extension is loaded. Same-name extension overrides are not trusted defaults. The planning allowlist applies **only in planning**. Plan mode temporarily activates the required direct tools and restores preexisting active-tool availability when planning ends, before enabling implementation helpers. It does not narrow normal-mode or implementation tools.
 
 Use `/plan tools` while idle to change a planning workflow's selection. In normal mode it configures future planning without entering planning or changing active tools. During implementation it may update the isolated checker's selection only. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools. The checker enforces its own read-only policy in its child session; checking never changes the parent's tool availability.
 

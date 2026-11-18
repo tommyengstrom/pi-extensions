@@ -20,6 +20,7 @@ export interface CoreTerminal {
   labels: Record<string, string>;
   argv: string[];
   created_ms: number;
+  exit_code: number | null;
   keep: boolean;
   rm: boolean;
   notify: boolean;
@@ -28,13 +29,15 @@ export interface CoreIdentity {
   id: string;
   version: string;
 }
-type Method = "terminal.get" | "terminal.list" | "terminal.run" | "terminal.kill" | "terminal.rm";
+type Method = "terminal.get" | "terminal.list" | "terminal.run" | "terminal.kill";
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+export function isLocalAddress(value: string): boolean {
+  return value.trim() === value && /^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*$/.test(value);
+}
 export function localAddress(value: string): string {
-  if (value.trim() !== value || !/^t[1-9][0-9]*$/.test(value))
-    throw new CoreError("A local Core terminal address is required.", false);
+  if (!isLocalAddress(value)) throw new CoreError("A local Core terminal address is required.", false);
   return value;
 }
 export function parseTerminal(value: unknown): CoreTerminal {
@@ -48,6 +51,7 @@ export function parseTerminal(value: unknown): CoreTerminal {
     !Array.isArray(value.argv) ||
     !value.argv.every((item) => typeof item === "string") ||
     !Number.isSafeInteger(value.created_ms) ||
+    !(value.exit_code === null || Number.isSafeInteger(value.exit_code)) ||
     typeof value.keep !== "boolean" ||
     typeof value.rm !== "boolean" ||
     typeof value.notify !== "boolean"
@@ -62,6 +66,7 @@ export function parseTerminal(value: unknown): CoreTerminal {
     labels: { ...value.labels } as Record<string, string>,
     argv: [...value.argv] as string[],
     created_ms: value.created_ms as number,
+    exit_code: value.exit_code as number | null,
     keep: value.keep,
     rm: value.rm,
     notify: value.notify,
@@ -153,7 +158,7 @@ export class CoreClient {
               const hello = response.result;
               if (
                 !object(hello) ||
-                hello.version !== "0.1.21" ||
+                (hello.version !== "0.1.18" && hello.version !== "0.1.21") ||
                 !object(hello.core) ||
                 typeof hello.core.id !== "string" ||
                 !Array.isArray(hello.methods) ||
@@ -177,50 +182,4 @@ export class CoreClient {
       });
     });
   }
-}
-
-/** Construct from a trusted supervisor allocation, never model-provided argv/env/parent. */
-export function launchParameters(input: {
-  node: string;
-  bootstrap: string;
-  cwd: string;
-  parent: string;
-  root: string;
-  job: string;
-  attempt: string;
-  controlSocket: string;
-}): Record<string, unknown> {
-  for (const path of [input.node, input.bootstrap, input.cwd, input.controlSocket])
-    if (!isAbsolute(path)) throw new Error("Controlled child paths must be absolute.");
-  return {
-    argv: [input.node, input.bootstrap],
-    cwd: input.cwd,
-    parent: localAddress(input.parent),
-    caller: localAddress(input.parent),
-    no_notify: true,
-    no_parent: false,
-    outlive_parent: false,
-    keep: false,
-    rm: false,
-    wait: false,
-    labels: { "pi-herdr-core-root": input.root, "pi-herdr-core-job": input.job, "pi-herdr-core-attempt": input.attempt },
-    env: { PI_HERDR_CONTROL_SOCKET: input.controlSocket },
-  };
-}
-
-export function sameAllocation(expected: CoreTerminal, actual: CoreTerminal): boolean {
-  return (
-    actual.address === expected.address &&
-    actual.created_ms === expected.created_ms &&
-    actual.parent === expected.parent &&
-    JSON.stringify(actual.argv) === JSON.stringify(expected.argv) &&
-    ["pi-herdr-core-root", "pi-herdr-core-job", "pi-herdr-core-attempt"].every(
-      (key) => !!expected.labels[key] && actual.labels[key] === expected.labels[key],
-    )
-  );
-}
-
-/** Preview/recheck predicate only. Caller must also confirm no live/uncertain descendants. */
-export function removable(expected: CoreTerminal, actual: CoreTerminal): boolean {
-  return sameAllocation(expected, actual) && actual.state === "finished" && !actual.keep && !actual.rm;
 }

@@ -139,17 +139,14 @@ try {
     for (const entry of Object.values(kitManifest.exports)) await access(join(kit, entry.import));
     await access(join(candidate, "packages/pi-plan-mode/dist/index.ts"));
     await access(join(candidate, "packages/pi-background/dist/index.js"));
-    await access(join(candidate, "packages/pi-herdr-core/dist/child-entry.js"));
     await assert.rejects(access(join(kit, "dist/stale.js")));
     await assert.rejects(access(join(candidate, "packages/pi-plan-mode/dist/stale.ts")));
     await assert.rejects(access(join(candidate, "packages/pi-background/dist/stale.js")));
-    await assert.rejects(access(join(candidate, "packages/pi-herdr-core/dist/stale.js")));
     await inspectTree(candidate);
     run(process.execPath, [join(host, "smoke.mjs"), candidate], host);
     await writeFile(join(kit, "dist/stale.js"), "stale");
     await writeFile(join(candidate, "packages/pi-plan-mode/dist/stale.ts"), "stale");
     await writeFile(join(candidate, "packages/pi-background/dist/stale.js"), "stale");
-    await writeFile(join(candidate, "packages/pi-herdr-core/dist/stale.js"), "stale");
   }
   console.log("Packaging smoke passed: cold, repeat, and update-style production installs and Pi loading.");
 } catch (error) {

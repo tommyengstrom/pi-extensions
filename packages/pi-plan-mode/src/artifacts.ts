@@ -2,14 +2,10 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { ARTIFACT_TOOL_NAMES } from "@narumitw/pi-background";
+
 // Versioned wire contract, deliberately not an import from another extension.
-export const ARTIFACT_TOOLS = [
-  "artifact_create",
-  "artifact_update",
-  "artifact_status",
-  "artifact_wait",
-  "artifact_cancel",
-];
+export const ARTIFACT_TOOLS: readonly string[] = ARTIFACT_TOOL_NAMES;
 export const ARTIFACT_ENTRY = "pi-artifacts-reference-v1";
 export interface ArtifactReference {
   version: 1;

@@ -1,13 +1,7 @@
 import { isAbsolute } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
-export const ARTIFACT_TOOLS = [
-  "artifact_create",
-  "artifact_update",
-  "artifact_status",
-  "artifact_wait",
-  "artifact_cancel",
-] as const;
+export { ARTIFACT_TOOL_NAMES as ARTIFACT_TOOLS } from "@narumitw/pi-background";
 export const REFERENCE_ENTRY = "pi-artifacts-reference-v1";
 export const SERVICE_EVENT = "pi-artifacts-service-v1";
 export const STATES = ["queued", "running", "succeeded", "failed", "cancelled", "interrupted"] as const;

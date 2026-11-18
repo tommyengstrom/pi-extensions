@@ -7,7 +7,7 @@ export {
   type WorkflowContext,
   WorkflowScope,
 } from "./context.js";
-export { SUBAGENT_TOOL_NAMES, verifiedSubagentTools } from "./provenance.js";
+export { ARTIFACT_TOOL_NAMES, SUBAGENT_TOOL_NAMES, verifiedSubagentTools } from "./provenance.js";
 export { type Claim, type Notice, NotificationQueue } from "./queue.js";
 export {
   BackgroundRuntime,

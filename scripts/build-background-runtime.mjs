@@ -7,8 +7,8 @@ import { createRuntimeBuilder } from "./runtime-builder.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Node-only install build. No compiler, Bun executable, host imports or child allocation. */
-export async function buildBackgroundPackage(name, { outputDirectory, validateOutput } = {}) {
-  if (!["pi-background", "pi-herdr-core"].includes(name)) throw new Error("Unknown background package.");
+export async function buildBackgroundPackage({ outputDirectory, validateOutput } = {}) {
+  const name = "pi-background";
   const packageRoot = join(root, "packages", name);
   outputDirectory = resolve(outputDirectory ?? join(packageRoot, "dist"));
   const publication = createRuntimeBuilder({ packageRoot, temporaryPrefix: `.${name}` });
@@ -38,8 +38,6 @@ export async function buildBackgroundPackage(name, { outputDirectory, validateOu
       for (const imported of output.imports)
         if (imported.path.startsWith(".") && !outputs.has(resolve(dirname(resolve(packageRoot, file)), imported.path)))
           throw new Error(`Missing runtime relative import: ${imported.path}`);
-    if (name === "pi-herdr-core" && !outputs.has(join(staging, "child-entry.js")))
-      throw new Error("Missing Node child entrypoint.");
     await validateOutput?.(staging);
     await publication.publishRuntime(staging, outputDirectory);
     return result.metafile;
@@ -47,9 +45,4 @@ export async function buildBackgroundPackage(name, { outputDirectory, validateOu
     await rm(staging, { recursive: true, force: true });
   }
 }
-export async function buildBackgroundRuntimes(options = {}) {
-  await buildBackgroundPackage("pi-background", options.background);
-  await buildBackgroundPackage("pi-herdr-core", options.herdr);
-}
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url)
-  await buildBackgroundRuntimes();
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) await buildBackgroundPackage();

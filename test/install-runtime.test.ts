@@ -24,8 +24,8 @@ test("Git manifest supplies a Node-only production build and discovers all four 
 
 test("installation builds libraries before consumers and propagates validation failures", async () => {
   const builder = await loadInstallBuilder();
-  await withInstallOutputs(async (kit, plan, background, herdr) => {
-    const shared = { background: { outputDirectory: background }, herdr: { outputDirectory: herdr } };
+  await withInstallOutputs(async (kit, plan, background) => {
+    const shared = { background: { outputDirectory: background } };
     await assert.rejects(
       builder.buildInstallRuntime({
         ...shared,
@@ -49,7 +49,6 @@ test("installation builds libraries before consumers and propagates validation f
           validateOutput: async () => {
             await access(join(kit, "index.js"));
             await access(join(background, "index.js"));
-            await access(join(herdr, "child-entry.js"));
             throw new Error("Plan failed");
           },
         },
@@ -64,7 +63,7 @@ test("installation builds libraries before consumers and propagates validation f
 
 test("background build failures stop consumers before publication", async () => {
   const builder = await loadInstallBuilder();
-  await withInstallOutputs(async (kit, plan, background, herdr) => {
+  await withInstallOutputs(async (kit, plan, background) => {
     await assert.rejects(
       builder.buildInstallRuntime({
         background: {
@@ -73,13 +72,11 @@ test("background build failures stop consumers before publication", async () => 
             throw new Error("Background failed");
           },
         },
-        herdr: { outputDirectory: herdr },
         kit: { outputDirectory: kit },
         plan: { outputDirectory: plan },
       }),
       /Background failed/u,
     );
-    await assert.rejects(access(herdr));
     await assert.rejects(access(plan));
   });
 });

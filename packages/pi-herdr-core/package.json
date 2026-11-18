@@ -2,7 +2,7 @@
   "name": "@narumitw/pi-herdr-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Scoped Core-backed Pi subagents with inherited capabilities and bounded nested supervision.",
+  "description": "Launch direct Pi CLI workers with inherited tool permissions in local Core terminals.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -11,7 +11,6 @@
   ],
   "files": [
     "src",
-    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -21,9 +20,8 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
-    "prepack": "bun run build"
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@narumitw/pi-background": "^0.1.0"

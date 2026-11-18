@@ -8,7 +8,7 @@ processes:
       restart: "no"
 
   dev:
-    command: bun run dev
+    command: exec bash scripts/dev-in-core.sh
     working_dir: .
     # `process-compose run dev` gives Pi the terminal directly; `up` uses a PTY.
     is_interactive: true

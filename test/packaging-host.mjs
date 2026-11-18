@@ -1,8 +1,8 @@
 // Copied into a separate npm-installed Pi host by scripts/test-packaging.mjs.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { access, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 assert.ok(process.env.PI_CODING_AGENT_DIR, "Set isolated agent directory before importing Pi");
 const { DefaultResourceLoader, SettingsManager } = await import("@earendil-works/pi-coding-agent");
@@ -29,9 +29,10 @@ try {
   assert.ok(loaded.extensions.some((extension) => extension.commands.has("plan")));
   const herdr = loaded.extensions.find((extension) => extension.commands.has("subagent"));
   assert.ok(herdr);
-  for (const name of ["subagent", "subagent_query", "subagent_wait", "subagent_cancel", "subagent_steer"])
+  for (const name of ["subagent", "subagent_query", "subagent_wait", "subagent_cancel"])
     assert.ok(herdr.tools.has(name));
-  assert.equal(herdr.tools.has("subagent_cleanup"), false);
+  assert.equal(herdr.tools.has("subagent_steer"), false);
+  await access(join(candidate, "packages/pi-herdr-core/src/worker-guard.ts"));
   const shortcuts = loaded.extensions.flatMap((extension) => [...extension.shortcuts.keys()]);
   assert.ok(shortcuts.includes("alt+,"));
   assert.ok(shortcuts.includes("alt+."));
@@ -39,18 +40,6 @@ try {
 } finally {
   loaded.runtime.invalidate("packaging discovery complete");
 }
-
-// The installed child must import without Bun or copied host dependencies. No credentials
-// means it must exit before any SDK session, Core allocation or provider request.
-const childEnv = { ...process.env };
-delete childEnv.PI_HERDR_CREDENTIAL_FILE;
-const child = spawnSync(process.execPath, [join(candidate, "packages/pi-herdr-core/dist/child-entry.js")], {
-  env: childEnv,
-  encoding: "utf8",
-  timeout: 5000,
-});
-assert.equal(child.status, 2);
-assert.match(child.stderr, /missing private child control credential/u);
 
 // Load the real lazy UI via Pi's Jiti mapping, never native-import it against
 // physical host packages in the candidate. Test source and package-directory output.
@@ -63,7 +52,13 @@ await writeFile(
   probe,
   `
 import assert from "node:assert/strict";
+import {execFileSync} from "node:child_process";
+import {resolvePiCli} from "./packages/pi-herdr-core/src/runtime-resolution.ts";
+import workerGuard from "./packages/pi-herdr-core/src/worker-guard.ts";
 export default async function () {
+  assert.equal(typeof workerGuard, 'function');
+  const cli = await resolvePiCli(${JSON.stringify(fileURLToPath(new URL("./node_modules/.bin/pi", import.meta.url)))});
+  assert.match(execFileSync(process.execPath,[cli,'--version'],{ encoding:'utf8' }), /1\\.5\\.1/);
   const source = await import("./packages/pi-plan-mode/src/interactive-ui.ts");
   const generated = await import(${JSON.stringify(`./packages/pi-plan-mode/dist/chunks/${chunk}`)});
   for (const ui of [source, generated]) await (${exerciseUi.toString()})(ui, assert);
@@ -100,7 +95,7 @@ try {
   await rm(probe, { force: true });
 }
 console.log(
-  "Pi 1.5.1: all four extensions, child import, package runtime, and lazy Plan UI/TUI Kit rendered successfully.",
+  "Pi 1.5.1: all four extensions, worker source, package runtime, and lazy Plan UI/TUI Kit rendered successfully.",
 );
 
 async function exerciseUi(ui, assert) {
