@@ -23,6 +23,9 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@narumitw/pi-background": "^0.1.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",

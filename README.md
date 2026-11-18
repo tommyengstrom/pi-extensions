@@ -6,6 +6,8 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 
 - [`packages/pi-plan-mode`](packages/pi-plan-mode): restricted `/explain` conversation and `/plan` approval workflows; **Alt+M** cycles Normal → Explain → Plan → Normal.
 - [`packages/pi-artifacts`](packages/pi-artifacts): background text artifact agents with confined native writes and persistent feedback conversations.
+- [`packages/pi-herdr-core`](packages/pi-herdr-core): Core-backed `/subagent <query>`, nested delegation, steering, retained terminals and human-only cleanup.
+- [`packages/pi-background`](packages/pi-background): internal shared workflow-context and completion-notification library (not an extension).
 - [`packages/pi-thinking-shortcuts`](packages/pi-thinking-shortcuts): Codex-style **Alt+,** / **Alt+.** to decrease/increase thinking effort.
 - [`packages/pi-tui-kit`](packages/pi-tui-kit): the internal UI library used by Plan mode for menus, questionnaires, status widgets, and other terminal interactions.
 
@@ -13,7 +15,7 @@ All packages retain their source, tests, documentation, and licenses. TUI Kit ha
 
 ## Install from GitHub
 
-With Pi 1.5.0 installed, install **all three extensions from one reference**:
+With Pi 1.5.1 installed, install **all four extensions from one reference**:
 
 ```sh
 pi install git:github.com/tommyengstrom/pi-extensions
@@ -21,7 +23,7 @@ pi install git:github.com/tommyengstrom/pi-extensions
 
 Restart Pi or run `/reload`, then use `/plan` and **Alt+,** / **Alt+.**. Only pushed commits are available through GitHub; local changes in this checkout are not installed by that command. Extensions execute with Pi's permissions, so review and trust the source before installation.
 
-Consumers need Git, npm, a Node version compatible with Pi 1.5.0, and enabled installation scripts—**not Bun**, an `npmCommand` override, or a manual build. Pi's default production npm install runs a Node-only root `postinstall`: it transpiles this workspace's TUI Kit to JavaScript and builds Plan mode's split package runtime. Artifacts and thinking shortcuts remain source-loaded. Artifacts require Node's built-in `node:sqlite` support (available in the workspace's Node 26). Pi supplies its own host packages; they are not installed as physical runtime dependencies here.
+Consumers need Git, npm, a Node version compatible with Pi 1.5.1, and enabled installation scripts—**not Bun**, an `npmCommand` override, or a manual build. Pi's default production npm install runs a Node-only root `postinstall`: it transpiles the shared background library, Herdr's controlled Node child, and TUI Kit to JavaScript, and builds Plan mode's split package runtime. Artifacts and thinking shortcuts remain source-loaded. Artifacts require Node's built-in `node:sqlite` support (available in the workspace's Node 26). Pi supplies its own host packages; they are not installed as physical runtime dependencies here.
 
 Update the installed reference with:
 
@@ -46,7 +48,7 @@ process-compose run dev
 
 The flake supplies Bun 1.4.4, Node 26.13.0, and process-compose. `process-compose run dev` attaches Pi directly to the terminal; `process-compose up dev` is the interactive PTY/TUI alternative. The dev job waits for a successful `install` job, which runs `bun install --frozen-lockfile` in this workspace. Use `process-compose run install` from the repository root for installation only.
 
-The dev job runs `bun run dev` here: it builds TUI Kit, typechecks artifacts, then builds Plan mode and typechecks thinking shortcuts, and starts Pi with only the three local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
+The dev job runs `bun run dev` here: it builds the background library and TUI Kit before their consumers, including Herdr's child runtime, and starts Pi with only the four local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
 
 This workspace declares `packageManager: bun@1.4.4` and uses `bun.lock`, not `package-lock.json`. `bunfig.toml` configures a hoisted linker, a three-day minimum release age (excluding the local TUI Kit package), and `run.bun = false` with the system shell. Node remains the runtime; do not use `--bun`. Only `esbuild` is trusted for dependency lifecycle scripts. The root pins it and globally overrides all copies, including transitive ones, to `0.28.2`; this preserves version-specific approval despite Bun's name-only `trustedDependencies`. Review lifecycle approval when changing that version. For intentional dependency/lockfile updates, run `bun install` here and review the resulting changes; regular installs use the frozen process-compose job.
 
@@ -56,6 +58,8 @@ Run checks from the **repository root**:
 process-compose run check           # Builds/static checks, no tests
 process-compose run test-plan-mode  # Plan mode extension tests
 process-compose run test-artifacts  # Artifact extension tests
+process-compose run test-background # Shared notification library tests
+process-compose run test-herdr-core      # Core-backed delegation tests
 process-compose run test-tui-kit    # TUI Kit library tests
 process-compose run test-thinking-shortcuts # Thinking shortcut extension tests
 ```
@@ -65,7 +69,7 @@ These jobs belong to the `tests` namespace and are disabled by default; each com
 Other scripts, also run from the **repository root**:
 
 ```sh
-bun run build                 # TUI Kit, artifacts, Plan mode, then thinking shortcuts
+bun run build                 # Libraries before consumers; includes the Node child
 bun run typecheck             # Build, then typecheck packages and tests
 bun run format                # Apply Biome formatting
 bun run lint                  # Run Biome linting
@@ -75,7 +79,9 @@ node scripts/test-packaging.mjs # Or: bun run test:packaging (network-backed)
 
 Use `bun run test`, not `bun test` (Bun's different test runner). Do not run builds, checks, or tests concurrently because they rebuild TUI Kit.
 
-The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.0 host. It checks manifest discovery, all three extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
+The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.1 host. It checks manifest discovery, all four extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
+
+When process-compose is already running, use its existing server (`process-compose process restart check`, then `process-compose process logs check`) rather than starting a second server on the same port. Run jobs sequentially. The deterministic subprocess acceptance check `node packages/pi-herdr-core/test/acceptance.mjs` uses mocked Core and a local fake provider; real Core acceptance remains a separate manual check with no paid-provider testing without approval.
 
 For local development package-directory loading, build first (Git installation does this automatically):
 

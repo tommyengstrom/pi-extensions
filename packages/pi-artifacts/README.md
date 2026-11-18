@@ -55,6 +55,12 @@ without forcing a continuation, interrupting a question dialog, or fabricating a
 user message. `artifact_wait` explicitly supplies dependency results and suppresses
 its redundant notification.
 
+### Shared passive completion delivery
+
+Artifacts and Herdr now share one bounded runtime notification dispatcher. Artifact completion remains passive: it does not initiate an idle model turn. Blocking questions, Plan review, compaction and pending user work hold delivery. Wait/result receipts use stable event IDs and committed transcript evidence; an uncommitted proposed boundary does not consume a result. No exactly-once or reload-replay guarantee is claimed. Durable job results remain queryable even if a crash loses their automatic notification.
+
+Each launch captures its recipient scope before admission. Plan workflow/mode replacement revokes that recipient synchronously and cancels associated execution, so late completion cannot enter a later mode. The existing SDK runner, confined writes, SQLite store, references, service protocol and readiness/omission rules remain in place; artifacts are not moved into Core terminals.
+
 ## Persistence and enforced tool boundary
 
 Claims, job manifests, ownership, and child JSONL conversations live under

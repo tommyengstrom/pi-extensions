@@ -1,10 +1,18 @@
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-
+import { verifiedSubagentTools } from "@narumitw/pi-background";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 
 export const EXPLAIN_DENIED_HELPERS: readonly string[] = ["plan_mode_complete", ...IMPLEMENTATION_HELPERS];
 export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"] as const;
 const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+const legacyDefaultCatalogues = new WeakSet<readonly ToolInfo[]>();
+/** Preserve pre-delegation implicit defaults on restored workflows without hiding
+ * tools from explicit selection UIs or changing any saved explicit selection. */
+export function legacyDefaultCatalogue(tools: readonly ToolInfo[]): ToolInfo[] {
+  const copy = [...tools];
+  legacyDefaultCatalogues.add(copy);
+  return copy;
+}
 
 /** Pi only honors terminate when every result in the top-level batch terminates. */
 export function standaloneToolCall(ctx: ExtensionContext, name: string): boolean {
@@ -16,24 +24,23 @@ export function standaloneToolCall(ctx: ExtensionContext, name: string): boolean
   return calls.length === 1 && calls[0].name === name;
 }
 
-/** Only Pi's canonical core implementations are trusted without an explicit selection. */
+/** Canonical native tools plus verified Herdr implementations; names alone grant nothing. */
 export function defaultPlanTools(tools: readonly ToolInfo[]): string[] {
-  return DEFAULT_TOOL_NAMES.filter((name) =>
-    tools.some(
-      (tool) =>
-        tool.name === name &&
-        tool.sourceInfo?.source === "builtin" &&
-        tool.sourceInfo.path === `builtin:${name}` &&
-        tool.exposure !== "hidden",
+  return [
+    ...DEFAULT_TOOL_NAMES.filter((name) =>
+      tools.some(
+        (tool) =>
+          tool.name === name &&
+          tool.sourceInfo?.source === "builtin" &&
+          tool.sourceInfo.path === `builtin:${name}` &&
+          tool.exposure !== "hidden",
+      ),
     ),
-  );
+    ...(legacyDefaultCatalogues.has(tools) ? [] : verifiedSubagentTools(tools)),
+  ];
 }
 
-/**
- * Resolve exact allowed names separately from the direct model loadout. Core
- * gates every host-mediated call (including nested calls) against `allowed`.
- * Selecting an orchestrator never implicitly allows any tools it can reach.
- */
+/** Exact allowed names and direct declarations are distinct. Each nested call needs permission. */
 export function resolvePlanTools(
   tools: readonly ToolInfo[],
   selected?: readonly string[],
@@ -48,8 +55,6 @@ export function resolvePlanTools(
   for (const name of requested) {
     if (mode === "explain" && EXPLAIN_DENIED_HELPERS.includes(name)) continue;
     const tool = byName.get(name);
-    // Helpers must be registered just like every other tool; their names alone
-    // do not establish availability or bypass the current host loadout.
     if (!tool || tool.exposure === "hidden") {
       unavailable.push(name);
       continue;

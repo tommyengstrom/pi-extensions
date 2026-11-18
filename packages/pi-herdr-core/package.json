@@ -1,0 +1,43 @@
+{
+  "name": "@narumitw/pi-herdr-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scoped Core-backed Pi subagents with inherited capabilities and bounded nested supervision.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "@narumitw/pi-background": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.1",
+    "@earendil-works/pi-ai": "1.5.1",
+    "@types/node": "^26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

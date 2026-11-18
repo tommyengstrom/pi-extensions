@@ -25,7 +25,7 @@ export class ArtifactJobs {
     readonly store: ArtifactStore,
     readonly owner: string,
     private readonly callbacks: {
-      accepted(job: Job): void;
+      accepted(job: Job, admission?: unknown): void;
       terminal(job: Job): void;
       progress(text: string): void;
     },
@@ -36,6 +36,9 @@ export class ArtifactJobs {
     input: { directory: string; source: string } | { artifactId: string },
     task: string,
     selection: Selection,
+    // Opaque, caller-captured delivery authority. Never resolve it from the current
+    // workflow after admission and never persist it in the store/reference contract.
+    admission?: unknown,
   ): Job {
     if (this.closed) throw new Error("Artifact session has ended.");
     if (!task.trim() || task.length > 32000) throw new Error("Artifact task must contain 1–32000 characters.");
@@ -60,7 +63,7 @@ export class ArtifactJobs {
         model: { provider: captured.model.provider, id: captured.model.id },
         thinkingLevel: captured.thinkingLevel,
       });
-      this.callbacks.accepted(work.job);
+      this.callbacks.accepted(work.job, admission);
     } catch (error) {
       const failed = this.store.failAccepted(work.job, error);
       work.job = failed;

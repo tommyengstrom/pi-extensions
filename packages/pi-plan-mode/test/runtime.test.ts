@@ -42,7 +42,7 @@ const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentToo
 );
 const { IMPLEMENTATION_HELPERS, restoreImplementation } = await import("../src/implementation-state.js");
 const { createPlanStore, planHash } = await import("../src/plan-store.js");
-const { default: planMode } = await import("../src/plan-mode.js");
+const { default: planMode } = await import("../src/background-integration.js");
 const { default: entrypoint } = await import("../src/index.js");
 
 type ReviewAction = Awaited<ReturnType<typeof import("../src/interactive-ui.js").reviewPlan>>;

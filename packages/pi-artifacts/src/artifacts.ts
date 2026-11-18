@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, truncateHead } from "@earendil-works/pi-coding-agent";
+import { backgroundRuntime, type Recipient } from "@narumitw/pi-background";
 import { Type } from "typebox";
 import type { runArtifact, Selection } from "./agent.js";
-import { diagnostic, REFERENCE_ENTRY, record, SERVICE_EVENT, validReference } from "./contract.js";
+import { diagnostic, REFERENCE_ENTRY, record, SERVICE_EVENT } from "./contract.js";
 import { ArtifactJobs } from "./jobs.js";
 import { ArtifactStore, type Job } from "./store.js";
 
@@ -26,24 +27,28 @@ function result(jobs: Job[]) {
     details: { version: 1, artifacts: jobs },
   };
 }
+const eventId = (job: Job) => `artifact:${job.jobId}`;
 export default function artifacts(
   pi: ExtensionAPI,
   dependencies: { run?: typeof runArtifact; agentDir?: string } = {},
 ) {
+  const background = backgroundRuntime(pi);
   let store: ArtifactStore | undefined;
   let jobs: ArtifactJobs | undefined;
   let owner: ExtensionContext["sessionManager"] | undefined;
   let ctx: ExtensionContext | undefined;
   let epoch = 0;
-  let dialog = false;
-  const notifications = new Map<string, Job>();
-  const delivered = new Set<string>();
+  const recipients = new Map<string, Recipient>();
+  const offRevoke = background.onRevoke((scope) => {
+    const ids = [...recipients].filter(([, recipient]) => recipient.scope === scope).map(([id]) => id);
+    if (ids.length) void jobs?.cancelOwned(ids).catch(() => {});
+  });
   async function stop() {
     epoch++;
     const old = jobs;
     jobs = undefined;
     owner = undefined;
-    notifications.clear();
+    recipients.clear();
     try {
       await old?.close();
     } finally {
@@ -59,17 +64,6 @@ export default function artifacts(
     ctx = context;
     owner = context.sessionManager;
     const generation = epoch;
-    delivered.clear();
-    for (const entry of context.sessionManager.getBranch()) {
-      if (
-        entry.type === "custom_message" &&
-        entry.customType === "pi-artifacts-terminal-v1" &&
-        record(entry.details) &&
-        validReference(entry.details)
-      )
-        delivered.add(entry.details.jobId);
-    }
-    // Opening control storage is lazy: merely installing the extension writes nothing.
     function current() {
       return generation === epoch && owner === context.sessionManager;
     }
@@ -81,17 +75,36 @@ export default function artifacts(
           store,
           `${context.sessionManager.getSessionId()}:${randomUUID()}`,
           {
-            accepted(job) {
+            accepted(job, admission) {
               if (!current()) throw new Error("Artifact caller changed before acknowledgement.");
+              if (!record(admission) || typeof admission.session !== "string" || typeof admission.scope !== "string")
+                throw new Error("Artifact admission is missing its original recipient.");
+              const recipient = { session: admission.session, scope: admission.scope };
+              if (!background.owns(recipient, context))
+                throw new Error("Artifact workflow scope was revoked during admission.");
+              recipients.set(job.jobId, recipient);
               pi.appendEntry(REFERENCE_ENTRY, job);
               pi.events.emit(REFERENCE_ENTRY, { sessionId: context.sessionManager.getSessionId(), reference: job });
             },
             terminal(job) {
-              if (!current()) return;
+              const recipient = recipients.get(job.jobId);
+              if (!current() || !recipient || !background.owns(recipient, context)) return;
               pi.appendEntry(REFERENCE_ENTRY, job);
               pi.events.emit(REFERENCE_ENTRY, { sessionId: context.sessionManager.getSessionId(), reference: job });
-              if (!delivered.has(job.jobId)) notifications.set(job.jobId, job);
-              if (context.hasUI) context.ui.setStatus("pi-artifacts", `artifact ${job.status}`);
+              const queued = background.enqueue({
+                ...recipient,
+                id: eventId(job),
+                jobId: job.jobId,
+                topic: "artifact-result",
+                summary: diagnostic(`${job.jobId}: ${job.status}\n${job.summary}`).slice(0, 2000),
+                result: job.directory,
+                wake: false,
+              });
+              if (context.hasUI)
+                context.ui.setStatus(
+                  "pi-artifacts",
+                  `artifact ${job.status}${queued === "full" ? " (query result)" : ""}`,
+                );
             },
             progress(text) {
               if (current() && context.hasUI) context.ui.setStatus("pi-artifacts", diagnostic(text));
@@ -109,39 +122,16 @@ export default function artifacts(
   };
   pi.on("session_start", (_event, context) => start(context));
   pi.on("session_tree", (_event, context) => start(context));
-  pi.on("session_shutdown", () => stop());
+  pi.on("session_shutdown", async () => {
+    offRevoke();
+    offService();
+    await stop();
+  });
   pi.on("agent_settled", async (event) => {
     if (event.aborted) await jobs?.cancelOwned();
   });
-  pi.on("ui_prompt_start", () => {
-    dialog = true;
-  });
-  pi.on("ui_prompt_end", () => {
-    dialog = false;
-  });
-  pi.on("turn_end", (event, context) => {
-    if (dialog || owner !== context.sessionManager || event.outcome !== "completed") return;
-    const ready = [...notifications.values()].filter((job) => !delivered.has(job.jobId)).slice(0, 20);
-    if (!ready.length) return;
-    for (const job of ready) {
-      delivered.add(job.jobId);
-      notifications.delete(job.jobId);
-    }
-    return {
-      entries: [
-        ...event.entries,
-        ...ready.map((job) => ({
-          type: "custom_message" as const,
-          customType: "pi-artifacts-terminal-v1",
-          content: result([job]).content[0].text,
-          display: false,
-          details: job,
-        })),
-      ],
-    };
-  });
-  // Synchronous registration of an async reply avoids depending on event-bus await semantics.
-  pi.events.on(SERVICE_EVENT, (value) => {
+  // Synchronous registration of an async reply avoids event-bus await assumptions.
+  const offService = pi.events.on(SERVICE_EVENT, (value) => {
     if (
       !record(value) ||
       value.version !== 1 ||
@@ -182,8 +172,13 @@ export default function artifacts(
     parameters: Type.Object({ directory: Type.String({ minLength: 1, maxLength: 4096 }), task }),
     async execute(_id, params, signal, _update, context) {
       signal?.throwIfAborted();
+      const recipient = background.recipient(context);
       const selected = selection(context);
-      return result([getJobs().submit({ directory: params.directory, source: context.cwd }, params.task, selected)]);
+      if (!background.owns(recipient, context))
+        throw new Error("Artifact workflow scope was revoked before admission.");
+      return result([
+        getJobs().submit({ directory: params.directory, source: context.cwd }, params.task, selected, recipient),
+      ]);
     },
   });
   pi.registerTool({
@@ -194,8 +189,11 @@ export default function artifacts(
     parameters: Type.Object({ artifactId: id, task }),
     async execute(_id, params, signal, _update, context) {
       signal?.throwIfAborted();
+      const recipient = background.recipient(context);
       const selected = selection(context);
-      return result([getJobs().submit({ artifactId: params.artifactId }, params.task, selected)]);
+      if (!background.owns(recipient, context))
+        throw new Error("Artifact workflow scope was revoked before admission.");
+      return result([getJobs().submit({ artifactId: params.artifactId }, params.task, selected, recipient)]);
     },
   });
   pi.registerTool({
@@ -218,11 +216,16 @@ export default function artifacts(
       const manager = getJobs();
       const results = await manager.wait(params.jobIds, signal);
       if (current !== epoch || manager !== jobs) throw new Error("Artifact wait belongs to a replaced session.");
+      const ids: string[] = [];
       for (const job of results) {
-        delivered.add(job.jobId);
-        notifications.delete(job.jobId);
+        const recipient = recipients.get(job.jobId);
+        if (recipient && background.owns(recipient)) {
+          background.resultDetails(recipient, [eventId(job)]);
+          ids.push(eventId(job));
+        }
       }
-      return result(results);
+      const output = result(results);
+      return { ...output, details: { ...output.details, backgroundEventIds: ids } };
     },
   });
   pi.registerTool({

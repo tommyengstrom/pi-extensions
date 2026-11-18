@@ -15,6 +15,8 @@
       pkgsFor = system: import nixpkgs { inherit system; };
     in
     {
+      packages = forAllSystems (system: { inherit (pkgsFor system) herdr-core; });
+
       devShells = forAllSystems (
         system:
         let
@@ -32,6 +34,7 @@
               nodejs_26
               bun
               process-compose
+              herdr-core
               git
               (neovim.override {
                 viAlias = true;
