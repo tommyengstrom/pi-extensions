@@ -17,6 +17,19 @@
         "vitest": "^5.0.5",
       },
     },
+    "packages/pi-activity-digest": {
+      "name": "pi-activity-digest",
+      "version": "0.1.0",
+      "dependencies": {
+        "@narumitw/pi-tui-kit": "^0.69.0",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-agent-core": "*",
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+      },
+    },
     "packages/pi-artifacts": {
       "name": "pi-artifacts",
       "version": "0.0.0",
@@ -85,6 +98,15 @@
       "peerDependencies": {
         "@earendil-works/pi-ai": "*",
         "@earendil-works/pi-coding-agent": "*",
+      },
+    },
+    "packages/pi-tool-summary": {
+      "name": "pi-tool-summary",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
       },
     },
     "packages/pi-tui-kit": {
@@ -542,9 +564,13 @@
 
     "path-key": ["path-key@3.1.1", "", {}, ""],
 
+    "pi-activity-digest": ["pi-activity-digest@workspace:packages/pi-activity-digest"],
+
     "pi-artifacts": ["pi-artifacts@workspace:packages/pi-artifacts"],
 
     "pi-thinking-shortcuts": ["pi-thinking-shortcuts@workspace:packages/pi-thinking-shortcuts"],
+
+    "pi-tool-summary": ["pi-tool-summary@workspace:packages/pi-tool-summary"],
 
     "picocolors": ["picocolors@1.1.1", "", {}, ""],
 

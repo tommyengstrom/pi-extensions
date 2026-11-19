@@ -8,6 +8,8 @@ import {
 import {
   ARTIFACT_TOOL_NAMES,
   backgroundRuntime,
+  DELEGATION_EVENT,
+  type Delegate,
   type Recipient,
   STATUS_EVENT,
   SUBAGENT_TOOL_NAMES,
@@ -42,6 +44,7 @@ export default function herdr(pi: ExtensionAPI): void {
   };
   pi.on("session_tree", stop);
   pi.on("session_shutdown", async () => {
+    offDelegate();
     offStatus();
     offRevoke();
     await stop();
@@ -55,7 +58,13 @@ export default function herdr(pi: ExtensionAPI): void {
     changed();
   });
   pi.on("tool_execution_end", changed);
-  const perform: OperationHandler = async (op, input, ctx, signal) => {
+  const perform = async (
+    op: Parameters<OperationHandler>[0],
+    input: Record<string, unknown>,
+    ctx: Parameters<OperationHandler>[2],
+    signal?: AbortSignal,
+    plan?: string,
+  ) => {
     signal?.throwIfAborted();
     const recipient = background.recipient(ctx);
     const valid = () => background.owns(recipient, ctx);
@@ -70,7 +79,7 @@ export default function herdr(pi: ExtensionAPI): void {
         throw new Error("subagent is not selected in the current tool policy.");
       if (typeof input.task !== "string" || (input.agent !== undefined && typeof input.agent !== "string"))
         throw new Error("Expected a task and optional profile name");
-      const request = { task: input.task, agent: input.agent as string | undefined };
+      const request = { task: input.task, agent: input.agent as string | undefined, plan };
       const parent = process.env.HC_TERMINAL_ID;
       const socket = process.env.HC_TERMINAL_SOCKET;
       if (!parent || !socket)
@@ -115,8 +124,15 @@ export default function herdr(pi: ExtensionAPI): void {
         ctx.cwd,
         (dir) => prepareWorker(pi, ctx, getAgentDir(), dir, request, candidates, restriction?.guidance),
         signal,
+        plan === undefined,
       );
       if (!valid()) throw new Error("Scope changed during launch.");
+      if (plan !== undefined) {
+        const settled = await workers.finish(job.id, scope);
+        if (!valid()) throw new Error("Worker scope changed.");
+        signal?.throwIfAborted();
+        return { job: settled };
+      }
       return { job };
     }
     const jobs = workers?.list(scope) ?? [];
@@ -132,6 +148,15 @@ export default function herdr(pi: ExtensionAPI): void {
       return { job, ...background.resultDetails(recipient, [`herdr:${id}`]) };
     return { job: brief(job) };
   };
+  const delegate: Delegate = async (ctx, { task, plan }, signal) => {
+    const { job } = (await perform("launch", { task }, ctx, signal, plan)) as { job: Job };
+    return terminalText(
+      `${job.state}: ${job.result ?? "Inspect the retained terminal."}${job.resultPath ? `\nFull result: ${job.resultPath}` : ""}`,
+    );
+  };
+  const offDelegate = pi.events.on(DELEGATION_EVENT, (respond) => {
+    if (typeof respond === "function") respond(delegate);
+  });
   registerSubagentTools(pi, perform);
   pi.registerCommand("subagent", {
     description: "Delegate a task: /subagent [--agent PROFILE] TASK",

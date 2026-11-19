@@ -50,11 +50,11 @@ export async function prepareWorker(
   ctx: ExtensionContext,
   agentDir: string,
   directory: string,
-  input: { task: string; agent?: string },
+  input: { task: string; agent?: string; plan?: string },
   candidates: ReturnType<typeof captureCapabilities>,
   guidance?: string,
 ) {
-  if (!input.task.trim() || Buffer.byteLength(input.task) > 32000)
+  if (!input.task.trim() || (input.plan === undefined && Buffer.byteLength(input.task) > 32000))
     throw new Error("Expected a nonempty task of at most 32000 bytes.");
   if (!ctx.model) throw new Error("Select a model before delegating.");
   if (
@@ -93,6 +93,13 @@ export async function prepareWorker(
       .join("\n\n"),
     { mode: 0o600, flag: "wx" },
   );
+  // A complete saved plan may exceed the OS limit for one argv element.
+  let prompt = `Delegated task:\n${input.task}`;
+  if (input.plan !== undefined) {
+    const path = join(directory, "completion-task.md");
+    await writeFile(path, `${prompt}\n\nCurrent saved plan (Markdown):\n${input.plan}`, { mode: 0o600, flag: "wx" });
+    prompt = `@${path}`;
+  }
   const argv = [
     process.execPath,
     cli,
@@ -117,7 +124,7 @@ export async function prepareWorker(
     ...(names.length ? ["--tools", names.join(",")] : ["--no-tools"]),
     "--append-system-prompt",
     join(directory, "guidance.txt"),
-    `Delegated task:\n${input.task}`,
+    prompt,
   ];
   return { argv, omissions: capabilities.omissions };
 }

@@ -5,17 +5,14 @@ import { backgroundRuntime, readWorkflow, STATUS_EVENT, SUBAGENT_TOOL_NAMES } fr
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { backgroundFixture } from "../../../test/background-fixture.js";
-import type { VerificationInput } from "../src/verification.js";
 
 const saved = vi.hoisted(() => ({
   pi: undefined as ExtensionAPI | undefined,
-  verify: undefined as ((input: VerificationInput) => Promise<unknown>) | undefined,
   executed: 0,
 }));
 vi.mock("../src/plan-mode.js", () => ({
-  default: async (pi: ExtensionAPI, dependencies: { verify: typeof saved.verify }) => {
+  default: async (pi: ExtensionAPI) => {
     saved.pi = pi;
-    saved.verify = dependencies.verify;
     saved.executed = 0;
     pi.registerTool({
       name: "plan_mode_complete",
@@ -167,30 +164,6 @@ describe("Plan-owned background integration", () => {
     expect(f.runtime.owns(next)).toBe(true);
     saved.pi!.appendEntry(PLAN_STATE_ENTRY, { kind: "ready", workflow, document: { path: "/project/plan.md" } });
     expect(readWorkflow(f.pi.events, "session")?.held).toBe(true);
-    await f.emit("session_shutdown");
-  });
-  it("filters background tools before invoking isolated adherence verification", async () => {
-    const f = backgroundFixture();
-    const verify = vi.fn(async () => ({
-      report: { status: "ok" as const, motivation: "Fixture" },
-      model: { provider: "fake", id: "fake" },
-    }));
-    await planWithBackground(f.pi, { verify });
-    const input = {
-      implementation: {
-        toolIdentities: [{ name: "read" }, { name: "subagent" }, { name: "subagent_query" }],
-        tools: ["read", "subagent"],
-      },
-    } as unknown as VerificationInput;
-    await saved.verify!(input);
-    expect(verify).toHaveBeenCalledWith(
-      expect.objectContaining({
-        implementation: expect.objectContaining({
-          toolIdentities: [{ name: "read" }],
-          tools: ["read"],
-        }),
-      }),
-    );
     await f.emit("session_shutdown");
   });
 });

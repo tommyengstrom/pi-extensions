@@ -8,6 +8,8 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 - [`packages/pi-artifacts`](packages/pi-artifacts): background text artifact agents with confined native writes and persistent feedback conversations.
 - [`packages/pi-herdr-core`](packages/pi-herdr-core): One-shot Pi CLI workers in Core terminals, with optional named profiles and inherited tool restrictions.
 - [`packages/pi-background`](packages/pi-background): internal shared workflow-context and completion-notification library (not an extension).
+- [`packages/pi-activity-digest`](packages/pi-activity-digest): `/digest` opens a separate, locally summarized view of branch activity without changing the transcript.
+- [`packages/pi-tool-summary`](packages/pi-tool-summary): inline tool-call labels with click-to-inspect arguments. Live labels can send the entire tool input, including credentials and file contents, to Luna in a separate, potentially billable request; see the [privacy details](packages/pi-tool-summary/README.md#background-requests).
 - [`packages/pi-thinking-shortcuts`](packages/pi-thinking-shortcuts): Codex-style **Alt+,** / **Alt+.** to decrease/increase thinking effort.
 - [`packages/pi-tui-kit`](packages/pi-tui-kit): the internal UI library used by Plan mode for menus, questionnaires, status widgets, and other terminal interactions.
 
@@ -15,7 +17,7 @@ All packages retain their source, tests, documentation, and licenses. TUI Kit ha
 
 ## Install from GitHub
 
-With Pi 1.5.1 installed, install **all four extensions from one reference**:
+With Pi 1.5.1 installed, install **all six extensions from one reference**:
 
 ```sh
 pi install git:github.com/tommyengstrom/pi-extensions
@@ -48,7 +50,7 @@ process-compose run dev
 
 The flake supplies Bun 1.4.4, Node 26, Herdr Core, and process-compose. The `dev` job launches Pi in a local Core terminal and attaches it to process-compose, so `/subagent` works from the normal dev UI. `process-compose run dev` attaches directly; `process-compose up dev` is the interactive PTY/TUI alternative. Stopping or detaching the job ends its Pi terminal; the finished terminal remains inspectable with `hc read`. The dev job waits for a successful `install` job, which runs `bun install --frozen-lockfile` in this workspace. Use `process-compose run install` from the repository root for installation only.
 
-The dev job runs `bun run dev` here: it builds the background library and TUI Kit before their consumers, and starts Pi with only the four local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
+The dev job runs `bun run dev` here: it builds the background library and TUI Kit before their consumers, and starts Pi with only the six local extensions, avoiding duplicate loading of installed copies. Extensions execute with Pi's permissions; only load code you trust. Use `/plan` to open Plan mode.
 
 This workspace declares `packageManager: bun@1.4.4` and uses `bun.lock`, not `package-lock.json`. `bunfig.toml` configures a hoisted linker, a three-day minimum release age (excluding the local TUI Kit package), and `run.bun = false` with the system shell. Node remains the runtime; do not use `--bun`. Only `esbuild` is trusted for dependency lifecycle scripts. The root pins it and globally overrides all copies, including transitive ones, to `0.28.2`; this preserves version-specific approval despite Bun's name-only `trustedDependencies`. Review lifecycle approval when changing that version. For intentional dependency/lockfile updates, run `bun install` here and review the resulting changes; regular installs use the frozen process-compose job.
 
@@ -61,6 +63,8 @@ process-compose run test-artifacts  # Artifact extension tests
 process-compose run test-background # Shared notification library tests
 process-compose run test-herdr-core      # Core-backed delegation tests
 process-compose run test-tui-kit    # TUI Kit library tests
+process-compose run test-activity-digest    # Activity digest extension tests
+process-compose run test-tool-summary       # Inline tool summary tests
 process-compose run test-thinking-shortcuts # Thinking shortcut extension tests
 ```
 
@@ -79,7 +83,7 @@ node scripts/test-packaging.mjs # Or: bun run test:packaging (network-backed)
 
 Use `bun run test`, not `bun test` (Bun's different test runner). Do not run builds, checks, or tests concurrently because they rebuild TUI Kit.
 
-The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.1 host. It checks manifest discovery, all four extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
+The explicit packaging smoke check stages the current candidate outside the checkout, uses an isolated npm cache/config and a PATH without Bun, and tests cold, repeat, and update-cleanup installs through a separate Pi 1.5.1 host. It checks manifest discovery, all six extensions, and lazy Plan mode UI rendering without credentials or model requests. Network/install/loader failures fail the check; this is intentionally outside timed Vitest tests.
 
 When process-compose is already running, use its existing server (`process-compose process restart check`, then `process-compose process logs check`) rather than starting a second server on the same port. Run jobs sequentially. After `bun run build`, `nix develop -c node packages/pi-herdr-core/test/acceptance.mjs` checks delegation against a real isolated Core server and a deterministic local provider without API charges. For a persistent Pi terminal managed manually rather than by process-compose, follow the [Core launch instructions](packages/pi-herdr-core/README.md#use).
 

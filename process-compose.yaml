@@ -61,6 +61,22 @@ processes:
     availability:
       restart: "no"
 
+  test-activity-digest:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-activity-digest/test/
+    working_dir: .
+    availability:
+      restart: "no"
+
+  test-tool-summary:
+    namespace: tests
+    disabled: true
+    command: bun install --frozen-lockfile && bun run test packages/pi-tool-summary/test/
+    working_dir: .
+    availability:
+      restart: "no"
+
   test-thinking-shortcuts:
     namespace: tests
     disabled: true

@@ -57,6 +57,11 @@ export class Workers {
     }
     return { ...r.job };
   }
+  async finish(id: string, scope: string) {
+    const run = this.get(id, scope);
+    await run.done;
+    return { ...run.job };
+  }
   async cancel(id: string, scope: string) {
     this.get(id, scope).cancel = true;
     return this.wait(id, scope, 16000);
@@ -74,6 +79,7 @@ export class Workers {
     cwd: string,
     prepare: (directory: string) => Promise<{ argv: string[]; omissions: string[] }>,
     signal?: AbortSignal,
+    enqueueResult = true,
   ) {
     if (this.closed || !this.owns(scope)) throw new Error("Worker scope revoked");
     if ([...this.runs.values()].filter((r) => active(r.job)).length >= 4)
@@ -201,7 +207,7 @@ export class Workers {
         job.result = terminalText(String(e));
         if (!acknowledged) accepted.reject(e);
       }
-      if (acknowledged && !this.closed && this.owns(scope)) this.completed({ ...job });
+      if (enqueueResult && acknowledged && !this.closed && this.owns(scope)) this.completed({ ...job });
     })();
     return accepted.promise;
   }

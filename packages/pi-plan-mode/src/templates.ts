@@ -9,6 +9,7 @@ export interface PlanTemplate {
   label: string;
   description: string;
   content: string;
+  completionPrompt?: string;
   source: "builtin" | "user";
 }
 
@@ -56,7 +57,7 @@ export function parseUserTemplate(id: string, rawMarkdown: string): PlanTemplate
     const { frontmatter } = parseFrontmatter<Record<string, unknown>>(header[0]);
     if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter))
       throw new Error(`Invalid plan template ${id}: frontmatter must be an object`);
-    for (const key of ["label", "description"] as const) {
+    for (const key of ["label", "description", "on_implementation_complete"] as const) {
       if (key in frontmatter && (typeof frontmatter[key] !== "string" || !frontmatter[key].trim()))
         throw new Error(`Invalid plan template ${id}: ${key} must be a nonempty string`);
     }
@@ -69,6 +70,9 @@ export function parseUserTemplate(id: string, rawMarkdown: string): PlanTemplate
       label: (frontmatter.label as string | undefined)?.trim() ?? defaultLabelFromId(id),
       description: (frontmatter.description as string | undefined)?.trim() ?? "Custom user template",
       content,
+      ...(typeof frontmatter.on_implementation_complete === "string"
+        ? { completionPrompt: frontmatter.on_implementation_complete }
+        : {}),
       source: "user",
     };
   }

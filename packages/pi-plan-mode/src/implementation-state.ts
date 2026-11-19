@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { type PlanDocument, type PlanStorage, planHash, validPlanDocument, validPlanStorage } from "./plan-store.js";
 
 export const IMPLEMENTATION_ENTRY = "pi-plan-implementation";
@@ -11,12 +10,6 @@ export const IMPLEMENTATION_HELPERS = [
   "plan_mode_implementation_status",
   "plan_mode_edit",
 ] as const;
-export interface ToolIdentity {
-  name: string;
-  source: string;
-  path: string;
-  exposure: ToolInfo["exposure"];
-}
 export interface ImplementationState {
   version: 3;
   id: string;
@@ -27,10 +20,8 @@ export interface ImplementationState {
   projectRoot: string;
   plansDirectory?: string;
   storage?: PlanStorage;
-  tools?: string[];
-  toolIdentities: ToolIdentity[];
+  completionPrompt?: string;
   completion?: string;
-  lastCheck?: { status: string; timestamp: string; hash: string };
 }
 export function createImplementation(
   input: Omit<ImplementationState, "version" | "id" | "phase" | "document" | "hash">,
@@ -77,40 +68,22 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
     !validPlanStorage(state.storage ?? { kind: "legacy", plansDirectory: state.plansDirectory }) ||
     !validPlanDocument(state.document) ||
     !hash(state.hash) ||
-    (state.tools !== undefined && !names(state.tools)) ||
+    (state.completionPrompt !== undefined &&
+      (typeof state.completionPrompt !== "string" || !state.completionPrompt.trim())) ||
     (state.completion !== undefined && typeof state.completion !== "string") ||
-    (state.lastCheck !== undefined &&
-      (!record(state.lastCheck) ||
-        !["ok", "minor_issues", "issues", "failed", "cancelled"].includes(String(state.lastCheck.status)) ||
-        typeof state.lastCheck.timestamp !== "string" ||
-        !hash(state.lastCheck.hash))) ||
-    !Array.isArray(state.toolIdentities) ||
-    state.toolIdentities.length > 1000 ||
-    !state.toolIdentities.every(
-      (tool) =>
-        record(tool) &&
-        typeof tool.name === "string" &&
-        typeof tool.source === "string" &&
-        typeof tool.path === "string" &&
-        ["direct", "model-only", "codemode", "deferred", "hidden"].includes(String(tool.exposure)),
-    ) ||
     "revisions" in state ||
     "plan" in state
   )
     throw new Error("Invalid v3 implementation state. No files were changed.");
   const restored = structuredClone(state);
   delete restored.previousTools;
+  delete restored.lastCheck;
+  delete restored.toolIdentities;
+  delete restored.tools;
   return restored as unknown as ImplementationState;
 }
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function names(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.length <= 1000 &&
-    value.every((name) => typeof name === "string" && name.length > 0 && name.length <= 4096)
-  );
 }
 function hash(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);

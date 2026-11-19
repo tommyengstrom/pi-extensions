@@ -30,7 +30,7 @@ Load only extensions you trust: they run with Pi's operating-system permissions.
 2. Let the planner inspect the repository and ask structured questions about material decisions.
 3. The planner calls `plan_mode_complete` with the complete Markdown plan. The result shows the plan and its saved path, then **review opens automatically** in TUI or RPC once the agent settles.
 4. Review the full saved document, then explicitly choose an action. **Implementation never starts without your choice.** **Implement in fresh session** is always the first/default choice; **Implement here** is an explicit alternative. Dismissal leaves the plan ready; use `/plan` to reopen review or if automatic presentation was interrupted.
-5. Implementation remains tracked. Before implementing requested changes, the agent saves localized edits with `plan_mode_edit` or complete replacements with `plan_mode_update` to the **same file**, then continues without another approval dialog. It finishes with `plan_mode_implementation_complete`. A fresh adherence check runs **automatically by default**, against the current file contents snapshotted at check start. Every check exit returns to actual normal mode. Use `/plan verify` to check the retained record again, or `/plan resume` before requesting further implementation changes.
+5. Before implementing requested changes, the agent saves them to the same plan with `plan_mode_edit` or `plan_mode_update`. After implementation and planned tests, it calls `plan_mode_implementation_complete` alone. Completion returns to Normal without a follow-up request by default. If the selected template captured `on_implementation_complete`, completion starts one separate, potentially billable Herdr worker with the configured task and the complete current plan Markdown, not the conversation or implementation transcript. Its final result is shown once; success, failure, or cancellation never starts automatic fixes. Use `/plan resume` before requesting more implementation work.
 
 By default, plans are decision briefs for an equally capable implementer who can inspect the repository but does not have the planning conversation. They preserve consequential choices, context, non-obvious changes, and meaningful verification—not exhaustive mechanical instructions. The built-in templates request a rough range of changed lines: additions plus deletions across source, tests, and documentation, not net growth. Updates change the estimate when scope changes materially; no per-file accounting or false precision is required. This is prompt guidance, not a completion validation rule.
 
@@ -38,7 +38,7 @@ By default, plans are decision briefs for an equally capable implementer who can
 
 Use `/explain` or `/explain start` to enter **Explain** without sending a model message, or `/explain <request>` to enter or follow up with a question. Explain grounds conversational answers in repository evidence, discusses alternatives and improvements, and ends naturally in prose or with a useful structured question. It stays active across turns—even after "thanks" or a request to fix something. It creates no saved plan, naming request, readiness review, or implementation observer.
 
-Coding requires an explicit switch: `/explain exit` returns to Normal for ordinary fixes; `/plan start` or `/plan <request>` starts a new approval workflow in the same conversation. Entering Explain from Plan ends that workflow, retains saved files, and cancels its owned background work. Entering Explain during implementation detaches tracking; exiting never resumes it automatically. After leaving, use `/plan resume` or `/plan verify` explicitly for retained records.
+Coding requires an explicit switch: `/explain exit` returns to Normal for ordinary fixes; `/plan start` or `/plan <request>` starts a new approval workflow in the same conversation. Entering Explain from Plan ends that workflow, retains saved files, and cancels its owned background work. Entering Explain during implementation detaches tracking; exiting never resumes it automatically. After leaving, use `/plan resume` explicitly for retained records.
 
 Explain shares Plan's inspection defaults, explicit tool trust, and `/plan tools` selection. Plan-writing and implementation helpers are always denied in Explain, even if configured explicitly. This is a workflow restriction, **not an OS sandbox**: trusted tool implementations can still mutate state, but Explain's instructions prohibit mutations and plan creation. Selected artifact tools get no plan workspace, association, readiness protocol, or automatic generation guidance; operations requiring plan ownership may reject.
 
@@ -48,7 +48,7 @@ Explain uses [`prompts/explain.md`](./prompts/explain.md), never the plan prompt
 
 When `pi-herdr-core` is loaded, **new** Plan and Explain workflows permit its four verified tools by default: `subagent`, `subagent_query`, `subagent_wait`, and `subagent_cancel`. Names alone do not establish trust: registered package-entrypoint provenance must match. Explicit selections (including `tools: []`) are unchanged. Restored implicit workflows retain their older inspection defaults; new defaults are captured for stable continuation.
 
-Use `/subagent <query>` for a human delegation request. Children inherit the workflow's exact allowed-name ceiling and guidance, excluding parent-only plan/review/implementation and Plan-associated artifact helpers. Controlled terminal/control-record bookkeeping is permitted, not code mutation or approval. Tool permission changes or mode replacement cancel associated work; ordinary turns retain its scope and prompt. The adherence checker excludes background delegation tools, without changing naming/progress observers.
+Use `/subagent <query>` for a human delegation request. Children inherit the workflow's exact allowed-name ceiling and guidance, excluding parent-only plan/review/implementation and Plan-associated artifact helpers. Controlled terminal/control-record bookkeeping is permitted, not code mutation or approval. Tool permission changes or mode replacement cancel associated work; ordinary turns retain its scope and prompt.
 
 Ready-plan publication requires associated subagents to stop and relevant pending results to be retrieved or committed to the transcript. Review freezes new launches and automatic continuation. A child result can never approve implementation. Existing replacement prompts are not rewritten automatically: deliberately adopt the new controlled-delegation guidance if using a custom prompt. See [Herdr documentation](../pi-herdr-core/README.md) for Core requirements, limits, profiles and result references.
 
@@ -76,9 +76,7 @@ design decisions in the plan Markdown too.
 
 Artifacts are **live files, not snapshots**. Continuing a saved plan continues its live
 artifacts. Use another artifact directory for an independent alternative. Exiting Plan
-mode cancels its outstanding jobs, retaining partial output and history. Adherence
-checking excludes every artifact tool, even when selected for planning; it can inspect
-referenced files without generating artifacts.
+mode cancels its outstanding jobs, retaining partial output and history.
 
 When artifact tools are selected, the prompt adds their workspace and readiness rules.
 The template can specify when and how to use artifacts; failed or unfinished jobs still
@@ -100,17 +98,16 @@ untrusted HTML details.
 | `/plan open` | Open the current saved plan in the external editor in TUI (`$VISUAL`, `$EDITOR`, or `vi`) or Pi's editable text dialog in RPC; save the same file without changing mode. |
 | `/plan template [id]` | Choose or switch the active workflow's plan template (triggering an immediate rewrite if a plan is already saved), or set the default template when outside Plan mode. |
 | `/plan implement` | Review the current on-disk plan and explicitly choose implementation here or in a fresh session. |
-| `/plan tools` | Configure shared future inspection tools in normal mode, current Explain/Plan tools while idle, or the isolated checker selection during implementation. |
-| `/plan settings` | Choose the default plan template, tool defaults, checker options, independent progress model/reasoning, or the Naming model. |
+| `/plan tools` | Configure current Explain/Plan permissions, or future inspection defaults outside planning. |
+| `/plan settings` | Choose the default plan template, tool defaults, independent progress model/reasoning, or the Naming model. |
 | `/plan progress` | Toggle reported progress above the editor, including while the agent is busy. |
-| `/plan verify` | Check this session's recorded implementation against its current plan file with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or detachment, before sending fixes. |
 | `/plan artifacts omit <jobId>` | Explicitly agree to omit a failed/cancelled/interrupted artifact from readiness. |
 | `/plan exit` | Leave Plan mode and remove its execution gate; saved files remain. |
 
-Commands require an idle agent with no queued messages, except `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct Explain and planning commands and resume in an interactive mode to review and implement.
+While Pi is working, use **Alt+M**, `/plan start`, `/plan exit`, `/explain`, `/explain exit`, or `/plan tools`. Bare `/plan` opens a next-call selector. The current response and its whole tool batch keep their existing permissions. The latest selection takes effect before the next model call, including an automatic tool follow-up; if the run stops, no extra request is made. Pending choices are discarded on session or tree changes. Review, implementation approval, templates, and commands that send a new prompt still require an idle agent. `/plan progress` remains available during a run. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct Explain and planning commands and resume in an interactive mode to review and implement.
 
-`/plan implement` reads the active workflow's saved file (including planning follow-ups), or the retained implementation record when planning is inactive. It does not regenerate the plan or send a model request until an explicit choice; both destinations use the reviewed current text. Changes during review require another review. `/plan resume` only reactivates tracking without a model request; `/plan open` only edits. There are no `show`, `export`, or `off` aliases. Removed `finalize`, `save`, `prompt`, `cancel`, and `import <path>` commands give migration guidance. Cancel manual checks through their dialog. Other text remains a planning request, including `/plan save bandwidth`. See [command workflows](./docs/command-workflows.md).
+`/plan implement` reads the active workflow's saved file (including planning follow-ups), or the retained implementation record when planning is inactive. It does not regenerate the plan or send a model request until an explicit choice; both destinations use the reviewed current text. Changes during review require another review. `/plan resume` only reactivates tracking without a model request; `/plan open` only edits. There are no `show`, `export`, or `off` aliases. Removed `finalize`, `save`, `prompt`, `cancel`, `verify`, and `import <path>` commands give migration guidance. Other text remains a planning request, including `/plan save bandwidth`. See [command workflows](./docs/command-workflows.md).
 
 ## Mode footer
 
@@ -121,15 +118,14 @@ The coordinated footer is exactly one of these labels:
 - `[Plan <template>]` — before a name is available, for example `[Plan decision-brief]`.
 - `[Plan <template>] stem` — for example, `[Plan decision-brief] support-uploading-images`, including while ready for review.
 - `[Implementing stem]`
-- `[Verifying stem]`
 
-`stem` is the actual filename without `.md`, including any collision suffix. Progress remains a separate panel above the editor. Command hints, readiness hints, verification results, and progress summaries do not appear in the footer. Every verification exit—success, failure, cancellation, or invalidation—returns to actual normal mode with `[Normal]`, not just a changed label. The implementation record remains detached/completed for explicit `/plan verify` or `/plan resume`; starting new planning is independent. The planning prompt's active banner is **PLAN MODE ACTIVE**.
+`stem` is the actual filename without `.md`, including any collision suffix. Progress remains in a separate panel above the editor.
 
 ## Keyboard toggle
 
-**Alt+Shift+M** opens the template picker directly, with the current template marked. Before the first save, selection changes the active plan's template without a model request. After a save, choosing a different template requests a rewrite at the same path. Cancelling or selecting the unchanged current template does nothing. Outside Plan mode, it changes the default for future plans without switching modes. Like Alt+M, it requires an idle agent, no queued messages, and no open Plan command.
+**Alt+Shift+M** opens the template picker directly, with the current template marked. Before the first save, selection changes the active plan's template without a model request. After a save, choosing a different template requests a rewrite at the same path. Cancelling or selecting the unchanged current template does nothing. Outside Plan mode, it changes the default for future plans without switching modes. It requires an idle agent, no queued messages, and no open Plan command.
 
-**Alt+M** cycles **Normal → Explain → Plan → Normal** while the agent is idle with no queued messages. Transitions send no request; leaving drops the restriction without opening review or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
+**Alt+M** cycles **Normal → Explain → Plan → Normal** immediately when idle, or for the next model call while busy. Transitions send no request; leaving drops the restriction without opening review or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
 
 Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
 
@@ -160,7 +156,7 @@ Storage configuration and the workflow's captured storage path remain authoritat
 
 Naming is an **early, separate request** using only the task text, capped at **4,000 characters**. It receives no tools, repository/context files, conversation history, or plan body. Output is capped at **128 tokens**, with a **10-second timeout**, and normalized to a lowercase kebab-case stem of at most **64 characters**. Failure, timeout, or unusable output uses a deterministic fallback. Numeric suffixes resolve collisions without implying revision history. No plan file is created until save.
 
-By default naming uses the configured progress model (`openai/gpt-6-luna` by default), with the lowest reasoning level that model supports. `settings.naming.model` is an independent override, exposed as **Naming model** in `/plan settings`; changing it does not change progress, the main agent, or the checker. **Cost and privacy:** naming is an additional provider request that sends bounded task text to that provider, even before a plan is saved. It does not send planning context. See [settings](./docs/settings.md) for reset and failure behavior.
+By default naming uses the configured progress model (`openai/gpt-6-luna` by default), with the lowest reasoning level that model supports. `settings.naming.model` is an independent override, exposed as **Naming model** in `/plan settings`; changing it does not change progress or the main agent. **Cost and privacy:** naming is an additional provider request that sends bounded task text to that provider, even before a plan is saved. It does not send planning context. See [settings](./docs/settings.md) for reset and failure behavior.
 
 Workflows and plan-document envelopes use **version 3**. Legacy state is rejected without rewriting, migrating, or deleting files. Legacy revision files are excluded from `/plan saved`; there is no implicit continuation or ancestry recovery. Start fresh with `/plan start` and paste Markdown body text into the planning conversation, without a legacy envelope. There is no automatic import or legacy adoption. There is no separate saved-plan index or session-local slot.
 
@@ -189,17 +185,17 @@ Opening assesses immediately, then only changed recorded implementation evidence
 
 This is **reported progress**, not repository inspection: assistant claims and recorded test/tool results do not establish current repository state. The observer has no tools, extensions, MCP, skills, prompt templates, discovered context files or themes, uses an in-memory session, and receives evidence over stdin. Disabling tools is **not an OS sandbox**; ordinary inherited provider configuration/credential mechanisms still apply. Extension-only providers cannot be recreated and fail rather than enabling extensions.
 
-Defaults are independent `progress.model: { "provider": "openai", "id": "gpt-6-luna" }` and `progress.thinkingLevel: "low"`. Use `/plan settings` to choose/reset them; changes apply to the next assessment, never to the main agent or checker. Missing credentials or unsupported models fail without fallback. The identifier must resolve as a chat model: catalogs/configurations that only expose it as a classifier require selecting another supported progress model. Advertised reasoning constraints are shown in the panel. See [settings](./docs/settings.md).
+Defaults are independent `progress.model: { "provider": "openai", "id": "gpt-6-luna" }` and `progress.thinkingLevel: "low"`. Use `/plan settings` to choose/reset them; changes apply to the next assessment, never to the main agent. Missing credentials or unsupported models fail without fallback. The identifier must resolve as a chat model: catalogs/configurations that only expose it as a classifier require selecting another supported progress model. Advertised reasoning constraints are shown in the panel. See [settings](./docs/settings.md).
 
 ## Tools and trust
 
 The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. New workflows also permit the four verified Herdr tools when that extension is loaded. Same-name extension overrides are not trusted defaults. **Permission is not activation:** Plan and Explain check calls at execution time. Unpermitted tools can still be visible, and permitting an inactive ordinary tool does not enable it. Only workflow helpers are toggled. Leaving either mode removes the gate; it does not reset Pi’s tools. Fresh implementation uses the destination’s native tool set. Old `previousTools` snapshots are ignored, not replayed to repair historical sessions.
 
-Use `/plan tools` while idle to change a planning workflow's selection. In normal mode it configures future planning without entering planning or changing active tools. During implementation it may update the isolated checker's selection only. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools. The checker enforces its own read-only policy in its child session; checking never changes the parent's tool availability.
+Use `/plan tools` to change a planning workflow's selection. In normal mode it configures future planning without entering planning or changing active tools. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools.
 
 **Explicitly selecting a tool trusts its implementation**, including shells, editing tools, MCP tools, and overrides. There is no shell parser or command-level read-only filter. A trusted tool can mutate files, execute code, or affect external systems, even though the default planning prompt instructs the planner not to do so. Tool annotations are not verified permissions. This is an agent workflow restriction, **not an OS sandbox or confidentiality boundary**.
 
-Each host-mediated tool call, including a nested call, must have an allowed exact name during planning. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Ordinary direct and `model-only` selections must already be active in Pi; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The required helpers must be registered and available too. Question/completion helpers are planning-only; `plan_mode_edit` is available in planning and active tracked implementation. Implementation update/status/completion helpers are available only during tracked implementation. All helpers are inactive outside their applicable workflow and excluded from adherence-checker sessions.
+Each host-mediated tool call, including a nested call, must have an allowed exact name during planning. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Ordinary direct and `model-only` selections must already be active in Pi; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The required helpers must be registered and available too. Question/completion helpers are planning-only; `plan_mode_edit` is available in planning and active tracked implementation. Implementation update/status/completion helpers are available only during tracked implementation. All helpers are inactive outside their applicable workflow.
 
 ## Structured questions
 
@@ -217,18 +213,13 @@ The optional settings file is `<getAgentDir()>/pi-plan-mode.json`:
 
 ```json
 {
-  "tools": ["read", "grep", "find", "ls"],
-  "verification": { "automatic": true }
+  "tools": ["read", "grep", "find", "ls"]
 }
 ```
 
 Omit `tools` for strict defaults; `[]` means planning helpers only. Naming preserves the configured storage path. There is no settings watcher: tool defaults are read for future workflows, while an active planning workflow retains its configuration unless you explicitly change its tools. Shortcut settings are loaded once per extension instance and require `/reload` or restart.
 
-Verification settings are read for the next check. Omit `verification.model` to use the current model, or set `{ "provider": "provider-id", "id": "model-id" }`. Automatic checks incur an additional model run; set `verification.automatic` to `false` to opt out.
-
-Checks return a simple verdict—**OK** (green), **Minor issues** (yellow), or **Issues** (red)—and the checker's free-form Markdown motivation. The final report uses provider-enforced strict JSON Schema tool arguments; unsupported providers fail visibly. Execution failures remain separate from verdicts, and recovered inspection errors do not automatically downgrade the assessment. Results are displayed outside the footer.
-
-The checker compares repository evidence with the **current plan contents snapshotted at check start**, its sole plan target. A missing plan file is an explicit error; there is no fallback to reviewed text, approved ancestry, or session-cached contents. Later edits are not covered by that result. Scoped implementation user messages and on-demand transcript inspection supply context, not another plan baseline. This content goes to the selected checker provider. It is **not a general code review**, and findings never trigger an automatic repair loop. Every check exit leaves normal mode with a detached/completed record. See [adherence checks](./docs/adherence-checks.md) for transcript scope, limitations, and tool compatibility.
+See the [custom-template example](./docs/settings.md#built-in-and-custom-templates) to opt into a completion task. None of the four built-ins requests one.
 
 The complete prompts are [`prompts/plan.md`](./prompts/plan.md) and [`prompts/explain.md`](./prompts/explain.md). They are not assembled from instruction fragments. Plan mode appends the selected template body and optional user guidance unchanged after the plan prompt. The plan prompt tells the model to include every template section in order and follow its HTML comments. Only safety, tool permissions, saving, and approval remain general workflow rules:
 

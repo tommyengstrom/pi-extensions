@@ -18,6 +18,7 @@ export interface PlanWorkflow {
   instructions: string;
   template: string;
   templatePrompt: string;
+  completionPrompt?: string;
   tools?: string[];
   artifacts?: PlanArtifacts;
 }
@@ -126,6 +127,8 @@ function validWorkflow(value: unknown): value is PlanWorkflow {
     !validPlanStorage(value.storage ?? { kind: "legacy", plansDirectory: value.plansDirectory }) ||
     typeof value.instructions !== "string" ||
     Buffer.byteLength(value.instructions) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
+    (value.completionPrompt !== undefined &&
+      (typeof value.completionPrompt !== "string" || !value.completionPrompt.trim())) ||
     (value.template !== undefined && !validTemplateName(value.template)) ||
     (value.templatePrompt !== undefined &&
       (typeof value.templatePrompt !== "string" ||

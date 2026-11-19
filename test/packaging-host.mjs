@@ -24,7 +24,9 @@ await loader.reload();
 const loaded = loader.getExtensions();
 try {
   assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions.length, 4);
+  assert.equal(loaded.extensions.length, 6);
+  assert.ok(loaded.extensions.some((extension) => extension.commands.has("tool-view")));
+  assert.ok(loaded.extensions.some((extension) => extension.commands.has("digest")));
   assert.ok(loaded.extensions.some((extension) => extension.tools.has("artifact_create")));
   assert.ok(loaded.extensions.some((extension) => extension.commands.has("plan")));
   const herdr = loaded.extensions.find((extension) => extension.commands.has("subagent"));
@@ -95,7 +97,7 @@ try {
   await rm(probe, { force: true });
 }
 console.log(
-  "Pi 1.5.1: all four extensions, worker source, package runtime, and lazy Plan UI/TUI Kit rendered successfully.",
+  "Pi 1.5.1: all six extensions, worker source, package runtime, and lazy Plan UI/TUI Kit rendered successfully.",
 );
 
 async function exerciseUi(ui, assert) {

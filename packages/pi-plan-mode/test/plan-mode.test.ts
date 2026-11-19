@@ -18,7 +18,6 @@ import * as settingsModule from "../src/settings.js";
 import { DEFAULT_TEMPLATE_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
 import { isPlanning, PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
 import { DEFAULT_PLAN_TEMPLATE, listPlanTemplates, resolvePlanTemplate } from "../src/templates.js";
-import type { VerificationInput, VerificationResult } from "../src/verification.js";
 import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
 
 const roots: string[] = [];
@@ -39,7 +38,7 @@ async function fixture(
     selectSaved?: (documents: PlanDocument[]) => PlanDocument | undefined;
     instructions?: string;
     automatic?: boolean;
-    verify?: (input: VerificationInput) => Promise<VerificationResult>;
+    delegate?: import("@narumitw/pi-background").Delegate;
     progressRunner?: ProgressRunner;
     wrapStore?: (store: PlanStore) => PlanStore;
   } = {},
@@ -104,7 +103,7 @@ async function fixture(
       activity.names++;
       return fallbackPlanName(task);
     },
-    verify: config.verify,
+    delegate: config.delegate,
     progressRunner: config.progressRunner,
     createStore: async (
       directory: string,
@@ -237,10 +236,6 @@ async function replaceBody(path: string, plan: string) {
   assert.ok(raw.startsWith("<!-- pi-plan-document-v3:"));
   await writeFile(path, raw.slice(0, raw.indexOf(" -->\n") + 5) + plan);
 }
-const adherenceResult: VerificationResult = {
-  model: { provider: "offline", id: "checker" },
-  report: { status: "ok", motivation: "Implemented. See `src/example.ts:1`." },
-};
 
 test("Explain enters, follows up and exits without planning side effects, including print and JSON", async () => {
   for (const mode of ["rpc", "print", "json"]) {
@@ -447,7 +442,7 @@ test("Explain menu entry, idle guards, and plan-only guidance", async () => {
   await f.command("");
   assert.equal(f.state().kind, "explain");
   assert.equal(f.statuses.get("plan-mode"), "[Explain]");
-  for (const command of ["open", "implement", "saved", "verify", "resume", "artifacts omit missing"]) {
+  for (const command of ["open", "implement", "saved", "resume", "artifacts omit missing"]) {
     await f.command(command);
     assert.match(f.notifications.at(-1)?.message ?? "", /Explain.*\/plan start/);
     assert.equal(f.state().kind, "explain");
@@ -748,14 +743,19 @@ test("toggle exits a ready plan without implementation or automatic review and p
   assert.equal(state.workflow.hash, undefined);
 });
 
-test("toggle rejects busy and pending states and ignores non-TUI contexts", async () => {
+test("toggle queues the latest mode for the next round and ignores non-TUI contexts", async () => {
   for (const override of [{ isIdle: () => false }, { hasPendingMessages: () => true }]) {
     const f = await fixture();
     Object.assign(f.ctx, override);
     await f.toggle();
     assert.equal(f.state().kind, "idle");
-    assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
+    assert.match(f.notifications.at(-1)?.message ?? "", /Next model call: explain/);
     assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
+    await f.toggle();
+    assert.match(f.notifications.at(-1)?.message ?? "", /Next model call: plan/);
+    await f.emit("agent_settled", { aborted: false });
+    assert.equal(f.state().kind, "planning");
+    assert.deepEqual(f.sentUserMessages, []);
   }
   const f = await fixture();
   for (const mode of ["rpc", "print", "json"]) {
@@ -763,6 +763,23 @@ test("toggle rejects busy and pending states and ignores non-TUI contexts", asyn
     await f.shortcuts.get(DEFAULT_TOGGLE_SHORTCUT)?.handler(f.ctx);
     assert.equal(f.state().kind, "idle");
   }
+});
+
+test("busy tool choices apply at the next boundary, never to the current batch or another branch", async () => {
+  const f = await fixture();
+  await f.explain();
+  Object.assign(f.ctx, { isIdle: () => false });
+  f.chooseTools(["read", "bash"]);
+  await f.command("tools");
+  const call = { toolName: "bash", input: {}, parentToolCallId: "relay" };
+  assert.ok(await f.emit("tool_call", call));
+  await f.emit("turn_end");
+  assert.equal(await f.emit("tool_call", call), undefined);
+  f.chooseTools([]);
+  await f.command("tools");
+  await f.emit("session_tree");
+  await f.emit("agent_settled");
+  assert.equal(await f.emit("tool_call", call), undefined);
 });
 
 test("toggle and commands share a gate across asynchronous entry in either direction", async () => {
@@ -1514,7 +1531,10 @@ test("Implement here sends exactly the reviewed text and restores normal tools",
 });
 
 test("implement fresh transfers manually edited text and plain tracking data, not source history", async () => {
-  const f = await fixture();
+  const f = await fixture({ template: "custom" });
+  const dir = join(f.agentDir, "pi-plan-mode-templates");
+  await mkdir(dir);
+  await writeFile(join(dir, "custom.md"), "---\non_implementation_complete: Summarize the release\n---\n# Plan");
   const saved = await ready(f);
   const edited = "# Manually edited fresh plan";
   await replaceBody(saved.details.path, edited);
@@ -1523,11 +1543,18 @@ test("implement fresh transfers manually edited text and plain tracking data, no
   Object.assign(f.ctx, {
     newSession: async (options: {
       parentSession: string;
-      setup?: unknown;
+      setup: (manager: {
+        appendCustomEntry: (key: string, data: { completionPrompt?: string }) => void;
+      }) => Promise<void>;
       withSession: (ctx: unknown) => Promise<void>;
     }) => {
       assert.match(options.parentSession, /source\.jsonl$/);
-      assert.equal(typeof options.setup, "function");
+      await options.setup({
+        appendCustomEntry: (key, data) => {
+          assert.equal(key, IMPLEMENTATION_ENTRY);
+          assert.equal(data.completionPrompt, "Summarize the release");
+        },
+      });
       await f.emit("session_shutdown");
       await options.withSession({
         sendUserMessage: async (text: string) => {
@@ -1765,7 +1792,7 @@ test("busy progress toggle bypasses command gate without weakening other guards;
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => assert.equal(requests.length, 1));
     assert.ok(Array.isArray(f.widgets.get("plan-progress")));
-    await f.command("start");
+    await f.command("resume");
     assert.match(f.notifications.at(-1)?.message ?? "", /settle/);
     await f.emit("before_agent_start", promptEvent());
     await f.emit("input", { text: "next work", source: "rpc" });
@@ -1783,52 +1810,6 @@ test("busy progress toggle bypasses command gate without weakening other guards;
     assert.match(String(f.widgets.get("plan-progress")), /completed tracking; not verified/);
     await f.emit("session_tree");
     assert.equal(f.widgets.get("plan-progress"), undefined);
-  } finally {
-    vi.useRealTimers();
-    await f.emit("session_shutdown");
-  }
-});
-
-test("progress cannot reopen inactive tracking while adherence checking holds the shared command gate", async () => {
-  const checking = Promise.withResolvers<VerificationResult>();
-  const started = Promise.withResolvers<void>();
-  let assessments = 0;
-  const f = await fixture({
-    verify: async () => {
-      started.resolve();
-      return checking.promise;
-    },
-    progressRunner: async () => {
-      assessments++;
-      return "- Reported work";
-    },
-  });
-  await beginImplementation(f);
-  const ctx = f.ctx as ExtensionContext;
-  Object.assign(ctx.ui, {
-    select: async (_title: string, _options: string[], options: { signal: AbortSignal }) =>
-      new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(undefined), { once: true })),
-  });
-  Object.assign(ctx, { modelRegistry: { find: () => ({ reasoning: false, contextWindow: 128000 }) } });
-  const verification = f.command("verify");
-  await started.promise;
-  assert.equal(f.statuses.get("plan-mode"), "[Verifying untitled-plan]");
-  vi.useFakeTimers();
-  try {
-    await f.command("progress");
-    await vi.advanceTimersByTimeAsync(0);
-    assert.equal(assessments, 0);
-    assert.match(f.notifications.at(-1)?.message ?? "", /No active tracked implementation/);
-    assert.equal(f.widgets.get("plan-progress"), undefined);
-    await f.command("settings");
-    assert.match(f.notifications.at(-1)?.message ?? "", /already open/);
-    await f.command("progress");
-    assert.equal(f.widgets.get("plan-progress"), undefined);
-    checking.resolve(structuredClone(adherenceResult));
-    await verification;
-    assert.equal(implementationOf(f)?.phase, "completed");
-    assert.equal(f.statuses.get("plan-mode"), "[Normal]");
-    assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
   } finally {
     vi.useRealTimers();
     await f.emit("session_shutdown");
@@ -2012,14 +1993,9 @@ test("progress refuses non-interactive mode and absent implementation without in
   }
 });
 
-test("implementation updates retain identity, restore current contents, and verify the current target by default", async () => {
-  const checked: VerificationInput[] = [];
-  const f = await fixture({
-    verify: async (input) => {
-      checked.push(input);
-      return structuredClone(adherenceResult);
-    },
-  });
+test("implementation updates retain identity, restore current contents, and complete without a worker by default", async () => {
+  const delegate = vi.fn();
+  const f = await fixture({ delegate, automatic: true });
   await beginImplementation(f);
   const baseline = implementationOf(f);
   assert.ok(baseline);
@@ -2047,143 +2023,81 @@ test("implementation updates retain identity, restore current contents, and veri
   );
   const completed = await f.execute("plan_mode_implementation_complete", {});
   assert.equal(completed.terminate, true);
-  assert.equal(checked.length, 1);
-  assert.deepEqual(checked[0].target, { document: revised.document, plan: body, hash: planHash(body) });
-  assert.equal("revisions" in checked[0].implementation, false);
+  assert.equal(delegate.mock.calls.length, 0);
   assert.equal(implementationOf(f)?.phase, "completed");
-  assert.equal(implementationOf(f)?.lastCheck?.status, "ok");
-  assert.equal(implementationOf(f)?.lastCheck?.hash, planHash(body));
   assert.equal(f.statuses.get("plan-mode"), "[Normal]");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
   await assert.rejects(f.execute("plan_mode_implementation_complete", {}), /not active/);
   await f.command("resume");
   assert.equal(implementationOf(f)?.phase, "implementing");
-  assert.equal(implementationOf(f)?.lastCheck, undefined);
 });
 
-test("explicit automatic off avoids the checker; manual verification works after exit and ends Normal", async () => {
-  let calls = 0;
-  const f = await fixture({
-    automatic: false,
-    verify: async () => {
-      calls++;
-      return structuredClone(adherenceResult);
-    },
-  });
-  await beginImplementation(f);
-  await f.emit("agent_end");
-  assert.equal(calls, 0);
-  const result = await f.execute("plan_mode_implementation_complete", {});
-  assert.match(result.content[0].text, /not checked/);
-  assert.equal(calls, 0);
-  await f.command("exit");
-  Object.assign(f.ctx, { hasUI: false });
-  await f.command("verify");
-  assert.equal(calls, 1);
-  assert.equal(f.sentMessages.length, 1);
-  assert.equal(implementationOf(f)?.phase, "completed");
-  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
-});
+test.each(["success", "missing service", "failure", "tree", "shutdown"] as const)(
+  "template completion: %s",
+  async (outcome) => {
+    const finished = Promise.withResolvers<string>();
+    const delegate = vi.fn(async () => finished.promise);
+    const f = await fixture({ delegate: outcome === "missing service" ? undefined : delegate });
+    const dir = join(f.agentDir, "pi-plan-mode-templates");
+    await mkdir(dir);
+    const template = join(dir, "custom.md");
+    await writeFile(
+      template,
+      "---\non_implementation_complete: |-\n  Summarize changes.\n  Do not edit.\n---\n# Title",
+    );
+    await f.command("start");
+    await f.command("template custom");
+    await writeFile(template, "# Replacement without hook");
+    const saved = await f.execute("plan_mode_complete", { plan: PLAN });
+    f.choose("here");
+    await f.command("implement");
+    await f.emit("session_start");
+    const latest = `# Current plan\n\n${"x".repeat(40000)}`;
+    await replaceBody(saved.details.path, latest);
+    const pending = f.execute("plan_mode_implementation_complete", {});
+    if (outcome !== "missing service") {
+      await vi.waitFor(() => assert.equal(delegate.mock.calls.length, 1));
+      assert.deepEqual((delegate.mock.calls[0] as unknown[])[1], {
+        task: "Summarize changes.\nDo not edit.",
+        plan: latest,
+      });
+      assert.equal(implementationOf(f)?.phase, "completed");
+      await assert.rejects(f.execute("plan_mode_implementation_complete", {}), /not active/);
+      if (outcome === "tree" || outcome === "shutdown")
+        await f.emit(outcome === "tree" ? "session_tree" : "session_shutdown");
+      if (outcome === "failure") finished.reject(new Error("worker failed"));
+      else finished.resolve("unique-worker-result");
+    }
+    const result = await pending;
+    assert.equal(result.terminate, true);
+    assert.match(
+      result.content[0].text,
+      outcome === "success"
+        ? /unique-worker-result/
+        : outcome === "missing service"
+          ? /unavailable/
+          : outcome === "failure"
+            ? /worker failed/
+            : /cancelled/,
+    );
+    assert.equal(result.content[0].text.split("unique-worker-result").length - 1, outcome === "success" ? 1 : 0);
+    assert.equal(f.sentMessages.length, 0);
+    if (outcome === "success") {
+      await f.emit("session_tree");
+      assert.equal(delegate.mock.calls.length, 1);
+      await f.command("resume");
+      await f.execute("plan_mode_implementation_complete", {});
+      assert.equal(delegate.mock.calls.length, 2);
+    }
+  },
+);
 
-test("verification reads current disk contents, not history or a cached implementation baseline", async () => {
-  const checked: VerificationInput[] = [];
-  const f = await fixture({
-    verify: async (input) => {
-      checked.push(input);
-      return structuredClone(adherenceResult);
-    },
-  });
-  const saved = await beginImplementation(f);
-  const body = "# Current external update\n\nInspect these requirements.";
-  await replaceBody(saved.details.path, body);
-  Object.assign((f.ctx as ExtensionContext).ui, {
-    select: async (_title: string, _options: string[], options: { signal: AbortSignal }) =>
-      new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(undefined), { once: true })),
-  });
-  await f.command("verify");
-  assert.equal(checked.length, 1);
-  assert.equal(checked[0].target.plan, body);
-  assert.equal(checked[0].target.hash, planHash(body));
-  assert.equal(checked[0].target.document.path, saved.details.path);
-  assert.equal("revisions" in checked[0].implementation, false);
-  assert.equal(implementationOf(f)?.lastCheck?.hash, planHash(body));
-  assert.equal(implementationOf(f)?.phase, "completed");
-  assert.equal(f.statuses.get("plan-mode"), "[Normal]");
-  assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
-});
-
-test("removed cancel diagnoses during a pending check; dialog dismissal suppresses late results", async () => {
-  const entered = Promise.withResolvers<VerificationInput>();
-  const finished = Promise.withResolvers<VerificationResult>();
-  const dialog = Promise.withResolvers<string | undefined>();
-  const f = await fixture({
-    verify: async (input) => {
-      entered.resolve(input);
-      return finished.promise;
-    },
-  });
-  const saved = await beginImplementation(f);
-  const bytes = await readFile(saved.details.path, "utf8");
-  Object.assign((f.ctx as ExtensionContext).ui, { select: async () => dialog.promise });
-  const pending = f.command("verify");
-  const input = await entered.promise;
-  const entries = f.entries.length;
-  const messages = f.sentUserMessages.length;
-  await f.command("CaNcEl");
-  assert.match(f.notifications.at(-1)?.message ?? "", /removed.*dialog/);
-  assert.equal(input.signal.aborted, false);
-  assert.equal(f.entries.length, entries);
-  assert.equal(f.sentUserMessages.length, messages);
-  assert.equal(await readFile(saved.details.path, "utf8"), bytes);
-  dialog.resolve(undefined);
-  await Promise.resolve();
-  await Promise.resolve();
-  finished.resolve(structuredClone(adherenceResult));
-  await pending;
-  assert.equal(input.signal.aborted, true);
-  assert.equal(
-    f.entries.some((entry) => entry.customType === "pi-plan-check"),
-    false,
-  );
-  assert.equal(f.statuses.get("plan-mode"), "[Normal]");
-});
-
-test("invalid current document prevents verification and session replacement suppresses stale results", async () => {
-  let calls = 0;
-  const finished = Promise.withResolvers<VerificationResult>();
-  const entered = Promise.withResolvers<void>();
-  const f = await fixture({
-    verify: async () => {
-      calls++;
-      entered.resolve();
-      return finished.promise;
-    },
-  });
-  const saved = await beginImplementation(f);
-  const bytes = await readFile(saved.details.path, "utf8");
-  await writeFile(saved.details.path, "# Invalid: missing identity envelope");
-  const failed = await f.execute("plan_mode_implementation_complete", {});
-  assert.match(failed.content[0].text, /not verified/);
-  assert.equal(calls, 0);
-  await writeFile(saved.details.path, bytes);
-  await f.command("resume");
-  const pending = f.execute("plan_mode_implementation_complete", {});
-  await entered.promise;
-  await f.emit("session_shutdown");
-  Object.defineProperty(f.ctx, "sessionManager", {
-    configurable: true,
-    get: () => {
-      throw new Error("Stale source context touched");
-    },
-  });
-  finished.resolve(structuredClone(adherenceResult));
-  const cancelled = await pending;
-  assert.match(cancelled.content[0].text, /cancelled/);
-  assert.equal(
-    f.entries.filter((entry) => entry.customType === "pi-plan-check").length,
-    1,
-    "only the earlier failed attempt was persisted",
-  );
+test("removed verify never enters planning", async () => {
+  const f = await fixture();
+  await f.command("VeRiFy");
+  assert.match(f.notifications.at(-1)?.message ?? "", /removed/);
+  assert.equal(f.state().kind, "idle");
+  assert.equal(f.sentUserMessages.length, 0);
 });
 
 test("malformed state does not reconstruct a workflow from prose or unrelated entries", () => {
@@ -2336,14 +2250,8 @@ test("continuing a selected document edits it, not another saved document", asyn
   assert.equal((await store.list()).length, 2);
 });
 
-test("implementation edits retain identity, clear checks/completion, restore current contents and keep running", async () => {
-  const checked: VerificationInput[] = [];
-  const f = await fixture({
-    verify: async (input) => {
-      checked.push(input);
-      return structuredClone(adherenceResult);
-    },
-  });
+test("implementation edits retain identity, clear completion, restore current contents and keep running", async () => {
+  const f = await fixture();
   const first = await beginImplementation(f);
   const baseline = implementationOf(f);
   assert.ok(baseline);
@@ -2362,7 +2270,7 @@ test("implementation edits retain identity, clear checks/completion, restore cur
   assert.equal(revised.document.id, baseline.document.id);
   assert.equal(revised.document.path, first.details.path);
   assert.equal(revised.hash, planHash(PLAN.replace("material", "important")));
-  assert.equal(revised.lastCheck, undefined);
+  assert.ok(!("lastCheck" in revised));
   assert.equal(revised.completion, undefined);
   assert.equal("revisions" in revised, false);
   await assert.rejects(editPlan(f, join(f.cwd, "other.md"), "important", "obsolete"), /current/i);
@@ -2380,10 +2288,6 @@ test("implementation edits retain identity, clear checks/completion, restore cur
   assert.equal(f.reviews.length, 1, "implementation edits do not request approval again");
   assert.equal(f.sentUserMessages.length, 1, "only the implementation kickoff is sent");
   await f.execute("plan_mode_implementation_complete", {});
-  assert.equal(checked.length, 1);
-  assert.equal(checked[0].target.plan, finalBody);
-  assert.equal(checked[0].target.hash, planHash(finalBody));
-  assert.equal(implementationOf(f)?.lastCheck?.status, "ok");
 });
 
 test.each(["planning", "implementing"] as const)(

@@ -12,11 +12,7 @@ afterEach(() => vi.useRealTimers());
 function fixture() {
   vi.useFakeTimers();
   let plan = "# Plan\nImplement tests.";
-  const state = createImplementation(
-    { projectRoot: "/project", storage: { kind: "repo" }, toolIdentities: [] },
-    planDocument(),
-    plan,
-  );
+  const state = createImplementation({ projectRoot: "/project", storage: { kind: "repo" } }, planDocument(), plan);
   const transcript = implementationTranscript([], state.id);
   const ctx = createMockContext({
     mode: "rpc",

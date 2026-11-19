@@ -1,18 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  backgroundRuntime,
-  backgroundStatus,
-  SUBAGENT_TOOL_NAMES,
-  type WorkflowContext,
-  WorkflowScope,
-} from "@narumitw/pi-background";
+import { backgroundRuntime, backgroundStatus, type WorkflowContext, WorkflowScope } from "@narumitw/pi-background";
 import { ARTIFACT_TOOLS } from "./artifacts.js";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 import planMode from "./plan-mode.js";
 import { buildPlanModePrompt } from "./prompt.js";
 import { isPlanning, isRestricted, PLAN_STATE_ENTRY, type PlanState, restorePlanState } from "./state.js";
 import { defaultPlanTools, legacyDefaultCatalogue, PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
-import { runVerification } from "./verification.js";
 
 /** Plan-owned adapter. Herdr never imports Plan or interprets its persisted state. */
 export default async function planWithBackground(
@@ -163,25 +156,7 @@ export default async function planWithBackground(
       });
     },
   };
-  await planMode(wrapped, {
-    ...dependencies,
-    verify(input) {
-      // Isolated adherence checks must never load the delegation supervisor, even
-      // when the planning defaults captured its five tools for the main workflow.
-      const forbidden = new Set<string>(SUBAGENT_TOOL_NAMES);
-      const isolated = {
-        ...input,
-        implementation: {
-          ...input.implementation,
-          toolIdentities: input.implementation.toolIdentities.filter((tool) => !forbidden.has(tool.name)),
-          ...(input.implementation.tools
-            ? { tools: input.implementation.tools.filter((name) => !forbidden.has(name)) }
-            : {}),
-        },
-      };
-      return (dependencies?.verify ?? runVerification)(isolated);
-    },
-  });
+  await planMode(wrapped, dependencies);
   const restored = (context: ExtensionContext) => {
     ctx = context;
     readRestored(context);

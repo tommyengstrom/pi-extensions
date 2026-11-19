@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { type Delegate, delegationService } from "@narumitw/pi-background";
 import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { artifactGuidance } from "./artifacts.js";
 import { normalizePlanModeCompletion, PLAN_MODE_COMPLETE_PARAMS, renderPlanModeCompletion } from "./completion-tool.js";
@@ -12,9 +13,7 @@ import {
   INPUT_ENTRY,
   legacyImplementationState,
   restoreImplementation,
-  VERIFICATION_MESSAGE,
 } from "./implementation-state.js";
-import { implementationTranscript } from "./implementation-transcript.js";
 import { editPlanDocument } from "./plan-editor.js";
 import { createPlanStore, type PlanDocument, type PlanStore, planHash, storedPlanStorage } from "./plan-store.js";
 import { createProgressController, progressSnapshot } from "./progress.js";
@@ -26,21 +25,13 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
-import { PLAN_HELPER_NAMES, resolvePlanTools, setWorkflowHelpers, standaloneToolCall } from "./tool-policy.js";
-import {
-  renderVerificationResult,
-  runVerification,
-  toolIdentities,
-  type VerificationInput,
-  type VerificationResult,
-  verificationContent,
-} from "./verification.js";
+import { setWorkflowHelpers, standaloneToolCall } from "./tool-policy.js";
 
 export interface ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   progressRunner?: ProgressRunner;
   createStore?: typeof createPlanStore;
-  verify?(input: VerificationInput): Promise<VerificationResult>;
+  delegate?: Delegate;
 }
 const UPDATE = IMPLEMENTATION_HELPERS[0];
 const COMPLETE = IMPLEMENTATION_HELPERS[1];
@@ -49,7 +40,7 @@ export function implementationInstructions(state: ImplementationState): string {
   return `# Tracked plan implementation
 Implement the approved plan, preserving unchanged requirements. The current plan is ${state.document.path}. It is one mutable file. After compaction, or whenever its contents are uncertain, call plan_mode_implementation_status to read the current file.
 When the user requests a plan change, update the plan before implementing the change. Prefer ${PLAN_MODE_EDIT_TOOL_NAME} for localized changes using {path, edits: [{oldText, newText}]}; use ${UPDATE} with the COMPLETE replacement plan for broader changes. Both update the same path without another approval dialog. A clarification without a change needs no edit. Seek user agreement before an agent-discovered material scope change; never invent approval or rewrite the plan just to hide drift.
-When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal. A fresh adherence checker runs by default against the current file contents and branch-scoped implementation transcript. Results apply to inspected contents, not later changes. Its report does not authorize automatic fixes. Do not start a repair loop.${artifactGuidance(state.document.artifacts)}`;
+When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal.${artifactGuidance(state.document.artifacts)}`;
 }
 
 /** Separate lifetime from restricted planning: implementation never gets planning's tool gate. */
@@ -65,7 +56,6 @@ export function registerImplementation(
   let operation: AbortController | undefined;
   const readSettings = dependencies.readSettings ?? readPlanModeSettings;
   const makeStore = dependencies.createStore ?? createPlanStore;
-  const verify = dependencies.verify ?? runVerification;
   const progress = createProgressController({
     readSettings,
     runner: dependencies.progressRunner,
@@ -87,17 +77,10 @@ export function registerImplementation(
     progress.mark();
   });
 
-  function cancel(ctx?: ExtensionContext) {
+  function cancel() {
     generation++;
-    const checking = operation;
+    operation?.abort();
     operation = undefined;
-    checking?.abort();
-    if (checking && ctx && owner === ctx.sessionManager && state) {
-      commit({ ...state, phase: "completed" });
-      progress.close();
-      activate(ctx);
-      status(ctx);
-    }
   }
   function status(ctx: ExtensionContext) {
     if (owner === ctx.sessionManager) onStatus(ctx);
@@ -179,16 +162,15 @@ export function registerImplementation(
   pi.on("session_shutdown", async (_event, ctx) => {
     const disposed = progress.dispose();
     if (owner === ctx.sessionManager) {
-      cancel(ctx);
+      cancel();
       setWorkflowHelpers(pi, IMPLEMENTATION_HELPERS, []);
       owner = undefined;
     }
     await disposed;
   });
   pi.on("before_agent_start", (event, ctx) => {
-    cancel(ctx);
+    cancel();
     if (active(ctx) && state) {
-      if (state.lastCheck) commit({ ...state, lastCheck: undefined });
       status(ctx);
       event.systemPromptOptions.sections.pi_plan_implementation = implementationInstructions(state);
     } else delete event.systemPromptOptions.sections.pi_plan_implementation;
@@ -201,7 +183,6 @@ export function registerImplementation(
       source: event.source,
       fingerprint: planHash(event.text),
     });
-    if (operation) cancel(ctx);
   });
   pi.on("tool_call", (event, ctx) => {
     if (!IMPLEMENTATION_HELPERS.includes(event.toolName as (typeof IMPLEMENTATION_HELPERS)[number])) return;
@@ -224,121 +205,6 @@ export function registerImplementation(
     if (store.projectRoot !== source.projectRoot) throw new Error("Implementation belongs to a different project.");
     return store;
   }
-
-  async function check(ctx: ExtensionContext, signal?: AbortSignal): Promise<VerificationResult> {
-    if (!state || owner !== ctx.sessionManager)
-      throw new Error("No tracked implementation. Resume its session or implement a reviewed plan first.");
-    if (operation) throw new Error("A plan adherence check is already running.");
-    const source = structuredClone(state);
-    const manager = ctx.sessionManager;
-    const controller = new AbortController();
-    operation = controller;
-    const version = generation;
-    const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
-    const current = () => owner === manager && generation === version && !combined.aborted && state?.id === source.id;
-    const assertCurrent = () => {
-      if (!current()) throw new Error("Plan adherence check cancelled because ownership changed.");
-    };
-    // Snapshot branch now, before awaiting settings, providers or files.
-    const transcript = implementationTranscript(manager.getBranch(), source.id);
-    const dialog = new AbortController();
-    let cancellation: Promise<unknown> | undefined;
-    try {
-      // Verification owns its own activity; persist inactivity before any await so
-      // tree restoration/reload cannot resurrect the checked implementation.
-      commit({ ...source, phase: "completed", lastCheck: undefined });
-      activate(ctx);
-      status(ctx);
-      progress.close();
-      const store = await ownedStore(ctx, source);
-      const plan = await store.read(source.document);
-      const target = { document: source.document, plan, hash: planHash(plan) };
-      assertCurrent();
-      const settings = await readSettings();
-      assertCurrent();
-      const resolved = resolvePlanTools(pi.getAllTools(), source.tools);
-      if (resolved.unavailable.length)
-        throw new Error(`Selected planning tools are unavailable: ${resolved.unavailable.join(", ")}`);
-      const names = resolved.allowed.filter(
-        (name) =>
-          !PLAN_HELPER_NAMES.includes(name as (typeof PLAN_HELPER_NAMES)[number]) &&
-          !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE),
-      );
-      const identities = toolIdentities(pi.getAllTools(), names);
-      if (JSON.stringify(identities) !== JSON.stringify(source.toolIdentities))
-        throw new Error(
-          "Planning tools changed or are unavailable. Review the selection with /plan tools before checking.",
-        );
-      if (ctx.hasUI && !signal) {
-        cancellation = ctx.ui
-          .select("Checking plan adherence — close to cancel", ["Cancel check"], { signal: dialog.signal })
-          .then(() => {
-            if (!dialog.signal.aborted) controller.abort();
-          });
-      }
-      const result = await verify({
-        ctx,
-        implementation: source,
-        target,
-        transcript,
-        settings: settings.verification ?? { automatic: true },
-        signal: combined,
-        onProgress: () => {},
-      });
-      assertCurrent();
-      const timestamp = new Date().toISOString();
-      pi.appendEntry("pi-plan-check", {
-        implementationId: source.id,
-        planHash: target.hash,
-        transcriptHash: transcript.hash,
-        transcriptEndpoint: transcript.endpoint,
-        timestamp,
-        ...result,
-      });
-      commit({
-        ...source,
-        phase: "completed",
-        lastCheck: { status: result.report.status, timestamp, hash: target.hash },
-      });
-      return result;
-    } catch (error) {
-      if (current()) {
-        const timestamp = new Date().toISOString();
-        pi.appendEntry("pi-plan-check", {
-          implementationId: source.id,
-          planId: source.document.id,
-          transcriptHash: transcript.hash,
-          transcriptEndpoint: transcript.endpoint,
-          timestamp,
-          outcome: "failed",
-          error: errorMessage(error),
-        });
-        commit({ ...source, phase: "completed", lastCheck: { status: "failed", timestamp, hash: source.hash } });
-      }
-      throw error;
-    } finally {
-      dialog.abort();
-      await cancellation?.catch(() => {});
-      if (operation === controller) {
-        operation = undefined;
-        if (owner === manager && state?.id === source.id) {
-          commit({ ...state, phase: "completed" });
-          activate(ctx);
-          status(ctx);
-        }
-      }
-    }
-  }
-
-  pi.registerMessageRenderer(VERIFICATION_MESSAGE, (message, _options, theme) =>
-    renderVerificationResult(
-      {
-        content: typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
-        details: message.details,
-      },
-      theme,
-    ),
-  );
 
   function planOperation(ctx: ExtensionContext, signal?: AbortSignal) {
     const source = requireImplementation(ctx);
@@ -372,7 +238,6 @@ export function registerImplementation(
         ...source,
         document,
         hash: planHash(plan),
-        lastCheck: undefined,
         completion: undefined,
       });
     } catch (error) {
@@ -442,62 +307,44 @@ export function registerImplementation(
     label: "Complete implementation",
     defaultActive: false,
     executionMode: "sequential",
-    description:
-      "Signal that tracked implementation and planned verification are finished. Call ALONE. Runs a fresh adherence check unless disabled in settings; does not automatically fix findings.",
+    description: "Signal that tracked implementation and planned verification are finished. Call ALONE.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    renderResult: (result, _options, theme) => renderVerificationResult(result, theme),
     async execute(_id, _params, signal, _update, ctx) {
       const source = requireImplementation(ctx);
-      const manager = ctx.sessionManager;
       if (!standaloneToolCall(ctx, COMPLETE)) throw new Error("Implementation completion must be called alone.");
-      const version = generation;
-      const settings = await readSettings();
-      if (version !== generation || owner !== manager || signal?.aborted)
-        throw new Error("Implementation completion cancelled.");
-      commit({ ...source, phase: "completed", completion: randomUUID(), lastCheck: undefined });
+      signal?.throwIfAborted();
+      commit({ ...source, phase: "completed", completion: randomUUID() });
       activate(ctx);
       status(ctx);
-      if (settings.verification?.automatic === false)
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Implementation completed — not checked. Run /plan verify to check adherence; /plan resume to continue implementation.",
-            },
-          ],
-          details: {},
-          terminate: true,
-        };
-      try {
-        const result = await check(ctx, signal);
-        return {
-          content: [{ type: "text", text: verificationContent(result) }],
-          details: result,
-          usage: result.usage,
-          terminate: true,
-        };
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Implementation completed, but adherence was not verified: ${errorMessage(error)}\nRun /plan verify to retry; /plan resume to continue implementation.`,
-            },
-          ],
-          details: { error: errorMessage(error) },
-          isError: true,
-          terminate: true,
-        };
+      let text = "Implementation completed.";
+      if (source.completionPrompt) {
+        const controller = new AbortController();
+        operation = controller;
+        const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+        try {
+          const store = await ownedStore(ctx, source);
+          combined.throwIfAborted();
+          const plan = await store.read(source.document);
+          combined.throwIfAborted();
+          const delegate = dependencies.delegate ?? delegationService(pi);
+          const result = await delegate(ctx, { task: source.completionPrompt, plan }, combined);
+          combined.throwIfAborted();
+          text += `\nCompletion task: ${sanitizeTerminalText(result)}`;
+        } catch (error) {
+          text += combined.aborted
+            ? " Completion task cancelled."
+            : ` Completion task failed: ${sanitizeTerminalText(errorMessage(error))}`;
+        } finally {
+          if (operation === controller) operation = undefined;
+        }
       }
+      return { content: [{ type: "text", text }], details: {}, terminate: true };
     },
   });
 
   return {
     get state() {
       return state;
-    },
-    checking(ctx: ExtensionContext) {
-      return owner === ctx.sessionManager && !!operation;
     },
     active,
     progress: progress.toggle,
@@ -522,22 +369,13 @@ export function registerImplementation(
       document: PlanDocument,
       plan: string,
       store: PlanStore,
-      tools?: string[],
+      completionPrompt?: string,
     ): ImplementationState {
-      const selected = resolvePlanTools(pi.getAllTools(), tools);
-      const names = selected.allowed.filter(
-        (name) =>
-          !PLAN_HELPER_NAMES.includes(name as (typeof PLAN_HELPER_NAMES)[number]) &&
-          !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE),
-      );
-      if (selected.unavailable.some((name) => !PLAN_HELPER_NAMES.includes(name as (typeof PLAN_HELPER_NAMES)[number])))
-        throw new Error("Some planning tools are unavailable. Review /plan tools before implementation.");
       return createImplementation(
         {
           projectRoot: store.projectRoot,
           storage: store.storage,
-          tools,
-          toolIdentities: toolIdentities(pi.getAllTools(), names),
+          completionPrompt,
         },
         document,
         plan,
@@ -556,24 +394,9 @@ export function registerImplementation(
         if (!current.isCurrent()) return true;
         const edited = await editPlanDocument(ctx, store, source.document, current);
         if (edited && current.isCurrent()) {
-          commit({ ...source, ...edited, lastCheck: undefined, completion: undefined });
+          commit({ ...source, ...edited, completion: undefined });
           status(ctx);
         }
-        return true;
-      }
-      if (command === "verify") {
-        const manager = ctx.sessionManager;
-        const result = await check(ctx);
-        if (owner === manager)
-          pi.sendMessage(
-            {
-              customType: VERIFICATION_MESSAGE,
-              content: verificationContent(result),
-              display: true,
-              details: result,
-            },
-            { triggerTurn: false },
-          );
         return true;
       }
       if (command === "resume") {
@@ -584,33 +407,14 @@ export function registerImplementation(
         const store = await ownedStore(ctx, source);
         const plan = await store.read(source.document);
         if (generation !== version || owner !== manager) return true;
-        begin(
-          { ...source, hash: planHash(plan), phase: "implementing", completion: undefined, lastCheck: undefined },
-          ctx,
-        );
+        begin({ ...source, hash: planHash(plan), phase: "implementing", completion: undefined }, ctx);
         if (ctx.hasUI)
           ctx.ui.notify("Implementation tracking resumed. Send the requested fixes or changes now.", "info");
         return true;
       }
-      if (command === "cancel") {
-        cancel(ctx);
-        status(ctx);
-        return true;
-      }
       return false;
     },
-    setTools(tools: string[], ctx: ExtensionContext) {
-      if (!state) return;
-      const names = resolvePlanTools(pi.getAllTools(), tools).allowed.filter(
-        (name) =>
-          !PLAN_HELPER_NAMES.includes(name as (typeof PLAN_HELPER_NAMES)[number]) &&
-          !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE),
-      );
-      commit({ ...state, tools, toolIdentities: toolIdentities(pi.getAllTools(), names), lastCheck: undefined });
-      status(ctx);
-    },
     async settings(ctx: ExtensionContext, choice: string, signal: AbortSignal) {
-      const settings = await readSettings();
       signal.throwIfAborted();
       if (choice === "Progress reasoning") {
         const answer = await ctx.ui.select(
@@ -655,28 +459,6 @@ export function registerImplementation(
         const selected = available[options.indexOf(answer) - 1];
         await updatePlanModeSettings(
           { progress: { model: selected ? { provider: selected.provider, id: selected.id } : null } },
-          { signal },
-        );
-      } else if (choice === "Automatic adherence checks") {
-        const answer = await ctx.ui.select("Automatic adherence checking", ["On (default)", "Off"], { signal });
-        if (answer && !signal.aborted)
-          await updatePlanModeSettings({ verification: { automatic: answer === "On (default)" } }, { signal });
-      } else {
-        const available = ctx.modelRegistry.getAvailable();
-        const current = settings.verification?.model;
-        const options = [
-          "Current model (default)",
-          ...available.map((model, index) => `${index + 1}. ${sanitizeTerminalText(`${model.provider}/${model.id}`)}`),
-        ];
-        const answer = await ctx.ui.select(
-          sanitizeTerminalText(`Adherence checker model${current ? ` — ${current.provider}/${current.id}` : ""}`),
-          options,
-          { signal },
-        );
-        if (!answer || signal.aborted) return;
-        const selected = available[options.indexOf(answer) - 1];
-        await updatePlanModeSettings(
-          { verification: { model: selected ? { provider: selected.provider, id: selected.id } : null } },
           { signal },
         );
       }

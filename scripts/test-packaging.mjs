@@ -121,6 +121,8 @@ try {
         "pi-plan-mode",
         "pi-artifacts",
         "pi-thinking-shortcuts",
+        "pi-activity-digest",
+        "pi-tool-summary",
       ])
         for (const name of ["dist", "node_modules"])
           await rm(join(candidate, "packages", packageName, name), { recursive: true, force: true });

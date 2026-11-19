@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
 import { test } from "vitest";
 import {
   createImplementation,
@@ -8,7 +7,7 @@ import {
   restoreImplementation,
   VERIFICATION_MESSAGE,
 } from "../src/implementation-state.js";
-import { implementationTranscript, writeTranscriptArtifact } from "../src/implementation-transcript.js";
+import { implementationTranscript } from "../src/implementation-transcript.js";
 import { planHash } from "../src/plan-store.js";
 import { planDocument } from "./support.js";
 
@@ -66,17 +65,7 @@ test("scopes transcript to explicit implementation segments and includes all del
   ])
     assert.ok(result.document.includes(included));
   assert.match(result.document, /\[kick\].*\(extension\)/);
-  assert.equal(result.users.includes("Kickoff"), false);
-  assert.match(result.users, /\[user1\].*\(interactive\)/);
-  assert.match(result.users, /\[user2\].*\(rpc\)/);
-  assert.match(result.users, /\[fix\].*unknown provenance/);
-  assert.equal(result.users.includes("Recorded rationale"), false);
   assert.equal(result.endpoint, "fix");
-  for (const line of result.index.split("\n")) {
-    const number = Number(/line (\d+)$/.exec(line)?.[1]);
-    const id = /^\[([^\]]+)\]/.exec(line)?.[1];
-    assert.ok(result.document.split("\n")[number - 1].includes(`[${id}]`));
-  }
 });
 
 test("context edits never resurrect omitted text, attachment gaps and missing starts are explicit", () => {
@@ -98,30 +87,10 @@ test("context edits never resurrect omitted text, attachment gaps and missing st
   assert.match(implementationTranscript([], "missing").limitations[0], /start marker/);
 });
 
-test("transcript artifacts are private, complete, and disposable", async () => {
-  const transcript = implementationTranscript(
-    [phase("start", "implementing"), message("large", "assistant", "large\n".repeat(20_000))],
-    "impl",
-  );
-  const artifact = await writeTranscriptArtifact(transcript, new AbortController().signal);
-  assert.equal(await readFile(artifact.path, "utf8"), transcript.document);
-  assert.equal((await stat(artifact.directory)).mode & 0o077, 0);
-  assert.equal((await stat(artifact.path)).mode & 0o077, 0);
-  await artifact.dispose();
-  await assert.rejects(stat(artifact.path), /ENOENT/);
-  const aborted = new AbortController();
-  aborted.abort();
-  await assert.rejects(writeTranscriptArtifact(transcript, aborted.signal), /abort/i);
-});
-
 test("v3 implementation entries retain only a document locator and hash, not approved-plan copies", () => {
   const document = planDocument();
   const plan = "# Current target\n\nImplement blue.";
-  const state = createImplementation(
-    { projectRoot: "/project", storage: { kind: "repo" }, toolIdentities: [] },
-    document,
-    plan,
-  );
+  const state = createImplementation({ projectRoot: "/project", storage: { kind: "repo" } }, document, plan);
   assert.equal(state.version, 3);
   assert.equal(state.phase, "implementing");
   assert.deepEqual(state.document, document);

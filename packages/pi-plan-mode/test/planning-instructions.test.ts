@@ -188,6 +188,7 @@ describe("plan templates catalog and user .md templates", () => {
       ["decision-brief", "detailed-spec", "checklist", "minimal"],
     );
     for (const template of BUILTIN_PLAN_TEMPLATES) {
+      assert.equal(template.completionPrompt, undefined);
       assert.equal(validTemplateName(template.id), true);
       assert.equal(template.source, "builtin");
       const path = fileURLToPath(new URL(`../templates/${template.id}.md`, import.meta.url));
@@ -207,6 +208,13 @@ describe("plan templates catalog and user .md templates", () => {
       assert.match(template.content, /rough range of changed lines/);
     }
   });
+
+  test.each(["[one, two]", "{}", "false", "null", "''", "'  '", "["])(
+    "rejects invalid completion metadata: %s",
+    (value) => {
+      assert.throws(() => parseUserTemplate("example", `---\non_implementation_complete: ${value}\n---\n# Plan`));
+    },
+  );
 
   test("frontmatter supplies picker metadata while the exact skeleton and comments remain model-visible", () => {
     const body = "# [Plan title]\r\n\r\n## Overview\r\n<!-- At most 250 characters. -->\r\n\r\n## Verification";

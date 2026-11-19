@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { WorkflowScope } from "@narumitw/pi-background";
+import { delegationService, WorkflowScope } from "@narumitw/pi-background";
 import { expect, it, vi } from "vitest";
 import { backgroundFixture } from "../../../test/background-fixture.js";
 import herdr from "../src/herdr.js";
@@ -55,6 +55,25 @@ it("captures the live selection before the named profile read", async () => {
     f.pi.setActiveTools([...f.pi.getActiveTools(), "write"]);
     await pending;
     expect(dispatch).toHaveBeenCalledOnce();
+    // The private service uses the same launch path, but its caller owns result delivery.
+    const plan = `# Current\n${"x".repeat(50000)}`;
+    dispatch.mockImplementationOnce(async (scope, _cwd, prepare, _signal, enqueue) => {
+      expect(enqueue).toBe(false);
+      const { argv } = await prepare(join(dir, "completion"));
+      const attachment = argv.at(-1) ?? "";
+      expect(attachment.startsWith("@")).toBe(true);
+      expect(await readFile(attachment.slice(1), "utf8")).toBe(
+        `Delegated task:\nSummarize\n\nCurrent saved plan (Markdown):\n${plan}`,
+      );
+      return { id: "completion", scope, state: "running", omissions: [] };
+    });
+    const done = Promise.withResolvers<Awaited<ReturnType<Workers["finish"]>>>();
+    const finish = vi.spyOn(Workers.prototype, "finish").mockReturnValueOnce(done.promise);
+    const result = delegationService(f.pi)(f.ctx, { task: "Summarize", plan }, new AbortController().signal);
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    done.resolve({ id: "completion", scope: "test", state: "succeeded", result: "Final summary", omissions: [] });
+    expect(await result).toBe("succeeded: Final summary");
+    expect(dispatch).toHaveBeenCalledTimes(2);
   } finally {
     await f.emit("session_shutdown");
     vi.restoreAllMocks();

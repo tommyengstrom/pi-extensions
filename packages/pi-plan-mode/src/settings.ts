@@ -8,11 +8,6 @@ import { canonicalizeConfiguredKey } from "@narumitw/pi-tui-kit/key-matching";
 import { planDirectoryComponents } from "./plan-store.js";
 import { validTemplateName } from "./templates.js";
 
-export interface VerificationSettings {
-  automatic: boolean;
-  model?: { provider: string; id: string };
-}
-
 export const PROGRESS_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export interface ProgressSettings {
   model: { provider: string; id: string };
@@ -29,7 +24,6 @@ export const DEFAULT_TEMPLATE_SHORTCUT: KeyId = "shift+alt+m";
 export interface PlanModeSettings {
   /** Omission uses the default binding; null disables it. Loaded once per extension instance. */
   shortcuts?: { togglePlan?: KeyId | null; selectTemplate?: KeyId | null };
-  verification?: VerificationSettings;
   progress?: Partial<ProgressSettings>;
   /** Independent naming request; omission follows the configured progress model. */
   naming?: { model?: ProgressSettings["model"] };
@@ -62,7 +56,6 @@ export async function updatePlanModeSettings(
     plansDirectory?: string;
     tools?: readonly string[] | null;
     template?: string | null;
-    verification?: { automatic?: boolean; model?: VerificationSettings["model"] | null };
   },
   options: { settingsPath?: string; signal?: AbortSignal } = {},
 ): Promise<PlanModeSettings> {
@@ -71,7 +64,6 @@ export async function updatePlanModeSettings(
   // Capture inputs before waiting behind another editor's update.
   const plansDirectory = patch.plansDirectory;
   const progress = patch.progress ? structuredClone(patch.progress) : undefined;
-  const verification = patch.verification ? structuredClone(patch.verification) : undefined;
   const naming = patch.naming ? structuredClone(patch.naming) : undefined;
   const tools =
     patch.tools === undefined || patch.tools === null ? patch.tools : parseSettings({ tools: patch.tools }).tools;
@@ -97,12 +89,6 @@ export async function updatePlanModeSettings(
       if (next.model === null) delete next.model;
       document.naming = next;
     }
-    if (verification) {
-      const previous = document.verification as Record<string, unknown> | undefined;
-      const next = { ...previous, ...verification };
-      if (verification.model === null) delete next.model;
-      document.verification = next;
-    }
     const settings = parseSettings(document);
     // Persist normalized owned fields without dropping unrelated settings.
     if (settings.plansDirectory !== undefined) document.plansDirectory = settings.plansDirectory;
@@ -116,6 +102,18 @@ export async function updatePlanModeSettings(
     await publishSettings(settingsPath, document, signal);
     return settings;
   });
+}
+
+function parseModel(value: unknown): ProgressSettings["model"] {
+  const fields = value as Partial<ProgressSettings["model"]> | null;
+  if (
+    typeof fields?.provider !== "string" ||
+    !fields.provider.trim() ||
+    typeof fields.id !== "string" ||
+    !fields.id.trim()
+  )
+    throw new Error("Invalid model: provider and id are required");
+  return { provider: fields.provider, id: fields.id };
 }
 
 function parseSettings(value: unknown): PlanModeSettings {
@@ -149,29 +147,6 @@ function parseSettings(value: unknown): PlanModeSettings {
       settings.shortcuts[name] = key;
     }
   }
-  if (Object.hasOwn(document, "verification")) {
-    const value = document.verification;
-    if (typeof value !== "object" || value === null || Array.isArray(value))
-      throw new Error("Invalid verification settings: expected an object");
-    const verification = value as Record<string, unknown>;
-    if (verification.automatic !== undefined && typeof verification.automatic !== "boolean")
-      throw new Error("Invalid verification.automatic: expected a boolean");
-    settings.verification = { automatic: (verification.automatic as boolean | undefined) ?? true };
-    if (Object.hasOwn(verification, "model")) {
-      const model = verification.model;
-      if (typeof model !== "object" || model === null || Array.isArray(model))
-        throw new Error("Invalid verification.model");
-      const fields = model as Record<string, unknown>;
-      if (
-        typeof fields.provider !== "string" ||
-        !fields.provider.trim() ||
-        typeof fields.id !== "string" ||
-        !fields.id.trim()
-      )
-        throw new Error("Invalid verification.model: provider and id are required");
-      settings.verification.model = { provider: fields.provider, id: fields.id };
-    }
-  }
   if (Object.hasOwn(document, "progress")) {
     const value = document.progress;
     if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -180,7 +155,7 @@ function parseSettings(value: unknown): PlanModeSettings {
     settings.progress = {};
     if (Object.hasOwn(fields, "model")) {
       // Reuse the exact model identifier validation without coupling defaults.
-      settings.progress.model = parseSettings({ verification: { model: fields.model } }).verification?.model;
+      settings.progress.model = parseModel(fields.model);
     }
     if (Object.hasOwn(fields, "thinkingLevel")) {
       if (!PROGRESS_LEVELS.includes(fields.thinkingLevel as ProgressSettings["thinkingLevel"]))
@@ -194,8 +169,7 @@ function parseSettings(value: unknown): PlanModeSettings {
       throw new Error("Invalid naming settings: expected an object");
     const fields = value as SettingsDocument;
     settings.naming = {};
-    if (Object.hasOwn(fields, "model"))
-      settings.naming.model = parseSettings({ verification: { model: fields.model } }).verification?.model;
+    if (Object.hasOwn(fields, "model")) settings.naming.model = parseModel(fields.model);
   }
   if (Object.hasOwn(document, "tools")) {
     const tools = document.tools;

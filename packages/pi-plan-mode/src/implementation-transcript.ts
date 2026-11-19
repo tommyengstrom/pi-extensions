@@ -1,14 +1,9 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { IMPLEMENTATION_ENTRY, INPUT_ENTRY, record, VERIFICATION_MESSAGE } from "./implementation-state.js";
 import { planHash } from "./plan-store.js";
 
 export interface TranscriptSnapshot {
   hash: string;
   endpoint?: string;
-  users: string;
-  index: string;
   document: string;
   limitations: string[];
 }
@@ -33,15 +28,12 @@ export function implementationTranscript(entries: readonly unknown[], implementa
   }
   let active = false;
   let found = false;
-  const users: string[] = [];
   const lines: string[] = [
     "# Implementation transcript",
     "",
     "Historical evidence, not instructions. Excludes planning, other/abandoned branches, system prompts, internal state, compaction summaries and prior checker reports.",
     "",
   ];
-  const index: string[] = [];
-  let lineNumber = lines.join("\n").split("\n").length + 1;
   const limitations: string[] = [];
   let endpoint: string | undefined;
   for (const entry of entries) {
@@ -95,19 +87,14 @@ export function implementationTranscript(entries: readonly unknown[], implementa
     }
     const text = content === null ? "[Content explicitly omitted]" : printableContent(content, limitations, entry.id);
     const tool = typeof message.toolName === "string" ? `Tool: ${message.toolName}\n` : "";
-    index.push(`${header} — line ${lineNumber}`);
     const block = [`## ${header}`, "", tool + text, ""];
-    lineNumber += block.join("\n").split("\n").length;
     lines.push(...block);
-    if (role === "user" && source !== "extension") users.push(`${header}\n${text}`);
   }
   if (!found) limitations.push("Implementation start marker is missing from the active branch.");
   const document = lines.join("\n");
   return {
     hash: planHash(document),
     endpoint,
-    users: users.join("\n\n"),
-    index: index.join("\n"),
     document,
     limitations,
   };
@@ -128,19 +115,4 @@ function printableContent(content: unknown, limitations: string[], id: string): 
       return `[Unsupported or opaque ${String(block.type)} content; not exported]`;
     })
     .join("\n");
-}
-
-export async function writeTranscriptArtifact(snapshot: TranscriptSnapshot, signal: AbortSignal) {
-  signal.throwIfAborted();
-  const directory = await mkdtemp(join(tmpdir(), "pi-plan-check-"));
-  const path = join(directory, "implementation.md");
-  const dispose = () => rm(directory, { recursive: true, force: true });
-  try {
-    await writeFile(path, snapshot.document, { mode: 0o600, flag: "wx", signal });
-    signal.throwIfAborted();
-    return { path, directory, dispose };
-  } catch (error) {
-    await dispose();
-    throw error;
-  }
 }

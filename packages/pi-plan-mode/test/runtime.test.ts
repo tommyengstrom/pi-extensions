@@ -56,7 +56,6 @@ async function fixture(
   extra?: (pi: ExtensionAPI) => void,
   shortcuts?: import("../src/settings.js").PlanModeSettings["shortcuts"],
   trustedTools?: string[],
-  verify?: import("../src/implementation.js").ImplementationDependencies["verify"],
   persistentSource = false,
 ) {
   const cwd = await mkdtemp(join(suiteRoot, "project-"));
@@ -78,20 +77,10 @@ async function fixture(
     refreshOnCreate: false,
   });
   const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (model, context, options) => {
-    assert.equal(options?.apiKey, "offline-test-key", "main and checker requests must use the parent credential");
+    assert.equal(options?.apiKey, "offline-test-key", "requests must use the parent credential");
     requests.push(structuredClone(context.messages));
     const stream = createAssistantMessageEventStream();
-    const checking = JSON.stringify(context.messages).includes("Assess implementation adherence.");
-    const calls = checking
-      ? [
-          {
-            type: "toolCall" as const,
-            id: "report",
-            name: "submit_adherence_report",
-            arguments: { status: "ok", motivation: "Requirement accounted for. See `src/example.ts:1`." },
-          },
-        ]
-      : replies.shift();
+    const calls = replies.shift();
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -165,9 +154,8 @@ async function fixture(
           planMode(pi, {
             readSettings: async () => ({ plansDirectory: "plans", shortcuts, tools: trustedTools }),
             readInstructions: () => instructions,
-            // Naming is isolated from the main/checker request queue in these runtime tests.
+            // Naming is isolated from the main request queue in these runtime tests.
             namePlan: async () => "runtime-smoke",
-            verify,
             loadUi,
           }),
         (pi) => {
@@ -222,13 +210,6 @@ async function fixture(
             statusHistory.push({ key, value });
           },
           notify: vi.fn(),
-          select: verify
-            ? async (_title, _options, options) =>
-                new Promise<string | undefined>((resolve) => {
-                  if (options?.signal?.aborted) resolve(undefined);
-                  else options?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-                })
-            : baseUi.select,
         },
         onError: (error) => {
           errors.push(error);
@@ -382,47 +363,7 @@ test("native shortcut resolution and key matching preserve Enter and reserved ho
   }
 });
 
-test("real tree navigation restores the verification-start boundary without resurrecting implementation", async () => {
-  const entered = Promise.withResolvers<import("../src/verification.js").VerificationInput>();
-  const finished = Promise.withResolvers<import("../src/verification.js").VerificationResult>();
-  const f = await fixture(undefined, undefined, undefined, async (input) => {
-    entered.resolve(input);
-    return finished.promise;
-  });
-  try {
-    const session = f.runtime.session;
-    const baseline = session.getActiveToolNames();
-    await session.prompt("/plan start");
-    await f.complete();
-    f.choose("here");
-    const beforeKickoff = f.requests.length;
-    await session.prompt("/plan");
-    await vi.waitFor(() => assert.equal(f.requests.length, beforeKickoff + 1));
-    await session.waitForIdle();
-    const checking = session.prompt("/plan verify");
-    const input = await entered.promise;
-    const boundary = session.sessionManager.getLeafId();
-    assert.ok(boundary);
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
-    session.sessionManager.appendCustomEntry("test-descendant", {});
-    await session.navigateTree(boundary, { summarize: false });
-    assert.equal(input.signal.aborted, true);
-    assertStatus(f, "[Normal]");
-    assert.deepEqual(session.getActiveToolNames(), baseline);
-    const entries = structuredClone(session.sessionManager.getEntries());
-    finished.resolve({ model: { provider: "offline", id: "checker" }, report: { status: "ok", motivation: "Late" } });
-    await checking;
-    assert.deepEqual(session.sessionManager.getEntries(), entries);
-    assertStatus(f, "[Normal]");
-    await session.prompt("/plan resume");
-    assertStatus(f, "[Implementing runtime-smoke]");
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.dispose();
-  }
-});
-
-test("real completion runs one isolated checker and terminates without a main-agent retry", async () => {
+test("real completion runs no worker and terminates without a main-agent retry", async () => {
   const f = await fixture();
   try {
     const session = f.runtime.session;
@@ -444,37 +385,113 @@ test("real completion runs one isolated checker and terminates without a main-ag
       prefix,
       "ordinary implementation turns retain the request prefix",
     );
-    // The checker must capture the current disk target, not the kickoff text or stored hash.
+    // Resume must capture the current disk target, not the kickoff text or stored hash.
     const currentPlan = `${plan}\n\nCurrent on-disk verification requirement.`;
     const raw = await readFile(ready.document.path, "utf8");
     await writeFile(ready.document.path, raw.replace(plan, currentPlan));
     const before = f.requests.length;
     f.queueTool("plan_mode_implementation_complete");
     await session.prompt("Implementation is ready; signal completion now.");
-    assert.equal(f.requests.length, before + 2, "one main tool call plus one fresh checker response");
-    const childRequest = f.requests.at(-1);
-    assert.ok(childRequest);
-    assert.equal(JSON.stringify(childRequest).includes("PRIVATE PLANNING CONTENT"), false);
-    assert.ok(JSON.stringify(childRequest).includes("Keep the material requirements unchanged."));
-    assert.ok(JSON.stringify(childRequest).includes("Current on-disk verification requirement."));
-    assert.ok(JSON.stringify(childRequest).includes(planHash(currentPlan)));
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "completed");
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.status, "ok");
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck?.hash, planHash(currentPlan));
-    assert.ok(
-      f.statusHistory.some(({ key, value }) => key === "plan-mode" && value === `[Verifying ${ready.document.name}]`),
-    );
+    assert.equal(f.requests.length, before + 1, "completion makes no follow-up request");
     assertStatus(f, "[Normal]");
-    assert.deepEqual(toolNames(childRequest), ["find", "grep", "ls", "read", "submit_adherence_report"]);
-    assert.equal(session.getActiveToolNames().includes("submit_adherence_report"), false);
     assert.equal(session.getActiveToolNames().includes("plan_mode_implementation_complete"), false);
     await session.prompt("UNRELATED AFTER COMPLETION");
     await session.prompt("/plan resume");
-    assert.equal(restoreImplementation(session.sessionManager.getBranch())?.lastCheck, undefined);
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.phase, "implementing");
     assert.equal(restoreImplementation(session.sessionManager.getBranch())?.hash, planHash(currentPlan));
     assertStatus(f, `[Implementing ${ready.document.name}]`);
   } finally {
+    await f.dispose();
+  }
+});
+
+test("a switch during a tool preserves its nested call, then changes the automatic follow-up prompt and gate", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let nestedError: boolean | undefined;
+  const f = await fixture((pi) => {
+    pi.registerTool({
+      name: "round_probe",
+      label: "Round probe",
+      description: "Wait for the test mode switch.",
+      parameters: { type: "object", properties: {} },
+      async execute(_id, _args, signal, _update, ctx) {
+        started.resolve();
+        await release.promise;
+        const result = await ctx.executeTool("bash", { command: "true" }, { signal });
+        nestedError = result.isError;
+        return result.result;
+      },
+    });
+  });
+  try {
+    const session = f.runtime.session;
+    f.queueTool("round_probe");
+    f.queueTool("bash", { command: "true" });
+    const running = session.prompt("Probe the turn boundary.");
+    try {
+      await started.promise;
+      await session.prompt("/explain");
+      assert.equal(stateOf(session).kind, "idle");
+    } finally {
+      release.resolve();
+    }
+    await running;
+    assert.equal(nestedError, false);
+    assert.equal(f.requests.length, 3);
+    assert.doesNotMatch(getCurrentSystemPrompt(f.requests[0]), /EXPLAIN MODE ACTIVE/);
+    assert.match(getCurrentSystemPrompt(f.requests[1]), /EXPLAIN MODE ACTIVE/);
+    assert.ok(toolNames(f.requests[1]).includes("plan_mode_question"));
+    const blocked = session.messages.findLast((m) => m.role === "toolResult" && m.toolName === "bash");
+    assert.ok(blocked?.role === "toolResult" && blocked.isError);
+    assert.deepEqual(f.requests[2].slice(0, f.requests[1].length), f.requests[1]);
+  } finally {
+    release.resolve();
+    await f.dispose();
+  }
+});
+
+test("leaving Explain during a terminating tool does not start another call", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const f = await fixture(
+    (pi) => {
+      pi.registerTool({
+        name: "finish_round",
+        label: "Finish",
+        description: "End this test run.",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          started.resolve();
+          await release.promise;
+          return { content: [{ type: "text", text: "Finished" }], details: {}, terminate: true };
+        },
+      });
+    },
+    undefined,
+    ["finish_round"],
+  );
+  try {
+    const session = f.runtime.session;
+    await session.prompt("/explain");
+    f.queueTool("finish_round");
+    const running = session.prompt("Finish here.");
+    try {
+      await started.promise;
+      await session.prompt("/explain exit");
+      assert.equal(stateOf(session).kind, "explain");
+    } finally {
+      release.resolve();
+    }
+    await running;
+    assert.equal(f.requests.length, 1);
+    assert.equal(stateOf(session).kind, "idle");
+    await session.prompt("Next user request.");
+    assert.equal(f.requests.length, 2);
+    assert.doesNotMatch(getCurrentSystemPrompt(f.requests[1]), /EXPLAIN MODE ACTIVE/);
+    assert.ok(!toolNames(f.requests[1]).includes("plan_mode_question"));
+  } finally {
+    release.resolve();
     await f.dispose();
   }
 });
@@ -998,7 +1015,7 @@ test("cancelled fresh replacement leaves the source ready and its plan available
 });
 
 test("resuming the source immediately after fresh implementation preserves native tools, not planning permissions", async () => {
-  const f = await fixture(undefined, undefined, undefined, undefined, true);
+  const f = await fixture(undefined, undefined, undefined, true);
   try {
     const source = f.runtime.session;
     const native = ["read", "bash"];
