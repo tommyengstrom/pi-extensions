@@ -17,7 +17,7 @@
 
 ### Template completion tasks
 
-- Completion returns to Normal without a checker. Custom templates can opt into one Herdr worker via `on_implementation_complete`; obsolete verification settings are ignored and `/plan verify` is removed.
+- Completion returns to Normal without a checker. Custom templates can opt into named Herdr workers via `hooks.on_implementation_complete`. Migrate old scalar headers to the list format; captured workflows keep their original task. Checks run concurrently and report once without automatic follow-up; obsolete verification settings are ignored and `/plan verify` is removed.
 
 ### Keyboard toggle
 

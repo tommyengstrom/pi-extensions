@@ -188,7 +188,7 @@ describe("plan templates catalog and user .md templates", () => {
       ["decision-brief", "detailed-spec", "checklist", "minimal"],
     );
     for (const template of BUILTIN_PLAN_TEMPLATES) {
-      assert.equal(template.completionPrompt, undefined);
+      assert.equal(template.completionChecks, undefined);
       assert.equal(validTemplateName(template.id), true);
       assert.equal(template.source, "builtin");
       const path = fileURLToPath(new URL(`../templates/${template.id}.md`, import.meta.url));
@@ -209,12 +209,34 @@ describe("plan templates catalog and user .md templates", () => {
     }
   });
 
-  test.each(["[one, two]", "{}", "false", "null", "''", "'  '", "["])(
-    "rejects invalid completion metadata: %s",
-    (value) => {
-      assert.throws(() => parseUserTemplate("example", `---\non_implementation_complete: ${value}\n---\n# Plan`));
-    },
-  );
+  test.each([
+    ["on_implementation_complete: Do the old task", /migrate/],
+    ["hooks: null", /hooks must/],
+    ["hooks: {on_plan_complete: []}", /unknown hook event/],
+    ["hooks: {on_implementation_complete: false}", /list/],
+    ["hooks: {on_implementation_complete: [null]}", /object/],
+    ["hooks: {on_implementation_complete: [{name: A, prompt: P}]}", /type/],
+    ["hooks: {on_implementation_complete: [{type: bash}]}", /type/],
+    ["hooks: {on_implementation_complete: [{type: subagent}]}", /name/],
+    ["hooks: {on_implementation_complete: [{type: subagent, name: A, prompt: ' '}]}", /prompt/],
+    ...[
+      ["model: bare", /provider\/model/],
+      ["effort: huge", /effort/],
+      ["remove_tools: bash", /remove_tools/],
+      ["extra: true", /unknown field/],
+    ].map(([field, pattern]) => [
+      `hooks: {on_implementation_complete: [{name: A, prompt: P, type: subagent, ${field}}]}`,
+      pattern,
+    ]),
+  ] as [string, RegExp][])("rejects invalid hook header %s", (header, pattern) => {
+    assert.throws(() => parseUserTemplate("example", `---\n${header}\n---\n# Plan`), pattern);
+  });
+  test("an empty list opts out", () => {
+    assert.equal(
+      parseUserTemplate("example", "---\nhooks: {on_implementation_complete: []}\n---\n# Plan").completionChecks,
+      undefined,
+    );
+  });
 
   test("frontmatter supplies picker metadata while the exact skeleton and comments remain model-visible", () => {
     const body = "# [Plan title]\r\n\r\n## Overview\r\n<!-- At most 250 characters. -->\r\n\r\n## Verification";

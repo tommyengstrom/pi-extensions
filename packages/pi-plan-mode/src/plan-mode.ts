@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import {
@@ -322,14 +323,14 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         ? {
             id: captured.workflow.template,
             content: captured.workflow.templatePrompt,
-            completionPrompt: captured.workflow.completionPrompt,
+            completionChecks: captured.workflow.completionChecks,
           }
         : resolveTemplate(settings.template ?? DEFAULT_PLAN_TEMPLATE_ID);
-    const completionPrompt =
+    const completionChecks =
       !document || captured
-        ? resolvedTemplate.completionPrompt
+        ? resolvedTemplate.completionChecks
         : previousImplementation?.document.id === document.id
-          ? previousImplementation.completionPrompt
+          ? previousImplementation.completionChecks
           : undefined;
     let workflow: PlanWorkflow;
     try {
@@ -347,7 +348,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         instructions,
         template: resolvedTemplate.id,
         templatePrompt: resolvedTemplate.content,
-        completionPrompt,
+        completionChecks,
         ...((options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools))
           ? { tools: options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools) }
           : {}),
@@ -902,7 +903,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         selected,
         plan,
         storage,
-        isPlanning(source) ? source.workflow.completionPrompt : undefined,
+        isPlanning(source) ? source.workflow.completionChecks : undefined,
       );
       const before = state;
       const previousImplementation = implementation.state;
@@ -932,7 +933,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         selected,
         plan,
         storage,
-        isPlanning(source) ? source.workflow.completionPrompt : undefined,
+        isPlanning(source) ? source.workflow.completionChecks : undefined,
       );
       const before = state;
       const previousImplementation = implementation.state;
@@ -1034,7 +1035,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (
       state.workflow.template === selected.id &&
       state.workflow.templatePrompt === selected.content &&
-      state.workflow.completionPrompt === selected.completionPrompt
+      isDeepStrictEqual(state.workflow.completionChecks, selected.completionChecks)
     )
       return;
     const document = state.kind === "ready" ? state.document : state.workflow.document;
@@ -1049,7 +1050,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         storage: store.storage,
         template: selected.id,
         templatePrompt: selected.content,
-        completionPrompt: selected.completionPrompt,
+        completionChecks: selected.completionChecks,
         document,
         name: document.name,
         hash: planHash(plan),
@@ -1071,7 +1072,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         ...state.workflow,
         template: selected.id,
         templatePrompt: selected.content,
-        completionPrompt: selected.completionPrompt,
+        completionChecks: selected.completionChecks,
       },
     });
     updateStatus(ctx);

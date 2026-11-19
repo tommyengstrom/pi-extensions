@@ -1534,7 +1534,10 @@ test("implement fresh transfers manually edited text and plain tracking data, no
   const f = await fixture({ template: "custom" });
   const dir = join(f.agentDir, "pi-plan-mode-templates");
   await mkdir(dir);
-  await writeFile(join(dir, "custom.md"), "---\non_implementation_complete: Summarize the release\n---\n# Plan");
+  await writeFile(
+    join(dir, "custom.md"),
+    "---\nhooks:\n  on_implementation_complete:\n    - {name: Release, type: subagent, prompt: Summarize the release}\n---\n# Plan",
+  );
   const saved = await ready(f);
   const edited = "# Manually edited fresh plan";
   await replaceBody(saved.details.path, edited);
@@ -1544,7 +1547,7 @@ test("implement fresh transfers manually edited text and plain tracking data, no
     newSession: async (options: {
       parentSession: string;
       setup: (manager: {
-        appendCustomEntry: (key: string, data: { completionPrompt?: string }) => void;
+        appendCustomEntry: (key: string, data: { completionChecks?: unknown }) => void;
       }) => Promise<void>;
       withSession: (ctx: unknown) => Promise<void>;
     }) => {
@@ -1552,7 +1555,9 @@ test("implement fresh transfers manually edited text and plain tracking data, no
       await options.setup({
         appendCustomEntry: (key, data) => {
           assert.equal(key, IMPLEMENTATION_ENTRY);
-          assert.equal(data.completionPrompt, "Summarize the release");
+          assert.deepEqual(data.completionChecks, [
+            { name: "Release", type: "subagent", prompt: "Summarize the release" },
+          ]);
         },
       });
       await f.emit("session_shutdown");
@@ -2043,7 +2048,7 @@ test.each(["success", "missing service", "failure", "tree", "shutdown"] as const
     const template = join(dir, "custom.md");
     await writeFile(
       template,
-      "---\non_implementation_complete: |-\n  Summarize changes.\n  Do not edit.\n---\n# Title",
+      "---\nhooks:\n  on_implementation_complete:\n    - name: Summary\n      type: subagent\n      prompt: |-\n        Summarize changes.\n        Do not edit.\n---\n# Title",
     );
     await f.command("start");
     await f.command("template custom");
@@ -2054,6 +2059,7 @@ test.each(["success", "missing service", "failure", "tree", "shutdown"] as const
     await f.emit("session_start");
     const latest = `# Current plan\n\n${"x".repeat(40000)}`;
     await replaceBody(saved.details.path, latest);
+    assert.equal(delegate.mock.calls.length, 0, "planning save and review must not dispatch checks");
     const pending = f.execute("plan_mode_implementation_complete", {});
     if (outcome !== "missing service") {
       await vi.waitFor(() => assert.equal(delegate.mock.calls.length, 1));
@@ -2091,6 +2097,98 @@ test.each(["success", "missing service", "failure", "tree", "shutdown"] as const
     }
   },
 );
+
+test.each(["settle", "abort", "replace"])("six named checks: %s", async (action) => {
+  const gates = Array.from({ length: 6 }, () => Promise.withResolvers<string>());
+  let reads = 0;
+  const delegate = vi.fn<import("@narumitw/pi-background").Delegate>(
+    async (_ctx, { task }) => gates[Number(task)].promise,
+  );
+  const f = await fixture({
+    template: "custom",
+    delegate,
+    wrapStore: (store) => ({
+      ...store,
+      read: async (doc) => {
+        reads++;
+        return store.read(doc);
+      },
+    }),
+  });
+  const dir = join(f.agentDir, "pi-plan-mode-templates");
+  await mkdir(dir);
+  const path = join(dir, "custom.md");
+  await writeFile(path, "# Same body");
+  await f.command("start");
+  const checks = gates.map((_, i) => ({
+    name: `Check ${i}`,
+    type: "subagent",
+    prompt: String(i),
+    ...(i === 0 ? { effort: "low", remove_tools: ["bash"] } : {}),
+  }));
+  await writeFile(path, `---\nhooks: ${JSON.stringify({ on_implementation_complete: checks })}\n---\n# Same body`);
+  await f.command("template custom"); // Only the hooks changed.
+  await f.execute("plan_mode_complete", { plan: PLAN });
+  f.choose("here");
+  await f.command("implement");
+  assert.equal(delegate.mock.calls.length, 0);
+  reads = 0;
+  const ctrl = new AbortController();
+  const pending = f.execute("plan_mode_implementation_complete", {}, ctrl.signal);
+  await vi.waitFor(() => assert.equal(delegate.mock.calls.length, 4));
+  assert.deepEqual(delegate.mock.calls[0][1], { task: "0", plan: PLAN, effort: "low", remove_tools: ["bash"] });
+  if (action === "settle") {
+    gates[3].reject(new Error("unusable model"));
+    await vi.waitFor(() => assert.equal(delegate.mock.calls.length, 5));
+    gates[4].resolve("fourth done");
+    await vi.waitFor(() => assert.equal(delegate.mock.calls.length, 6));
+  } else if (action === "replace") {
+    await f.emit("session_shutdown");
+    await f.emit("session_start", {}, createMockContext({ cwd: f.cwd }).ctx);
+  } else ctrl.abort();
+  if (action !== "settle") assert.ok(delegate.mock.calls.every((call) => call[2].aborted));
+  for (const gate of gates) gate.resolve("worker-output");
+  const result = await pending;
+  const text = result.content[0].text;
+  assert.equal(result.terminate, true);
+  assert.equal(reads, 1);
+  assert.ok(delegate.mock.calls.every((call) => call[1].plan === PLAN));
+  if (action === "settle") {
+    assert.deepEqual(
+      text.match(/Check \d/g),
+      checks.map((c) => c.name),
+    );
+    assert.match(text, /Check 3: failed: unusable model/);
+  } else {
+    assert.equal(delegate.mock.calls.length, 4);
+    assert.doesNotMatch(text, /worker-output/);
+    assert.match(text, /cancelled/);
+  }
+  assert.equal(f.sentMessages.length, 0);
+});
+
+test("restores a legacy captured prompt without modifying the session entry", async () => {
+  const f = await fixture();
+  await ready(f);
+  const state = f.state();
+  assert.ok(isPlanning(state));
+  const legacy = { completionPrompt: "old prompt" };
+  const expected = [{ name: "Completion task", type: "subagent", prompt: "old prompt" }];
+  const restored = restorePlanState([
+    { type: "custom", customType: PLAN_STATE_ENTRY, data: { ...state, workflow: { ...state.workflow, ...legacy } } },
+  ]);
+  assert.ok(isPlanning(restored));
+  assert.deepEqual(restored.workflow.completionChecks, expected);
+  assert.equal("completionPrompt" in restored.workflow, false);
+  f.choose("here");
+  await f.command("implement");
+  const data = { ...implementationOf(f), ...legacy };
+  assert.deepEqual(
+    restoreImplementation([{ type: "custom", customType: IMPLEMENTATION_ENTRY, data }])?.completionChecks,
+    expected,
+  );
+  assert.equal(data.completionPrompt, "old prompt");
+});
 
 test("removed verify never enters planning", async () => {
   const f = await fixture();

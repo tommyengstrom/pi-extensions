@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { findPackageJSON } from "node:module";
 import { dirname, join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { type CompletionCheck, templateChecks } from "./completion-checks.js";
 import { readOptionalMarkdown } from "./planning-instructions.js";
 
 export interface PlanTemplate {
@@ -9,7 +10,7 @@ export interface PlanTemplate {
   label: string;
   description: string;
   content: string;
-  completionPrompt?: string;
+  completionChecks?: CompletionCheck[];
   source: "builtin" | "user";
 }
 
@@ -57,7 +58,7 @@ export function parseUserTemplate(id: string, rawMarkdown: string): PlanTemplate
     const { frontmatter } = parseFrontmatter<Record<string, unknown>>(header[0]);
     if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter))
       throw new Error(`Invalid plan template ${id}: frontmatter must be an object`);
-    for (const key of ["label", "description", "on_implementation_complete"] as const) {
+    for (const key of ["label", "description"] as const) {
       if (key in frontmatter && (typeof frontmatter[key] !== "string" || !frontmatter[key].trim()))
         throw new Error(`Invalid plan template ${id}: ${key} must be a nonempty string`);
     }
@@ -65,14 +66,13 @@ export function parseUserTemplate(id: string, rawMarkdown: string): PlanTemplate
     // and line endings, in the workflow's model-visible template snapshot.
     const content = markdown.slice(header[0].length).trim();
     if (!content) throw new Error(`Invalid plan template ${id}: template body must not be empty`);
+    const completionChecks = templateChecks(frontmatter, id);
     return {
       id,
       label: (frontmatter.label as string | undefined)?.trim() ?? defaultLabelFromId(id),
       description: (frontmatter.description as string | undefined)?.trim() ?? "Custom user template",
       content,
-      ...(typeof frontmatter.on_implementation_complete === "string"
-        ? { completionPrompt: frontmatter.on_implementation_complete }
-        : {}),
+      ...(completionChecks ? { completionChecks } : {}),
       source: "user",
     };
   }

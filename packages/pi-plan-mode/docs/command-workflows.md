@@ -79,7 +79,7 @@ The agent saves user-requested plan changes **before** implementing them: use `p
 
 The question helper is active in Plan and Explain; completion is active only in planning; edit is active in planning and tracked implementation; update/status/implementation-completion helpers are active only during tracked implementation. Helpers are inactive outside their applicable workflow.
 
-`plan_mode_implementation_complete` must be called alone. Completion returns to Normal without a follow-up request by default. If the selected template captured `on_implementation_complete`, completion starts one separate, potentially billable Herdr worker with the configured task and the complete current plan Markdown, not the conversation or implementation transcript. Its final result is shown once; success, failure, or cancellation never starts automatic fixes. Use `/plan resume` before requesting more implementation work.
+`plan_mode_implementation_complete` must be called alone. Completion returns to Normal without a follow-up request by default. A template can capture named `hooks.on_implementation_complete` checks (see [settings and header migration](./settings.md)). Up to four potentially billable workers run concurrently, each receiving its own prompt and the complete saved plan, not the conversation or implementation transcript. Each inherits the parent model and effort unless overridden. Completion shows one ordered report; an unavailable model or worker fails only that check, without automatic fixes or retries. Use `/plan resume` before requesting more implementation work.
 
 
 ## Open and edit the current plan

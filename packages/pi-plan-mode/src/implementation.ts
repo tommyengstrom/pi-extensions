@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { type Delegate, delegationService } from "@narumitw/pi-background";
+import { type Delegate, delegationServiceV2, MAX_DELEGATED_WORKERS } from "@narumitw/pi-background";
 import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { artifactGuidance } from "./artifacts.js";
 import { normalizePlanModeCompletion, PLAN_MODE_COMPLETE_PARAMS, renderPlanModeCompletion } from "./completion-tool.js";
@@ -317,26 +317,43 @@ export function registerImplementation(
       activate(ctx);
       status(ctx);
       let text = "Implementation completed.";
-      if (source.completionPrompt) {
+      const checks = source.completionChecks;
+      if (checks?.length) {
         const controller = new AbortController();
         operation = controller;
-        const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+        const combined = AbortSignal.any([controller.signal, signal, ctx.signal].filter((s): s is AbortSignal => !!s));
+        const outputs = checks.map(() => "cancelled");
+        const failure = (error: unknown) =>
+          combined.aborted || (error instanceof Error && error.name === "AbortError")
+            ? "cancelled"
+            : `failed: ${bounded(errorMessage(error), 1600)}`;
         try {
           const store = await ownedStore(ctx, source);
           combined.throwIfAborted();
           const plan = await store.read(source.document);
           combined.throwIfAborted();
-          const delegate = dependencies.delegate ?? delegationService(pi);
-          const result = await delegate(ctx, { task: source.completionPrompt, plan }, combined);
-          combined.throwIfAborted();
-          text += `\nCompletion task: ${sanitizeTerminalText(result)}`;
+          const delegate = dependencies.delegate ?? delegationServiceV2(pi);
+          const pending = checks.entries();
+          async function consume() {
+            for (const [i, { name: _name, type: _type, prompt, ...overrides }] of pending) {
+              if (combined.aborted) return;
+              try {
+                const result = await delegate(ctx, { task: prompt, plan, ...overrides }, combined);
+                combined.throwIfAborted();
+                outputs[i] = `succeeded: ${bounded(result, 1600)}`;
+              } catch (error) {
+                outputs[i] = failure(error);
+              }
+            }
+          }
+          await Promise.all(Array.from({ length: Math.min(MAX_DELEGATED_WORKERS, checks.length) }, consume));
         } catch (error) {
-          text += combined.aborted
-            ? " Completion task cancelled."
-            : ` Completion task failed: ${sanitizeTerminalText(errorMessage(error))}`;
+          outputs.fill(failure(error));
         } finally {
           if (operation === controller) operation = undefined;
         }
+        if (controller.signal.aborted) text += " Completion checks cancelled.";
+        else text += checks.map(({ name }, i) => `\n${bounded(name, 120)}: ${outputs[i]}`).join("");
       }
       return { content: [{ type: "text", text }], details: {}, terminate: true };
     },
@@ -369,13 +386,13 @@ export function registerImplementation(
       document: PlanDocument,
       plan: string,
       store: PlanStore,
-      completionPrompt?: string,
+      completionChecks?: ImplementationState["completionChecks"],
     ): ImplementationState {
       return createImplementation(
         {
           projectRoot: store.projectRoot,
           storage: store.storage,
-          completionPrompt,
+          completionChecks,
         },
         document,
         plan,
@@ -464,6 +481,10 @@ export function registerImplementation(
       }
     },
   };
+}
+function bounded(value: string, limit: number): string {
+  const clean = sanitizeTerminalText(value);
+  return clean.length > limit ? `${clean.slice(0, limit - 1).toWellFormed()}…` : clean;
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

@@ -8,11 +8,12 @@ import {
 import {
   ARTIFACT_TOOL_NAMES,
   backgroundRuntime,
-  DELEGATION_EVENT,
+  DELEGATION_EVENT_V2,
   type Delegate,
   type Recipient,
   STATUS_EVENT,
   SUBAGENT_TOOL_NAMES,
+  type WorkerOverrides,
 } from "@narumitw/pi-background";
 import { canonical, captureCapabilities, delegable } from "./capabilities.js";
 import { parseTask, prepareWorker } from "./launch.js";
@@ -64,6 +65,7 @@ export default function herdr(pi: ExtensionAPI): void {
     ctx: Parameters<OperationHandler>[2],
     signal?: AbortSignal,
     plan?: string,
+    overrides?: WorkerOverrides,
   ) => {
     signal?.throwIfAborted();
     const recipient = background.recipient(ctx);
@@ -79,7 +81,7 @@ export default function herdr(pi: ExtensionAPI): void {
         throw new Error("subagent is not selected in the current tool policy.");
       if (typeof input.task !== "string" || (input.agent !== undefined && typeof input.agent !== "string"))
         throw new Error("Expected a task and optional profile name");
-      const request = { task: input.task, agent: input.agent as string | undefined, plan };
+      const request = { task: input.task, agent: input.agent as string | undefined, plan, ...overrides };
       const parent = process.env.HC_TERMINAL_ID;
       const socket = process.env.HC_TERMINAL_SOCKET;
       if (!parent || !socket)
@@ -148,13 +150,16 @@ export default function herdr(pi: ExtensionAPI): void {
       return { job, ...background.resultDetails(recipient, [`herdr:${id}`]) };
     return { job: brief(job) };
   };
-  const delegate: Delegate = async (ctx, { task, plan }, signal) => {
-    const { job } = (await perform("launch", { task }, ctx, signal, plan)) as { job: Job };
-    return terminalText(
-      `${job.state}: ${job.result ?? "Inspect the retained terminal."}${job.resultPath ? `\nFull result: ${job.resultPath}` : ""}`,
+  const delegate: Delegate = async (ctx, { task, plan, ...overrides }, signal) => {
+    const { job } = (await perform("launch", { task }, ctx, signal, plan, overrides)) as { job: Job };
+    const output = terminalText(
+      `${job.result ?? "Inspect the retained terminal."}${job.resultPath ? `\nFull result: ${job.resultPath}` : ""}`,
     );
+    if (job.state === "cancelled") throw new DOMException(output, "AbortError");
+    if (job.state !== "succeeded") throw new Error(`${job.state}: ${output}`);
+    return output;
   };
-  const offDelegate = pi.events.on(DELEGATION_EVENT, (respond) => {
+  const offDelegate = pi.events.on(DELEGATION_EVENT_V2, (respond) => {
     if (typeof respond === "function") respond(delegate);
   });
   registerSubagentTools(pi, perform);

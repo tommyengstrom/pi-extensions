@@ -1,7 +1,9 @@
 import { access, constants, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { WorkerOverrides } from "@narumitw/pi-background";
 import {
   type CapabilitySnapshot,
   type captureCapabilities,
@@ -50,29 +52,42 @@ export async function prepareWorker(
   ctx: ExtensionContext,
   agentDir: string,
   directory: string,
-  input: { task: string; agent?: string; plan?: string },
+  input: { task: string; agent?: string; plan?: string } & WorkerOverrides,
   candidates: ReturnType<typeof captureCapabilities>,
   guidance?: string,
 ) {
   if (!input.task.trim() || (input.plan === undefined && Buffer.byteLength(input.task) > 32000))
     throw new Error("Expected a nonempty task of at most 32000 bytes.");
-  if (!ctx.model) throw new Error("Select a model before delegating.");
+  let selected = ctx.model;
+  if (input.model !== undefined) {
+    const slash = input.model.indexOf("/");
+    selected = ctx.modelRegistry.find(input.model.slice(0, slash), input.model.slice(slash + 1));
+    if (!selected || `${selected.provider}/${selected.id}` !== input.model)
+      throw new Error(`Unknown worker model: ${input.model}`);
+  }
+  if (!selected) throw new Error("Select a model before delegating.");
+  const thinking = input.effort ?? ctx.thinkingLevel ?? pi.getThinkingLevel();
+  if ((input.model || input.effort) && !getSupportedThinkingLevels(selected).includes(thinking))
+    throw new Error(`Worker model ${selected.id} does not support effort ${thinking}.`);
   if (
-    ctx.modelRegistry.getRegisteredNativeProvider(ctx.model.provider) ||
-    ctx.modelRegistry.getRegisteredProviderConfig(ctx.model.provider)
+    ctx.modelRegistry.getRegisteredNativeProvider(selected.provider) ||
+    ctx.modelRegistry.getRegisteredProviderConfig(selected.provider)
   )
     throw new Error(
-      `Worker cannot guarantee the parent’s runtime-registered provider ${ctx.model.provider}. Use a CLI-configured provider.`,
+      `Worker cannot guarantee runtime-registered provider ${selected.provider}. Use a CLI-configured provider.`,
     );
   const trusted = ctx.isProjectTrusted();
   const model = {
-    provider: ctx.model.provider,
-    model: ctx.model.id,
-    baseUrl: ctx.model.baseUrl,
-    thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
+    provider: selected.provider,
+    model: selected.id,
+    baseUrl: selected.baseUrl,
+    thinking,
   };
   const role = await profile(agentDir, input.agent);
-  const capabilities = await resolveCapabilities(candidates, role.tools);
+  const capabilities = await resolveCapabilities(
+    candidates.filter(({ name }) => !input.remove_tools?.includes(name)),
+    role.tools,
+  );
   const policy: WorkerPolicy = { capabilities, ...model };
   const extensions = [...capabilities.builtins, ...capabilities.files.map((f) => f.path)];
   const names = capabilities.tools.map((t) => t.name);

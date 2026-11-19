@@ -175,8 +175,13 @@ To create a custom template or override a built-in one, place a UTF-8 Markdown f
 ---
 label: Small change
 description: Focused plan with a short overview
-on_implementation_complete: |-
-  Summarize the implemented changes for the release notes. Do not edit files.
+hooks:
+  on_implementation_complete:
+    - name: Release notes
+      type: subagent
+      remove_tools: [edit, write, bash]
+      prompt: |-
+        Summarize the implemented changes for the release notes. Do not edit files.
 ---
 
 # [Plan title]
@@ -194,9 +199,11 @@ on_implementation_complete: |-
 
 The planner includes every section, preserves headings and order, replaces placeholders with task-specific content, and follows the HTML comments without copying them into the finished plan. Put overall investigation methods in a comment near the title and section-specific methods and content rules under each heading. Checklist templates may explicitly request repeated groups or items. These are model instructions, not a hard character-count or document-schema validator.
 
-The header is optional. `label`, `description`, and `on_implementation_complete` must each be one nonblank string when supplied. A missing closing delimiter, malformed YAML, or empty body is rejected. Headerless templates remain supported.
+The header is optional. `label` and `description` must be nonblank strings when supplied. Migrate the former top-level `on_implementation_complete` string into a named list item as above. Previously captured workflows retain their old task as one named check. A missing closing delimiter, malformed YAML, or empty body is rejected. Headerless templates remain supported.
 
-Completion returns to Normal without a follow-up request by default. If the selected template captured `on_implementation_complete`, completion starts one separate, potentially billable Herdr worker with the configured task and the complete current plan Markdown, not the conversation or implementation transcript. Its final result is shown once; success, failure, or cancellation never starts automatic fixes. Use `/plan resume` before requesting more implementation work. The prompt is captured when the template is selected, so editing the template later does not change an existing workflow. Omit the field for no worker. Old `verification` settings are ignored and preserved.
+Each check requires a nonblank `name`, literal `prompt` (not a shell or slash command), and `type: subagent`. Unknown events, types and check fields are template errors. Optional `model` (`provider/model`) and `effort` (a Pi thinking level) otherwise inherit from the parent. `remove_tools` subtracts names from this worker’s delegable tools; it cannot grant access. An unavailable model, unsupported effort or missing compatible Herdr worker is a runtime failure for that check, not a template error.
+
+The selected template’s checks are captured; later template edits do not affect the workflow. Only implementation completion runs them, after returning to Normal. Omitted hooks or an empty list make no worker requests. Otherwise each potentially billable worker receives its prompt and the complete current saved plan, not the conversation, implementation transcript or sibling results. Up to four checks run concurrently; remaining checks queue. Results appear once in declaration order. Failures are advisory and never trigger retries, fixes or a follow-up request. Use `/plan resume` for more implementation work. Old `verification` settings are ignored and preserved.
 
 Use **Alt+Shift+M**, `/plan template`, or `/plan template <id>` during an active planning workflow to switch templates on the fly. If a plan has already been saved in the current workflow, switching templates immediately transitions back to planning and sends a user request instructing the planner to rewrite the current plan into the new template format using `plan_mode_complete` at the same file path.
 

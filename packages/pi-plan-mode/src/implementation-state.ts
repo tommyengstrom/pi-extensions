@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { type CompletionCheck, restoreChecks } from "./completion-checks.js";
 import { type PlanDocument, type PlanStorage, planHash, validPlanDocument, validPlanStorage } from "./plan-store.js";
 
 export const IMPLEMENTATION_ENTRY = "pi-plan-implementation";
@@ -20,7 +21,7 @@ export interface ImplementationState {
   projectRoot: string;
   plansDirectory?: string;
   storage?: PlanStorage;
-  completionPrompt?: string;
+  completionChecks?: CompletionCheck[];
   completion?: string;
 }
 export function createImplementation(
@@ -68,14 +69,13 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
     !validPlanStorage(state.storage ?? { kind: "legacy", plansDirectory: state.plansDirectory }) ||
     !validPlanDocument(state.document) ||
     !hash(state.hash) ||
-    (state.completionPrompt !== undefined &&
-      (typeof state.completionPrompt !== "string" || !state.completionPrompt.trim())) ||
     (state.completion !== undefined && typeof state.completion !== "string") ||
     "revisions" in state ||
     "plan" in state
   )
     throw new Error("Invalid v3 implementation state. No files were changed.");
   const restored = structuredClone(state);
+  restoreChecks(restored);
   delete restored.previousTools;
   delete restored.lastCheck;
   delete restored.toolIdentities;

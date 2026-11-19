@@ -48,7 +48,7 @@ export default function workerGuard(pi: ExtensionAPI) {
         ctx.model.baseUrl !== policy.baseUrl ||
         ctx.thinkingLevel !== policy.thinking
       )
-        fail("Pi CLI could not reproduce the selected parent model/thinking level.");
+        fail("Pi CLI could not reproduce the selected worker model, endpoint or thinking level.");
       await verifySourceFiles(capabilities);
       // CLI MCP registration may still be completing. Wait only for selected names.
       const deadline = Date.now() + 10000;

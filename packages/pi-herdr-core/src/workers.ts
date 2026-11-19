@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { MAX_DELEGATED_WORKERS } from "@narumitw/pi-background";
 import { CoreClient, CoreError, type CoreTerminal, localAddress, parseTerminal } from "./core.js";
 import { terminalText } from "./terminal-text.js";
 
@@ -19,6 +20,7 @@ interface Run {
   job: Job;
   cancel: boolean;
   done: Promise<void>;
+  settled: boolean;
 }
 /** Direct children only. Identity is scoped to this live parent; never adopt old runs. */
 export class Workers {
@@ -81,14 +83,22 @@ export class Workers {
     signal?: AbortSignal,
     enqueueResult = true,
   ) {
-    if (this.closed || !this.owns(scope)) throw new Error("Worker scope revoked");
-    if ([...this.runs.values()].filter((r) => active(r.job)).length >= 4)
-      throw new Error("Four workers are already active or unconfirmed");
+    // Ordinary launches fail fast. A batch can wait for other workers, but
+    // cannot reuse a slot whose termination is uncertain.
+    for (;;) {
+      signal?.throwIfAborted();
+      if (this.closed || !this.owns(scope)) throw new Error("Worker scope revoked");
+      const occupied = [...this.runs.values()].filter((r) => active(r.job));
+      if (occupied.length < MAX_DELEGATED_WORKERS) break;
+      if (enqueueResult || occupied.every((r) => r.settled))
+        throw new Error("Four workers are already active or unconfirmed");
+      await delay(100, undefined, { signal });
+    }
     const id = randomUUID();
     const directory = join(this.agentDir, "pi-herdr-core", "workers", id);
     const job: Job = { id, scope, state: "starting", omissions: [] };
     const accepted = Promise.withResolvers<Job>();
-    const r: Run = { job, cancel: false, done: Promise.resolve() };
+    const r: Run = { job, cancel: false, settled: false, done: Promise.resolve() };
     this.runs.set(id, r);
     const cancelled = () => r.cancel || this.closed || !this.owns(scope) || signal?.aborted;
     r.done = (async () => {
@@ -97,6 +107,7 @@ export class Workers {
       let acknowledged = false;
       try {
         const { argv, omissions } = await prepare(directory);
+        if (cancelled()) throw new Error("Worker scope revoked before launch");
         job.omissions = omissions;
         const parent = await new CoreClient(this.socket).call("terminal.get", { terminal: this.parent });
         const identity = parseTerminal(parent.result);
@@ -207,6 +218,7 @@ export class Workers {
         job.result = terminalText(String(e));
         if (!acknowledged) accepted.reject(e);
       }
+      r.settled = true;
       if (enqueueResult && acknowledged && !this.closed && this.owns(scope)) this.completed({ ...job });
     })();
     return accepted.promise;

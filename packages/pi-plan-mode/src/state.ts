@@ -1,4 +1,5 @@
 import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
+import { type CompletionCheck, restoreChecks } from "./completion-checks.js";
 import { type PlanDocument, type PlanStorage, validPlanDocument, validPlanStorage } from "./plan-store.js";
 import { MAX_PLAN_MODE_INSTRUCTIONS_BYTES } from "./planning-instructions.js";
 import { BUILTIN_PLAN_TEMPLATES, DEFAULT_PLAN_TEMPLATE, validTemplateName } from "./templates.js";
@@ -18,7 +19,7 @@ export interface PlanWorkflow {
   instructions: string;
   template: string;
   templatePrompt: string;
-  completionPrompt?: string;
+  completionChecks?: CompletionCheck[];
   tools?: string[];
   artifacts?: PlanArtifacts;
 }
@@ -97,6 +98,7 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
   if (!record(value) || !["planning", "ready"].includes(String(value.kind)) || !validWorkflow(value.workflow))
     throw new Error("Invalid v3 Plan workflow state. No files were changed.");
   const workflow: PlanWorkflow & { basePrompt?: unknown; previousTools?: unknown } = structuredClone(value.workflow);
+  restoreChecks(workflow);
   delete workflow.basePrompt;
   delete workflow.previousTools;
   workflow.template ??= DEFAULT_PLAN_TEMPLATE.id;
@@ -127,8 +129,6 @@ function validWorkflow(value: unknown): value is PlanWorkflow {
     !validPlanStorage(value.storage ?? { kind: "legacy", plansDirectory: value.plansDirectory }) ||
     typeof value.instructions !== "string" ||
     Buffer.byteLength(value.instructions) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES ||
-    (value.completionPrompt !== undefined &&
-      (typeof value.completionPrompt !== "string" || !value.completionPrompt.trim())) ||
     (value.template !== undefined && !validTemplateName(value.template)) ||
     (value.templatePrompt !== undefined &&
       (typeof value.templatePrompt !== "string" ||

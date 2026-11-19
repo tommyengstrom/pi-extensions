@@ -7,7 +7,13 @@ export {
   type WorkflowContext,
   WorkflowScope,
 } from "./context.js";
-export { DELEGATION_EVENT, type Delegate, delegationService } from "./delegation.js";
+export {
+  DELEGATION_EVENT_V2,
+  type Delegate,
+  delegationServiceV2,
+  MAX_DELEGATED_WORKERS,
+  type WorkerOverrides,
+} from "./delegation.js";
 export { ARTIFACT_TOOL_NAMES, SUBAGENT_TOOL_NAMES, verifiedSubagentTools } from "./provenance.js";
 export { type Claim, type Notice, NotificationQueue } from "./queue.js";
 export {
