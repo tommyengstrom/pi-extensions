@@ -145,7 +145,6 @@ test("v3 workflows explicitly capture their selected storage", () => {
             projectRoot: "/project",
             storage,
             instructions: "",
-            previousTools: [],
           },
         },
       },

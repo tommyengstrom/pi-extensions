@@ -118,7 +118,7 @@ test("v3 implementation entries retain only a document locator and hash, not app
   const document = planDocument();
   const plan = "# Current target\n\nImplement blue.";
   const state = createImplementation(
-    { projectRoot: "/project", storage: { kind: "repo" }, previousTools: ["read", "write"], toolIdentities: [] },
+    { projectRoot: "/project", storage: { kind: "repo" }, toolIdentities: [] },
     document,
     plan,
   );
@@ -130,6 +130,7 @@ test("v3 implementation entries retain only a document locator and hash, not app
   assert.equal("plan" in state, false);
   const entry = { type: "custom", customType: IMPLEMENTATION_ENTRY, data: state };
   assert.deepEqual(restoreImplementation([entry]), state);
+  assert.deepEqual(restoreImplementation([{ ...entry, data: { ...state, previousTools: ["read"] } }]), state);
   assert.equal(JSON.stringify(entry).includes(plan), false);
   for (const invalid of [{ version: 1 }, { document: undefined }, { hash: "bad" }])
     assert.throws(() => restoreImplementation([{ ...entry, data: { ...state, ...invalid } }]), /Invalid|Legacy/);

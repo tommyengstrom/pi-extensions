@@ -136,17 +136,8 @@ export default async function planWithBackground(
           );
         pi.appendEntry(type, data);
         state = next;
-        if (captured && isRestricted(next))
-          pi.setActiveTools(
-            resolvePlanTools(pi.getAllTools(), selection.tools, next.kind === "explain" ? "explain" : "plan").active,
-          );
         publish();
       } else pi.appendEntry(type, data);
-    },
-    setActiveTools(names) {
-      pi.setActiveTools(names);
-      // State transitions publish after commit. Exact allowed names, not per-turn active
-      // declarations, define restricted authority; a later tool selection commit rotates it.
     },
     registerTool(definition) {
       if (definition.name !== "plan_mode_complete" && definition.name !== "plan_mode_edit") {

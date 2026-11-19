@@ -44,6 +44,7 @@ test("absent template fields default to decision-brief and valid captured templa
     assert.equal(state.workflow.template, expectedId);
     assert.equal(state.workflow.templatePrompt, expectedPrompt);
     assert.equal("basePrompt" in state.workflow, false);
+    assert.equal("previousTools" in state.workflow, false);
     assert.equal(state.workflow.instructions, "Captured guidance");
     assert.equal(state.workflow.version, 3);
   }
@@ -95,19 +96,19 @@ test("Explain restores independently of v3 workflows and rejects malformed restr
   const restriction = {
     version: 1,
     id: "explain-id",
-    previousTools: ["read", "write"],
     tools: ["grep"],
     prompt: DEFAULT_EXPLAIN_PROMPT,
   };
   const original = { kind: "explain", restriction };
-  const restored = restorePlanState([entry(original)]);
+  const restored = restorePlanState([
+    entry({ ...original, restriction: { ...restriction, previousTools: ["write"] } }),
+  ]);
   assert.deepEqual(restored, original);
   assert.notEqual(restored, original);
   assert.equal("workflow" in restored, false);
   for (const invalid of [
     { version: 2 },
     { id: "" },
-    { previousTools: [42] },
     { tools: null },
     { prompt: "" },
     { prompt: "é".repeat(MAX_PLAN_MODE_INSTRUCTIONS_BYTES) },
@@ -125,7 +126,6 @@ test("invalid version, storage, hashes and tool lists cannot restore current own
     { id: "" },
     { storage: { kind: "other" } },
     { hash: "not-a-hash" },
-    { previousTools: [42] },
     { tools: [null] },
     { instructions: "é".repeat(MAX_PLAN_MODE_INSTRUCTIONS_BYTES) },
     { document: { ...planDocument(), path: "" } },

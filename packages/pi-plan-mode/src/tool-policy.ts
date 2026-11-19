@@ -1,9 +1,15 @@
-import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { verifiedSubagentTools } from "@narumitw/pi-background";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 
 export const EXPLAIN_DENIED_HELPERS: readonly string[] = ["plan_mode_complete", ...IMPLEMENTATION_HELPERS];
 export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"] as const;
+/** Change only workflow-owned declarations, using Pi's live selection even during rollback. */
+export function setWorkflowHelpers(pi: ExtensionAPI, owned: readonly string[], wanted: readonly string[]) {
+  const active = pi.getActiveTools();
+  const next = [...active.filter((name) => !owned.includes(name)), ...wanted];
+  if (next.length !== active.length || next.some((name) => !active.includes(name))) pi.setActiveTools(next);
+}
 const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const legacyDefaultCatalogues = new WeakSet<readonly ToolInfo[]>();
 /** Preserve pre-delegation implicit defaults on restored workflows without hiding

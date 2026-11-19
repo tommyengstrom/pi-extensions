@@ -221,22 +221,22 @@ test("Normal /plan tools configures future planning without activating it or cha
   assert.deepEqual(f.sentUserMessages, []);
   assert.equal(f.naming.length, 0);
   await f.command("start");
-  assert.ok(f.rawPi.getActiveTools().includes("grep"));
-  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  assert.ok(!f.rawPi.getActiveTools().includes("grep"));
+  assert.ok(f.rawPi.getActiveTools().includes("write"));
   await f.command("exit");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
 });
 
 test.each(["exit", "implementation"] as const)(
-  "%s restores available captured tools, not independently disabled tools",
+  "%s preserves changes made to ordinary tools while the plan was active",
   async (exit) => {
     const f = await fixture();
-    f.rawPi.setActiveTools(["read", "edit"]);
-    if (exit === "implementation") await implementing(f);
-    else {
-      await f.command("start");
-      await f.command("exit");
-    }
+    await ready(f);
+    f.rawPi.setActiveTools(f.rawPi.getActiveTools().filter((name) => name !== "write" && name !== "bash"));
+    if (exit === "implementation") {
+      f.choose("here");
+      await f.command("");
+    } else await f.command("exit");
     const active = f.rawPi.getActiveTools();
     assert.ok(active.includes("read"));
     assert.ok(active.includes("edit"));

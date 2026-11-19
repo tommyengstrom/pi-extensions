@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Tool permissions
+
+- Plan and Explain now gate calls without changing ordinary tool availability. `/plan tools` grants permission, not activation. Exit, resume and fresh implementation no longer replay a saved tool list.
+
 ### Localized plan revisions
 
 - Add `plan_mode_edit` with Pi's exact `{path, edits: [{oldText, newText}]}` input and no reason field. Only the current active revision can be edited; the source is preserved and a new numbered revision is saved in the same series. Results show a diff and new path instead of echoing the full plan; subsequent edits use the new path.

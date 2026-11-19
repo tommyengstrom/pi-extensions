@@ -13,7 +13,7 @@ function fixture() {
   vi.useFakeTimers();
   let plan = "# Plan\nImplement tests.";
   const state = createImplementation(
-    { projectRoot: "/project", storage: { kind: "repo" }, previousTools: [], toolIdentities: [] },
+    { projectRoot: "/project", storage: { kind: "repo" }, toolIdentities: [] },
     planDocument(),
     plan,
   );

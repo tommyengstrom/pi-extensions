@@ -18,14 +18,12 @@ export interface PlanWorkflow {
   instructions: string;
   template: string;
   templatePrompt: string;
-  previousTools: string[];
   tools?: string[];
   artifacts?: PlanArtifacts;
 }
 export interface ExplainSession {
   version: 1;
   id: string;
-  previousTools: string[];
   tools?: string[];
   prompt: string;
 }
@@ -79,7 +77,6 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       !record(restriction) ||
       restriction.version !== 1 ||
       !text(restriction.id) ||
-      !names(restriction.previousTools) ||
       (restriction.tools !== undefined && !names(restriction.tools)) ||
       typeof restriction.prompt !== "string" ||
       !restriction.prompt.trim() ||
@@ -91,7 +88,6 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
       restriction: {
         version: 1,
         id: restriction.id,
-        previousTools: [...restriction.previousTools],
         ...(restriction.tools !== undefined ? { tools: [...restriction.tools] } : {}),
         prompt: restriction.prompt,
       },
@@ -99,8 +95,9 @@ export function restorePlanState(entries: readonly unknown[]): PlanState {
   }
   if (!record(value) || !["planning", "ready"].includes(String(value.kind)) || !validWorkflow(value.workflow))
     throw new Error("Invalid v3 Plan workflow state. No files were changed.");
-  const workflow: PlanWorkflow & { basePrompt?: unknown } = structuredClone(value.workflow);
+  const workflow: PlanWorkflow & { basePrompt?: unknown; previousTools?: unknown } = structuredClone(value.workflow);
   delete workflow.basePrompt;
+  delete workflow.previousTools;
   workflow.template ??= DEFAULT_PLAN_TEMPLATE.id;
   workflow.templatePrompt ??=
     BUILTIN_PLAN_TEMPLATES.find((candidate) => candidate.id === workflow.template)?.content ??
@@ -134,7 +131,6 @@ function validWorkflow(value: unknown): value is PlanWorkflow {
       (typeof value.templatePrompt !== "string" ||
         !value.templatePrompt.trim() ||
         Buffer.byteLength(value.templatePrompt) > MAX_PLAN_MODE_INSTRUCTIONS_BYTES)) ||
-    !names(value.previousTools) ||
     (value.tools !== undefined && !names(value.tools)) ||
     (value.name !== undefined && !name(value.name)) ||
     (value.task !== undefined && (typeof value.task !== "string" || !value.task.trim() || value.task.length > 4000)) ||

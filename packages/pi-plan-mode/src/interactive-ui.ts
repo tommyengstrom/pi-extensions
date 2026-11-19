@@ -120,6 +120,7 @@ export async function selectPlanTools(
     title: "Planning tools",
     lines: [
       "Defaults: canonical core read, grep, find, ls. Planning helpers are fixed and excluded.",
+      "Selection permits calls; it does not enable inactive tools in Pi.",
       "Other tools, including shells and core-name overrides, are trusted and may mutate files.",
       ...(unavailable.length
         ? ["Unavailable configured tools are retained unchanged; edit configuration to remove them."]

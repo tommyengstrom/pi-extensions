@@ -27,7 +27,6 @@ export interface ImplementationState {
   projectRoot: string;
   plansDirectory?: string;
   storage?: PlanStorage;
-  previousTools: string[];
   tools?: string[];
   toolIdentities: ToolIdentity[];
   completion?: string;
@@ -78,7 +77,6 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
     !validPlanStorage(state.storage ?? { kind: "legacy", plansDirectory: state.plansDirectory }) ||
     !validPlanDocument(state.document) ||
     !hash(state.hash) ||
-    !names(state.previousTools) ||
     (state.tools !== undefined && !names(state.tools)) ||
     (state.completion !== undefined && typeof state.completion !== "string") ||
     (state.lastCheck !== undefined &&
@@ -100,7 +98,9 @@ export function restoreImplementation(entries: readonly unknown[]): Implementati
     "plan" in state
   )
     throw new Error("Invalid v3 implementation state. No files were changed.");
-  return structuredClone(state) as unknown as ImplementationState;
+  const restored = structuredClone(state);
+  delete restored.previousTools;
+  return restored as unknown as ImplementationState;
 }
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

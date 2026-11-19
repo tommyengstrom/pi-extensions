@@ -135,7 +135,7 @@ test("generated entrypoint loads through Pi Jiti and runs in a real AgentSession
     );
     assert.deepEqual(
       new Set(session.getActiveToolNames()),
-      new Set(["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),
+      new Set([...previousTools, "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),
     );
     const complete = runner.getToolDefinition("plan_mode_complete");
     assert.ok(complete);

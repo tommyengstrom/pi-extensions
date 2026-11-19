@@ -42,11 +42,11 @@ Coding requires an explicit switch: `/explain exit` returns to Normal for ordina
 
 Explain shares Plan's inspection defaults, explicit tool trust, and `/plan tools` selection. Plan-writing and implementation helpers are always denied in Explain, even if configured explicitly. This is a workflow restriction, **not an OS sandbox**: trusted tool implementations can still mutate state, but Explain's instructions prohibit mutations and plan creation. Selected artifact tools get no plan workspace, association, readiness protocol, or automatic generation guidance; operations requiring plan ownership may reject.
 
-Explain uses [`prompts/explain.md`](./prompts/explain.md), never the plan prompt, templates, or appended planning files. Its identity, tools, original Normal loadout, and prompt snapshot survive reload, branch navigation, and compaction. Switching Explain → Plan carries the selection and original restoration snapshot forward without reviving an earlier workflow.
+Explain uses [`prompts/explain.md`](./prompts/explain.md), never the plan prompt, templates, or appended planning files. Its identity, tool permissions, and prompt snapshot survive reload, branch navigation, and compaction. Switching Explain → Plan carries the permission selection forward without reviving an earlier workflow.
 
 ## Controlled subagents
 
-When `pi-herdr-core` is loaded, **new** Plan and Explain workflows default-enable its four verified tools: `subagent`, `subagent_query`, `subagent_wait`, and `subagent_cancel`. Names alone do not establish trust: registered package-entrypoint provenance must match. Explicit selections (including `tools: []`) are unchanged. Restored implicit workflows retain their older inspection defaults; new defaults are captured for stable continuation. Exiting restores the prior Normal tool loadout.
+When `pi-herdr-core` is loaded, **new** Plan and Explain workflows permit its four verified tools by default: `subagent`, `subagent_query`, `subagent_wait`, and `subagent_cancel`. Names alone do not establish trust: registered package-entrypoint provenance must match. Explicit selections (including `tools: []`) are unchanged. Restored implicit workflows retain their older inspection defaults; new defaults are captured for stable continuation.
 
 Use `/subagent <query>` for a human delegation request. Children inherit the workflow's exact allowed-name ceiling and guidance, excluding parent-only plan/review/implementation and Plan-associated artifact helpers. Controlled terminal/control-record bookkeeping is permitted, not code mutation or approval. Tool permission changes or mode replacement cancel associated work; ordinary turns retain its scope and prompt. The adherence checker excludes background delegation tools, without changing naming/progress observers.
 
@@ -106,7 +106,7 @@ untrusted HTML details.
 | `/plan verify` | Check this session's recorded implementation against its current plan file with a fresh agent. |
 | `/plan resume` | Resume implementation tracking after completion or detachment, before sending fixes. |
 | `/plan artifacts omit <jobId>` | Explicitly agree to omit a failed/cancelled/interrupted artifact from readiness. |
-| `/plan exit` | Leave Plan mode and restore preexisting tool availability; saved files remain. |
+| `/plan exit` | Leave Plan mode and remove its execution gate; saved files remain. |
 
 Commands require an idle agent with no queued messages, except `/plan progress`. Menus, document review, and implementation selection require TUI or RPC. Print/JSON users can use the direct Explain and planning commands and resume in an interactive mode to review and implement.
 
@@ -129,7 +129,7 @@ The coordinated footer is exactly one of these labels:
 
 **Alt+Shift+M** opens the template picker directly, with the current template marked. Before the first save, selection changes the active plan's template without a model request. After a save, choosing a different template requests a rewrite at the same path. Cancelling or selecting the unchanged current template does nothing. Outside Plan mode, it changes the default for future plans without switching modes. Like Alt+M, it requires an idle agent, no queued messages, and no open Plan command.
 
-**Alt+M** cycles **Normal → Explain → Plan → Normal** while the agent is idle with no queued messages. Transitions send no request; leaving restores the original Normal tools without opening review or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
+**Alt+M** cycles **Normal → Explain → Plan → Normal** while the agent is idle with no queued messages. Transitions send no request; leaving drops the restriction without opening review or starting implementation. Your editor draft and saved plan files are unchanged. Leaving ends the current workflow; use `/plan saved` to continue a saved plan rather than starting a new workflow.
 
 Change the binding in `<getAgentDir()>/pi-plan-mode.json`:
 
@@ -177,7 +177,7 @@ Opening review never starts implementation. Use the configured Up/Down keys to s
 
 The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan. Status/recovery reads the authoritative file from disk. Hash-based stale-read checks reject conflicting updates before overwriting newer contents; reread and reconcile before retrying. There is no immutable approved-baseline enforcement.
 
-A successful handoff ends restricted planning in the source session and establishes branch-aware implementation tracking in the destination; the saved plan remains available through `/plan saved`. Preexisting tool availability is restored before implementation helpers are enabled. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
+A successful handoff ends restricted planning in the source session and establishes branch-aware implementation tracking in the destination; the saved plan remains available through `/plan saved`. The destination adds implementation helpers to its own native tools. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
 
 ## Live reported progress
 
@@ -193,13 +193,13 @@ Defaults are independent `progress.model: { "provider": "openai", "id": "gpt-6-l
 
 ## Tools and trust
 
-The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. New workflows additionally enable the four verified Herdr tools when that extension is loaded. Same-name extension overrides are not trusted defaults. The planning allowlist applies **only in planning**. Plan mode temporarily activates the required direct tools and restores preexisting active-tool availability when planning ends, before enabling implementation helpers. It does not narrow normal-mode or implementation tools.
+The strict defaults are the **canonical built-in `read`, `grep`, `find`, and `ls` implementations**, plus `plan_mode_question`, `plan_mode_complete`, and `plan_mode_edit`. New workflows also permit the four verified Herdr tools when that extension is loaded. Same-name extension overrides are not trusted defaults. **Permission is not activation:** Plan and Explain check calls at execution time. Unpermitted tools can still be visible, and permitting an inactive ordinary tool does not enable it. Only workflow helpers are toggled. Leaving either mode removes the gate; it does not reset Pi’s tools. Fresh implementation uses the destination’s native tool set. Old `previousTools` snapshots are ignored, not replayed to repair historical sessions.
 
 Use `/plan tools` while idle to change a planning workflow's selection. In normal mode it configures future planning without entering planning or changing active tools. During implementation it may update the isolated checker's selection only. Use `/plan settings` for future-workflow defaults. The picker asks for confirmation before trusting nondefault tools. The checker enforces its own read-only policy in its child session; checking never changes the parent's tool availability.
 
 **Explicitly selecting a tool trusts its implementation**, including shells, editing tools, MCP tools, and overrides. There is no shell parser or command-level read-only filter. A trusted tool can mutate files, execute code, or affect external systems, even though the default planning prompt instructs the planner not to do so. Tool annotations are not verified permissions. This is an agent workflow restriction, **not an OS sandbox or confidentiality boundary**.
 
-Each host-mediated tool call, including a nested call, must have an allowed exact name during planning. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Direct and `model-only` selections are activated; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The required helpers must be registered and available too. Question/completion helpers are planning-only; `plan_mode_edit` is available in planning and active tracked implementation. Implementation update/status/completion helpers are available only during tracked implementation. All helpers are inactive outside their applicable workflow and excluded from adherence-checker sessions.
+Each host-mediated tool call, including a nested call, must have an allowed exact name during planning. Selecting `codemode` or another orchestrator does not authorize its callees; select them separately. Registered `codemode`/`deferred` tools can be allowed without forcing direct activation. Ordinary direct and `model-only` selections must already be active in Pi; Pi still prevents nested calls to `model-only` tools. Hidden and unknown tools are unavailable. The required helpers must be registered and available too. Question/completion helpers are planning-only; `plan_mode_edit` is available in planning and active tracked implementation. Implementation update/status/completion helpers are available only during tracked implementation. All helpers are inactive outside their applicable workflow and excluded from adherence-checker sessions.
 
 ## Structured questions
 

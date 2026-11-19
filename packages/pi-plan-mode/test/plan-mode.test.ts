@@ -317,7 +317,7 @@ test("Explain shares inspection tools and nested gates but denies every planning
   assert.doesNotMatch(event.systemPromptOptions.sections.pi_plan_mode, /Artifact workspace:|wait-at-the-end/);
   f.chooseTools(["read", "grep"]);
   await f.command("tools");
-  assert.deepEqual(new Set(f.rawPi.getActiveTools()), new Set(["read", "grep", "plan_mode_question"]));
+  assert.deepEqual(new Set(f.rawPi.getActiveTools()), new Set([...BASELINE, "plan_mode_question"]));
   const explain = f.state();
   assert.equal(explain.kind, "explain");
   assert.deepEqual(explain.restriction.tools, ["read", "grep"]);
@@ -325,7 +325,7 @@ test("Explain shares inspection tools and nested gates but denies every planning
   const planning = f.state();
   assert.equal(planning.kind, "planning");
   assert.deepEqual(planning.workflow.tools, ["read", "grep"]);
-  assert.deepEqual(planning.workflow.previousTools, BASELINE);
+  assert.equal("previousTools" in planning.workflow, false);
   assert.equal(planning.workflow.task, undefined);
   await f.command("exit");
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
@@ -434,7 +434,7 @@ test("Plan to Explain retains saved files, cancels owned jobs and invalidates au
   const state = f.state();
   assert.equal(state.kind, "planning");
   assert.equal(state.workflow.document, undefined);
-  assert.deepEqual(state.workflow.previousTools, BASELINE);
+  assert.equal("previousTools" in state.workflow, false);
   assert.equal(f.sentUserMessages.at(-1)?.text, "Plan the next change");
 });
 
@@ -545,7 +545,7 @@ test("a new extension instance restores Explain without consulting plan storage 
   for (const handler of fresh.events.get("session_start") ?? []) await handler({}, f.ctx);
   assert.equal(f.statuses.get("plan-mode"), "[Explain]");
   assert.deepEqual(f.state(), state);
-  assert.ok(!fresh.rawPi.getActiveTools().includes("write"));
+  assert.ok(fresh.rawPi.getActiveTools().includes("write"));
   const command = fresh.commands.get("explain");
   assert.ok(command);
   await command.handler("exit", f.ctx);
@@ -711,7 +711,7 @@ test("toggle cycles Normal, Explain, Plan, Normal without messages, review, effo
   await f.toggle();
   assert.equal(f.state().kind, "planning");
   assert.equal(f.statuses.get("plan-mode"), "[Plan decision-brief]");
-  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  assert.ok(f.rawPi.getActiveTools().includes("write"));
   const prompt = promptEvent();
   await f.emit("before_agent_start", prompt);
   assert.ok(prompt.systemPromptOptions.sections.pi_plan_mode);
@@ -1068,7 +1068,7 @@ test("browsing and continuation retain the selected store through implementation
   assert.equal(await legacy.read(documents[0]), "# Revised selected plan");
 });
 
-test("helpers start inactive; strict defaults select inspection tools and restore the baseline", async () => {
+test("helpers start inactive; strict defaults block coding calls without changing ordinary declarations", async () => {
   const f = await fixture();
   assert.ok(f.tools.every((tool) => tool.defaultActive === false));
   assert.deepEqual(f.rawPi.getActiveTools(), BASELINE);
@@ -1076,7 +1076,7 @@ test("helpers start inactive; strict defaults select inspection tools and restor
   await f.command("start");
   assert.deepEqual(
     new Set(f.rawPi.getActiveTools()),
-    new Set(["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),
+    new Set([...BASELINE, "plan_mode_question", "plan_mode_complete", "plan_mode_edit"]),
   );
   assert.equal(await f.emit("tool_call", { toolName: "read" }), undefined);
   for (const name of ["write", "edit", "bash", "subagent"])
@@ -1556,7 +1556,7 @@ test("failed fresh replacement restores ready; partial kickoff recovers only in 
   });
   await f.command("");
   assert.equal(f.state().kind, "ready");
-  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  assert.ok(f.rawPi.getActiveTools().includes("write"));
   assert.match(f.notifications.at(-1)?.message ?? "", /replacement failed/);
   let draft = "";
   let recovery = "";
@@ -1638,7 +1638,7 @@ test("failed same-session kickoff restores ready state; no success is reported",
   f.choose("here");
   await f.command("");
   assert.equal(f.state().kind, "ready");
-  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  assert.ok(f.rawPi.getActiveTools().includes("write"));
   assert.match(f.notifications.at(-1)?.message ?? "", /delivery failed/);
 });
 
@@ -1722,7 +1722,7 @@ test("cancelled entry cannot send its old request into a restored workflow", asy
   gate.resolve();
   await pending;
   assert.equal(f.sentUserMessages.length, 0);
-  assert.ok(!f.rawPi.getActiveTools().includes("write"));
+  assert.ok(f.rawPi.getActiveTools().includes("write"));
 });
 
 test("handoff rejects contents changed during review and requires a new review", async () => {

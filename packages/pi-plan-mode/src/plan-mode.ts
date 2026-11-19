@@ -67,6 +67,7 @@ import {
   EXPLAIN_DENIED_HELPERS,
   PLAN_HELPER_NAMES,
   resolvePlanTools,
+  setWorkflowHelpers,
   standaloneToolCall,
 } from "./tool-policy.js";
 
@@ -219,19 +220,26 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     return resolved;
   }
 
+  function toolPermissionPrompt(next: Exclude<PlanState, { kind: "idle" }>) {
+    return `Only these tools are permitted when available: ${JSON.stringify(restrictionTools(next).allowed)}. Other tools may still be visible; do not call them.`;
+  }
+
+  function activatePlanHelpers(next: PlanState) {
+    const wanted = isRestricted(next) ? restrictionTools(next).active : [];
+    setWorkflowHelpers(
+      pi,
+      PLAN_HELPER_NAMES,
+      PLAN_HELPER_NAMES.filter((name) => wanted.includes(name)),
+    );
+  }
+
   function transition(next: PlanState, ctx: ExtensionContext) {
-    const oldTools = pi.getActiveTools();
-    const tools = isRestricted(next)
-      ? restrictionTools(next).active
-      : isRestricted(state)
-        ? restrictedSession(state).previousTools
-        : oldTools;
     try {
-      pi.setActiveTools(tools);
+      activatePlanHelpers(next);
       commit(next);
     } catch (error) {
       try {
-        pi.setActiveTools(oldTools);
+        activatePlanHelpers(state);
       } catch {
         /* The old state's execution gate remains in force. */
       }
@@ -287,7 +295,6 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         instructions,
         template: resolvedTemplate.id,
         templatePrompt: resolvedTemplate.content,
-        previousTools: prior.kind === "explain" ? prior.restriction.previousTools : pi.getActiveTools(),
         ...((options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools))
           ? { tools: options.tools ?? (prior.kind === "explain" ? prior.restriction.tools : settings.tools) }
           : {}),
@@ -327,7 +334,6 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         version: 1,
         id: randomUUID(),
         prompt: DEFAULT_EXPLAIN_PROMPT,
-        previousTools: isRestricted(prior) ? restrictedSession(prior).previousTools : pi.getActiveTools(),
         ...(selected ? { tools: selected } : {}),
       };
       transition({ kind: "explain", restriction }, ctx);
@@ -359,12 +365,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   }
 
   async function restore(ctx: ExtensionContext) {
-    const previous = state;
     cancelNaming();
     invalidate();
-    // Tree navigation does not replace the extension instance. Release its previous loadout first.
-    if (session === ctx.sessionManager && isRestricted(previous))
-      pi.setActiveTools(restrictedSession(previous).previousTools);
     session = ctx.sessionManager;
     try {
       state = restorePlanState(ctx.sessionManager.getBranch());
@@ -378,7 +380,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     }
     const current = lifecycle(ctx);
     try {
-      if (state.kind === "explain") pi.setActiveTools(restrictionTools(state).active);
+      activatePlanHelpers(state);
       if (isPlanning(state)) {
         if (state.workflow.task && !state.workflow.name)
           commit({ ...state, workflow: { ...state.workflow, name: fallbackPlanName(state.workflow.task) } });
@@ -396,13 +398,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         for (const entry of ctx.sessionManager.getBranch())
           if (entry.type === "custom" && entry.customType === ARTIFACT_ENTRY && validArtifactReference(entry.data))
             candidate.workflow.artifacts = associate(candidate.workflow.artifacts, entry.data);
-        pi.setActiveTools(planTools(candidate.workflow).active);
       }
     } catch (error) {
       if (!current.isCurrent()) return;
-      const candidate = state;
-      if (isRestricted(candidate)) pi.setActiveTools(restrictedSession(candidate).previousTools);
       state = { kind: "idle" };
+      activatePlanHelpers(state);
       notify(ctx, `Plan mode could not be restored: ${errorMessage(error)}`, "error");
     }
     if (current.isCurrent()) updateStatus(ctx);
@@ -437,7 +437,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     cancelNaming();
     invalidate();
     try {
-      if (isRestricted(state)) pi.setActiveTools(restrictedSession(state).previousTools);
+      activatePlanHelpers({ kind: "idle" });
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus("plan-mode", undefined);
       session = undefined;
@@ -450,9 +450,11 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   pi.on("before_agent_start", (event, ctx) => {
     if (session === ctx.sessionManager && event.messageType === "user") startNaming(ctx, event.prompt);
     invalidate();
+    if (isRestricted(state) && session === ctx.sessionManager)
+      event.systemPromptOptions.sections.pi_plan_permissions = toolPermissionPrompt(state);
+    else delete event.systemPromptOptions.sections.pi_plan_permissions;
     if (state.kind === "explain" && session === ctx.sessionManager) {
       event.systemPromptOptions.sections.pi_plan_mode = state.restriction.prompt;
-      event.systemPromptOptions.selectedTools = restrictionTools(state).active;
     } else if (isPlanning(state) && session === ctx.sessionManager) {
       // Set guidance even if persisting the ready-to-planning transition subsequently fails.
       // Native sections survive compaction and use Pi's ordinary prompt/tool deltas.
@@ -465,7 +467,6 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         (base
           ? `\n\nCurrent saved plan: ${JSON.stringify(base.path)}. plan_mode_edit and plan_mode_complete update this same file.`
           : "");
-      event.systemPromptOptions.selectedTools = planTools(state.workflow).active;
       if (state.kind === "ready" && event.messageType !== "custom") {
         commit({
           kind: "planning",
@@ -786,14 +787,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     } else if (action === "fresh") {
       const configuration = source.kind !== "idle" ? source.workflow : await readSettings();
       if (!current.isCurrent()) return;
-      const tracked = implementation.prepare(
-        ctx,
-        selected,
-        plan,
-        storage,
-        configuration.tools,
-        source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
-      );
+      const tracked = implementation.prepare(ctx, selected, plan, storage, configuration.tools);
       const before = state;
       const previousImplementation = implementation.state;
       const manager = ctx.sessionManager;
@@ -819,14 +813,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     } else {
       const configuration = source.kind !== "idle" ? source.workflow : await readSettings();
       if (!current.isCurrent()) return;
-      const tracked = implementation.prepare(
-        ctx,
-        selected,
-        plan,
-        storage,
-        configuration.tools,
-        source.kind !== "idle" ? source.workflow.previousTools : pi.getActiveTools(),
-      );
+      const tracked = implementation.prepare(ctx, selected, plan, storage, configuration.tools);
       const before = state;
       const previousImplementation = implementation.state;
       const manager = ctx.sessionManager;

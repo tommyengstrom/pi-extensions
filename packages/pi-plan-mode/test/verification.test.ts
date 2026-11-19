@@ -167,7 +167,6 @@ async function fixture(
     {
       projectRoot: cwd,
       plansDirectory: "plans",
-      previousTools: ["read", "write"],
       toolIdentities: (options.tools ?? ["read", "grep", "find", "ls"]).map((name) => ({
         name,
         source: "builtin",

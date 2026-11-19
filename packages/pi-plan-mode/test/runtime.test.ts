@@ -49,13 +49,15 @@ type ReviewAction = Awaited<ReturnType<typeof import("../src/interactive-ui.js")
 const instructions = "Runtime smoke instructions: inspect before proposing changes.";
 const plan = "# Runtime smoke\n\n1. Inspect the affected code.\n2. Implement the change.\n3. Verify the result.";
 const helpers = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"];
-const planningTools = ["read", "grep", "find", "ls", ...helpers];
+const normalTools = ["read", "bash", "edit", "write"];
+const planningTools = [...normalTools, ...helpers];
 
 async function fixture(
   extra?: (pi: ExtensionAPI) => void,
   shortcuts?: import("../src/settings.js").PlanModeSettings["shortcuts"],
   trustedTools?: string[],
   verify?: import("../src/implementation.js").ImplementationDependencies["verify"],
+  persistentSource = false,
 ) {
   const cwd = await mkdtemp(join(suiteRoot, "project-"));
   await mkdir(agentDir, { recursive: true });
@@ -204,7 +206,9 @@ async function fixture(
     runtime = await createAgentSessionRuntime(createRuntime, {
       cwd,
       agentDir,
-      sessionManager: SessionManager.inMemory(cwd),
+      sessionManager: persistentSource
+        ? SessionManager.create(cwd, join(cwd, "sessions"))
+        : SessionManager.inMemory(cwd),
     });
     const currentRuntime = runtime;
     const bind = async (session: AgentSession) => {
@@ -475,7 +479,7 @@ test("real completion runs one isolated checker and terminates without a main-ag
   }
 });
 
-test("entrypoint registers inactive helpers and selects real core inspection tools", async () => {
+test("entrypoint adds planning helpers without changing real core tools", async () => {
   const f = await fixture();
   try {
     assert.equal(entrypoint, planMode);
@@ -583,7 +587,7 @@ test("Explain preserves native prompt prefixes, compaction and branch ownership 
     await session.prompt("Still explaining.");
     assert.equal(f.promptOptions.at(-1)?.section, section);
     assert.ok(getCurrentSystemPrompt(f.requests.at(-1) ?? []).includes(section));
-    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), ["read", "grep", "find", "ls", "plan_mode_question"].sort());
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...baseline, "plan_mode_question"].sort());
     assert.equal(f.reviewPlan.mock.calls.length, 0);
     await session.navigateTree(normal, { summarize: false });
     assertStatus(f, "[Normal]");
@@ -993,6 +997,45 @@ test("cancelled fresh replacement leaves the source ready and its plan available
   }
 });
 
+test("resuming the source immediately after fresh implementation preserves native tools, not planning permissions", async () => {
+  const f = await fixture(undefined, undefined, undefined, undefined, true);
+  try {
+    const source = f.runtime.session;
+    const native = ["read", "bash"];
+    source.setActiveToolsByName(native);
+    await source.prompt("Start with shell access but no writer.");
+    const path = source.sessionManager.getSessionFile();
+    assert.ok(path);
+    await source.prompt("/explain");
+    f.queueTool("bash", { command: "true" });
+    await source.prompt("Check the shell restriction.");
+    const result = source.messages.findLast((m) => m.role === "toolResult");
+    assert.ok(result?.role === "toolResult" && result.isError);
+    assert.match(JSON.stringify(result.content), /Explain mode blocks 'bash'/);
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...native, "plan_mode_question"].sort());
+    const permissions = systems(f.requests.at(-1) ?? []).at(-1)?.sections?.pi_plan_permissions;
+    assert.ok(permissions?.includes('"read"') && !permissions.includes('"bash"'));
+    await source.prompt("/plan start");
+    await f.complete();
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...native, ...helpers].sort());
+    f.choose("fresh");
+    await source.prompt("/plan");
+    await f.runtime.session.waitForIdle();
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...normalTools, ...IMPLEMENTATION_HELPERS].sort());
+    await f.runtime.switchSession(path);
+    const resumed = f.runtime.session;
+    assert.equal(stateOf(resumed).kind, "idle");
+    f.queueTool("bash", { command: "true" });
+    await resumed.prompt("Use the shell in Normal.");
+    const success = resumed.messages.findLast((m) => m.role === "toolResult");
+    assert.ok(success?.role === "toolResult" && !success.isError);
+    assert.deepEqual(toolNames(f.requests.at(-1) ?? []), [...native].sort());
+    assert.ok(!getCurrentSystemPrompt(f.requests.at(-1) ?? []).includes("Only these tools are permitted"));
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("fresh review uses command newSession/withSession and transfers only the full plan", async () => {
   const f = await fixture();
   try {
@@ -1019,7 +1062,7 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     assert.throws(() => oldContext.sessionManager.getSessionId());
     assert.deepEqual(stateOf(old), { kind: "idle" }, "the source branch must not resume into a completed workflow");
     assert.equal(stateOf(replacement).kind, "idle");
-    assert.deepEqual(replacement.getActiveToolNames(), ["read", "write", ...IMPLEMENTATION_HELPERS]);
+    assert.deepEqual(replacement.getActiveToolNames(), [...normalTools, ...IMPLEMENTATION_HELPERS]);
     const tracked = restoreImplementation(replacement.sessionManager.getBranch());
     assert.equal(tracked?.phase, "implementing");
     assert.ok(tracked);
@@ -1045,7 +1088,7 @@ test("fresh review uses command newSession/withSession and transfers only the fu
     assert.equal(JSON.stringify(transferred).includes("Private planning discussion"), false);
     assert.equal(JSON.stringify(replacement.sessionManager.getEntries()).includes("not-for-implementation"), false);
     assert.equal(getCurrentSystemPrompt(transferred).includes(instructions), false);
-    assert.deepEqual(toolNames(transferred), ["read", "write", ...IMPLEMENTATION_HELPERS].sort());
+    assert.deepEqual(toolNames(transferred), [...normalTools, ...IMPLEMENTATION_HELPERS].sort());
     assert.equal(await f.readPlan(ready.document), plan);
   } finally {
     await f.dispose();

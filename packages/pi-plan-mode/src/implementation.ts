@@ -26,7 +26,7 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
-import { PLAN_HELPER_NAMES, resolvePlanTools, standaloneToolCall } from "./tool-policy.js";
+import { PLAN_HELPER_NAMES, resolvePlanTools, setWorkflowHelpers, standaloneToolCall } from "./tool-policy.js";
 import {
   renderVerificationResult,
   runVerification,
@@ -112,14 +112,8 @@ export function registerImplementation(
   }
   function activate(ctx: ExtensionContext) {
     // The shared editor remains planning-owned when implementation is detached/restored.
-    const tools = pi
-      .getActiveTools()
-      .filter(
-        (name) =>
-          !IMPLEMENTATION_HELPERS.includes(name as (typeof IMPLEMENTATION_HELPERS)[number]) ||
-          (name === PLAN_MODE_EDIT_TOOL_NAME && planningActive(ctx)),
-      );
-    pi.setActiveTools(active(ctx) ? [...tools, ...IMPLEMENTATION_HELPERS] : tools);
+    const owned = IMPLEMENTATION_HELPERS.filter((name) => name !== PLAN_MODE_EDIT_TOOL_NAME || !planningActive(ctx));
+    setWorkflowHelpers(pi, owned, active(ctx) ? IMPLEMENTATION_HELPERS : []);
   }
   function detach(ctx: ExtensionContext) {
     progress.close();
@@ -144,7 +138,7 @@ export function registerImplementation(
     activate(ctx);
     status(ctx);
   }
-  async function restore(ctx: ExtensionContext, fresh = false) {
+  async function restore(ctx: ExtensionContext) {
     progress.close();
     cancel();
     const manager = ctx.sessionManager;
@@ -177,19 +171,16 @@ export function registerImplementation(
         );
     }
     if (generation !== version || owner !== manager) return;
-    if (fresh && state?.phase === "implementing" && !planningActive(ctx)) pi.setActiveTools(state.previousTools);
     activate(ctx);
     status(ctx);
   }
-  pi.on("session_start", (event, ctx) => restore(ctx, event.reason === "new"));
+  pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", async (_event, ctx) => {
     const disposed = progress.dispose();
     if (owner === ctx.sessionManager) {
       cancel(ctx);
-      pi.setActiveTools(
-        pi.getActiveTools().filter((name) => !IMPLEMENTATION_HELPERS.includes(name as typeof COMPLETE)),
-      );
+      setWorkflowHelpers(pi, IMPLEMENTATION_HELPERS, []);
       owner = undefined;
     }
     await disposed;
@@ -532,7 +523,6 @@ export function registerImplementation(
       plan: string,
       store: PlanStore,
       tools?: string[],
-      previousTools = pi.getActiveTools(),
     ): ImplementationState {
       const selected = resolvePlanTools(pi.getAllTools(), tools);
       const names = selected.allowed.filter(
@@ -546,7 +536,6 @@ export function registerImplementation(
         {
           projectRoot: store.projectRoot,
           storage: store.storage,
-          previousTools,
           tools,
           toolIdentities: toolIdentities(pi.getAllTools(), names),
         },
