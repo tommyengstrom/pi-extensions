@@ -113,6 +113,7 @@ describe("Plan-owned background integration", () => {
     const f = await fixture();
     const first = readWorkflow(f.pi.events, "session")!;
     expect(first.restrictions?.parentOnly).toContain("artifact_create");
+    expect(first.restrictions?.parentOnly).toContain("plan_mode_import_visual");
     expect(first.restrictions?.parentOnly).toContain("plan_mode_implementation_complete");
     await f.emit("before_agent_start");
     expect(readWorkflow(f.pi.events, "session")?.scope).toBe(first.scope);

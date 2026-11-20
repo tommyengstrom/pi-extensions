@@ -8,12 +8,15 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 import { type PlanArtifacts, validPlanArtifacts } from "./artifacts.js";
 import { normalizePlanModeCompletion, PLAN_MODE_MAX_CHARS } from "./completion-tool.js";
 
+import { checkPlanVisuals, type VisualHashes, validVisualHashes } from "./visuals.js";
+
 export interface PlanDocument {
   id: string;
   name: string;
   path: string;
   title: string;
   artifacts?: PlanArtifacts;
+  visualHashes?: VisualHashes;
 }
 export function planHash(plan: string): string {
   return createHash("sha256").update(plan).digest("hex");
@@ -44,7 +47,8 @@ export function validPlanDocument(value: unknown): value is PlanDocument {
     value.path.length <= 8192 &&
     typeof value.title === "string" &&
     value.title.length <= PLAN_MODE_MAX_CHARS &&
-    (value.artifacts === undefined || validPlanArtifacts(value.artifacts))
+    (value.artifacts === undefined || validPlanArtifacts(value.artifacts)) &&
+    (value.visualHashes === undefined || (!!value.artifacts && validVisualHashes(value.visualHashes)))
   );
 }
 export interface PlanStore {
@@ -52,7 +56,7 @@ export interface PlanStore {
   directory: string;
   projectRoot: string;
   list(): Promise<PlanDocument[]>;
-  read(document: PlanDocument): Promise<string>;
+  read(document: PlanDocument, options?: { allowUnverifiedVisuals?: boolean }): Promise<string>;
   save(
     plan: string,
     options?: {
@@ -60,6 +64,7 @@ export interface PlanStore {
       document?: PlanDocument;
       expectedHash?: string;
       artifacts?: PlanArtifacts;
+      captureNewVisuals?: boolean;
       isCurrent?: () => boolean;
       signal?: AbortSignal;
     },
@@ -75,6 +80,7 @@ interface Envelope {
   name: string;
   projectRoot: string;
   artifacts?: PlanArtifacts;
+  visualHashes?: VisualHashes;
 }
 function validName(name: unknown): name is string {
   return typeof name === "string" && name.length <= 80 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
@@ -102,7 +108,9 @@ function decode(raw: string): { metadata: Envelope; plan: string } {
     typeof metadata.projectRoot !== "string" ||
     !isAbsolute(metadata.projectRoot) ||
     !validPlanDocument({ ...metadata, path: "/placeholder.md", title: "" }) ||
-    Object.keys(metadata).some((key) => !["version", "id", "name", "projectRoot", "artifacts"].includes(key))
+    Object.keys(metadata).some(
+      (key) => !["version", "id", "name", "projectRoot", "artifacts", "visualHashes"].includes(key),
+    )
   )
     throw new InvalidPlanFile("Invalid plan identity metadata.");
   return { metadata: metadata as unknown as Envelope, plan: body(raw.slice(end + 5)) };
@@ -167,6 +175,7 @@ export async function createPlanStore(
       path,
       title: planTitle(decoded.plan),
       ...(decoded.metadata.artifacts ? { artifacts: decoded.metadata.artifacts } : {}),
+      ...(decoded.metadata.visualHashes ? { visualHashes: decoded.metadata.visualHashes } : {}),
     };
     if (path !== join(directory, `${document.name}.md`))
       throw new InvalidPlanFile("Plan filename and identity disagree.");
@@ -179,10 +188,15 @@ export async function createPlanStore(
     if (decoded.document.id !== document.id) throw new Error("Plan identity changed.");
     if (JSON.stringify(decoded.document.artifacts) !== JSON.stringify(document.artifacts))
       throw new Error("Plan artifact metadata changed outside the workflow.");
+    if (JSON.stringify(decoded.document.visualHashes) !== JSON.stringify(document.visualHashes))
+      throw new Error("Plan image fingerprints changed outside the workflow.");
     return { ...decoded, raw };
   }
-  async function read(document: PlanDocument) {
-    return (await inspect(document)).plan;
+  async function read(document: PlanDocument, options?: { allowUnverifiedVisuals?: boolean }) {
+    const { plan } = await inspect(document);
+    if (!options?.allowUnverifiedVisuals)
+      await checkPlanVisuals(plan, directory, document.artifacts, document.visualHashes);
+    return plan;
   }
   async function list() {
     checkDirectory();
@@ -217,13 +231,27 @@ export async function createPlanStore(
       const previous = existing ? await inspect(existing) : undefined;
       if (previous && planHash(previous.plan) !== saveOptions.expectedHash)
         throw new Error("Plan changed on disk. Read and reconcile the current file before saving.");
+      const visualHashes = await checkPlanVisuals(
+        content,
+        directory,
+        artifacts,
+        existing?.visualHashes,
+        saveOptions.captureNewVisuals,
+      );
       const id = existing?.id ?? randomUUID();
       const baseName = existing?.name ?? saveOptions.name ?? slug(planTitle(content)).slice(0, 64).replace(/-+$/, "");
       if (!baseName) throw new Error("Missing plan name.");
       for (let suffix = 1; suffix <= 100_000; suffix++) {
         const name = existing || suffix === 1 ? baseName : `${baseName}-${suffix}`;
         const path = join(directory, `${name}.md`);
-        const metadata: Envelope = { version: 3, id, name, projectRoot, ...(artifacts ? { artifacts } : {}) };
+        const metadata: Envelope = {
+          version: 3,
+          id,
+          name,
+          projectRoot,
+          ...(artifacts ? { artifacts } : {}),
+          ...(visualHashes ? { visualHashes } : {}),
+        };
         const header = `${PREFIX}${Buffer.from(JSON.stringify(metadata)).toString("base64")} -->\n`;
         if (header.length > 32_768) throw new Error("Plan metadata exceeds 32768 bytes.");
         const raw = header + content;
@@ -252,6 +280,7 @@ export async function createPlanStore(
             path,
             title: planTitle(content),
             ...(artifacts ? { artifacts: structuredClone(artifacts) } : {}),
+            ...(visualHashes ? { visualHashes } : {}),
           };
         } catch (error) {
           if (existing || !hasCode(error, "EEXIST")) throw error;

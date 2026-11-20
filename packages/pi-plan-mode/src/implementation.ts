@@ -26,6 +26,7 @@ import {
   updatePlanModeSettings,
 } from "./settings.js";
 import { setWorkflowHelpers, standaloneToolCall } from "./tool-policy.js";
+import { visualGuidance } from "./visuals.js";
 
 export interface ImplementationDependencies {
   readSettings?(): Promise<PlanModeSettings>;
@@ -40,7 +41,7 @@ export function implementationInstructions(state: ImplementationState): string {
   return `# Tracked plan implementation
 Implement the approved plan, preserving unchanged requirements. The current plan is ${state.document.path}. It is one mutable file. After compaction, or whenever its contents are uncertain, call plan_mode_implementation_status to read the current file.
 When the user requests a plan change, update the plan before implementing the change. Prefer ${PLAN_MODE_EDIT_TOOL_NAME} for localized changes using {path, edits: [{oldText, newText}]}; use ${UPDATE} with the COMPLETE replacement plan for broader changes. Both update the same path without another approval dialog. A clarification without a change needs no edit. Seek user agreement before an agent-discovered material scope change; never invent approval or rewrite the plan just to hide drift.
-When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal.${artifactGuidance(state.document.artifacts)}`;
+When implementation and planned verification are finished, call ${COMPLETE} ALONE. Ordinary final prose is not the completion signal.${artifactGuidance(state.document.artifacts)}${visualGuidance(state.document.visualHashes)}`;
 }
 
 /** Separate lifetime from restricted planning: implementation never gets planning's tool gate. */
@@ -313,6 +314,12 @@ export function registerImplementation(
       const source = requireImplementation(ctx);
       if (!standaloneToolCall(ctx, COMPLETE)) throw new Error("Implementation completion must be called alone.");
       signal?.throwIfAborted();
+      if (source.document.visualHashes) {
+        const op = planOperation(ctx, signal);
+        const store = await ownedStore(ctx, source);
+        await store.read(source.document);
+        if (!op.isCurrent()) throw new Error("Implementation completion cancelled.");
+      }
       commit({ ...source, phase: "completed", completion: randomUUID() });
       activate(ctx);
       status(ctx);

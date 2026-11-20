@@ -50,7 +50,7 @@
     "directory": "packages/pi-plan-mode"
   },
   "dependencies": {
-    "@narumitw/pi-tui-kit": "^0.69.0",
+    "@narumitw/pi-tui-kit": "^0.70.0",
     "@narumitw/pi-background": "^0.1.0"
   }
 }

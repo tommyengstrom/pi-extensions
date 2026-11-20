@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@narumitw/pi-tui-kit": "^0.69.0"
+    "@narumitw/pi-tui-kit": "^0.70.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

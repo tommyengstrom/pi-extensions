@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import { runConfirmation } from "@narumitw/pi-tui-kit/confirmation";
@@ -6,7 +7,9 @@ import { runMultiSelect } from "@narumitw/pi-tui-kit/multi-select";
 import { sanitizeTerminalText as terminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 import type { PlanDocument } from "./plan-store.js";
-import { defaultPlanTools, PLAN_HELPER_NAMES } from "./tool-policy.js";
+import { ALL_PLAN_HELPERS, defaultPlanTools } from "./tool-policy.js";
+import { openVisual } from "./visual-opener.js";
+import { resolveVisual, visualLinks, visualWorkspace } from "./visuals.js";
 
 export interface MenuLifecycle {
   signal: AbortSignal;
@@ -25,13 +28,20 @@ export async function reviewPlan(
   plan: string,
   document: PlanDocument,
   lifecycle: MenuLifecycle,
+  open = openVisual,
 ): Promise<ReviewAction | undefined> {
   if (!canPrompt(ctx, lifecycle)) return undefined;
+  const workspace = visualWorkspace(dirname(document.path), document.artifacts);
+  const visuals = workspace ? visualLinks(plan, workspace) : [];
+  const pending = new Set<string>();
   const reviewed = await runDocumentReview(ctx, {
     title: `Review plan: ${terminalText(document.title)}`,
     lines: [
       `Name: ${terminalText(document.name)}`,
       `Path: ${terminalText(document.path)}`,
+      ...(ctx.mode === "rpc"
+        ? visuals.map((v) => `${v.label} · ${terminalText(join(dirname(document.path), v.relative))}`)
+        : []),
       ...(document.artifacts?.references.flatMap((reference) => [
         `Live artifact: ${terminalText(reference.artifactId)} · ${reference.status}${document.artifacts?.omittedJobIds?.includes(reference.jobId) ? " (omitted by user agreement)" : ""}`,
         terminalText(reference.directory),
@@ -40,7 +50,7 @@ export async function reviewPlan(
       ]) ?? []),
     ],
     content: plan,
-    format: { kind: "markdown" },
+    format: { kind: "markdown", terminalLinks: false },
     viewportSize: "adaptive",
     enableSearch: true,
     actions: [
@@ -48,12 +58,38 @@ export async function reviewPlan(
       { id: "here", label: "Implement here" },
       { id: "save", label: "Save for later" },
       { id: "continue", label: "Continue planning" },
+      ...(workspace && ctx.mode === "tui"
+        ? visuals.map(({ filename, label }) => ({
+            id: `visual:${filename}`,
+            label,
+            async preview(signal: AbortSignal) {
+              if (pending.has(filename)) return;
+              pending.add(filename);
+              try {
+                const path = await resolveVisual(workspace, filename, document.visualHashes?.[filename]);
+                if (current(lifecycle) && !signal.aborted) await open(path, signal);
+              } catch {
+                if (current(lifecycle) && !signal.aborted)
+                  ctx.ui.notify(
+                    terminalText(
+                      `Could not open ${join(workspace, "visuals", filename)}. Check that the image matches the saved plan and has a default viewer on this desktop. For a changed or unpinned image, re-import it and review the revised plan.`,
+                    ),
+                    "warning",
+                  );
+              } finally {
+                pending.delete(filename);
+              }
+            },
+          }))
+        : []),
     ],
     hint: "close",
     signal: lifecycle.signal,
     isCurrent: () => lifecycle.isCurrent(),
   });
-  return current(lifecycle) && reviewed.kind === "selected" ? (reviewed.actionId as ReviewAction) : undefined;
+  if (!current(lifecycle) || reviewed.kind !== "selected") return undefined;
+  const id = reviewed.actionId;
+  return id === "fresh" || id === "here" || id === "save" || id === "continue" ? id : undefined;
 }
 /** One entry per current document. The store excludes unsupported files. */
 export async function selectSavedPlan(
@@ -99,7 +135,7 @@ export async function selectSavedPlan(
   });
   return current(lifecycle) && result.kind === "closed" ? chosen : undefined;
 }
-const FIXED_HELPERS = new Set<string>([...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS]);
+const FIXED_HELPERS = new Set<string>([...ALL_PLAN_HELPERS, ...IMPLEMENTATION_HELPERS]);
 /** Configuration only: normal-mode callers must not activate planning restrictions. */
 export async function selectPlanTools(
   ctx: ExtensionContext,

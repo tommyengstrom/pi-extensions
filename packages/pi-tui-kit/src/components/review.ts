@@ -64,6 +64,8 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
         searchFrameRow?: number;
         documentStartRow: number;
         documentEndRow: number;
+        actionStartRow: number;
+        visibleActions: readonly (typeof actions)[number][];
       }
     | undefined;
   const documentLineCache = createDocumentLineCache(options.theme, Boolean(options.screen.enableSearch));
@@ -168,6 +170,8 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
         searchFrameRow: frame.searchFrameRow,
         documentStartRow: frame.documentStartRow,
         documentEndRow: frame.documentEndRow,
+        actionStartRow: frame.actionStartRow,
+        visibleActions: actions.slice(frame.actionStart, frame.actionStart + frame.actionRows),
       };
       return frame.lines;
     },
@@ -260,6 +264,15 @@ export function createReviewComponent<ScreenId extends string, ActionId extends 
         if (event.x < 6 || event.x >= 6 + inputWidth) return undefined;
         return search.input.handleMouse({ ...event, x: event.x - 6, y: 0, width: inputWidth, height: 1 });
       }
+      const action = mouseLayout.visibleActions[event.y - mouseLayout.actionStartRow];
+      if (!search?.active && !pasting && action?.clickable && event.button === "left") {
+        if (event.type === "press") return { handled: true, focus: true };
+        if (event.type === "click") {
+          selectedAction = actions.indexOf(action);
+          finish({ kind: "activate", itemId: action.id });
+          return { handled: true, render: true };
+        }
+      }
       return routeDocumentWheel(event);
     },
     waitForPending: () => copy.waitForPending(),
@@ -329,6 +342,9 @@ interface AdaptiveReviewFrame {
   searchFrameRow?: number;
   documentStartRow: number;
   documentEndRow: number;
+  actionStartRow: number;
+  actionStart: number;
+  actionRows: number;
 }
 
 interface AdaptiveReviewChrome {
@@ -457,6 +473,9 @@ function renderAdaptiveReviewFrame<ActionId extends string>(
     searchFrameRow,
     documentStartRow,
     documentEndRow: documentStartRow + visible.length,
+    actionStartRow: documentStartRow + visible.length + position.length,
+    actionStart,
+    actionRows,
   };
 }
 

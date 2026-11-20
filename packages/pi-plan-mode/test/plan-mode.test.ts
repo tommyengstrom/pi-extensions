@@ -18,7 +18,15 @@ import * as settingsModule from "../src/settings.js";
 import { DEFAULT_TEMPLATE_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT, type PlanModeSettings } from "../src/settings.js";
 import { isPlanning, PLAN_STATE_ENTRY, restorePlanState } from "../src/state.js";
 import { DEFAULT_PLAN_TEMPLATE, listPlanTemplates, resolvePlanTemplate } from "../src/templates.js";
-import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
+import {
+  builtinTool,
+  createMockContext,
+  createMockPi,
+  extensionTool,
+  otherPixelPng,
+  pixelHash,
+  pixelPng,
+} from "./support.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -203,6 +211,130 @@ async function fixture(
     },
   };
 }
+
+test("UI selection alone activates its parent helper; saved relative links survive browsing and fresh handoff", async () => {
+  const name = "plan_mode_import_visual";
+  const f = await fixture({ tools: [name] }); // even hand-edited settings cannot enable this on an ordinary plan
+  await f.command("start");
+  const active = f.rawPi.getActiveTools();
+  assert.ok(!active.includes(name));
+  const ordinary = promptEvent();
+  await f.emit("before_agent_start", ordinary);
+  assert.doesNotMatch(
+    JSON.stringify(ordinary.systemPromptOptions.sections),
+    /screenshot|import_visual|codex_generate_image/i,
+  );
+  await assert.rejects(f.execute(name, {}), /ui plan template/);
+  await f.command("template ui");
+  assert.deepEqual(new Set(f.rawPi.getActiveTools()), new Set([...active, name]));
+  assert.deepEqual(await f.emit("tool_call", { toolName: name, parentToolCallId: "parent", input: {} }), {
+    block: true,
+    reason: "Planning saves must be called alone as a top-level tool, not nested or batched.",
+  });
+  const ui = promptEvent();
+  await f.emit("before_agent_start", ui);
+  assert.match(ui.systemPromptOptions.sections.pi_plan_mode, /consent before sending/);
+  await f.command("template minimal");
+  assert.deepEqual(new Set(f.rawPi.getActiveTools()), new Set(active));
+  await f.command("template ui");
+  const sourcePath = join(f.cwd, "screen.png");
+  await writeFile(sourcePath, pixelPng);
+  const stale = assert.rejects(f.execute(name, { role: "before", sourcePath }), /cancelled/);
+  await f.emit("session_tree");
+  await stale;
+  const result = await f.execute(name, { role: "before", sourcePath });
+  const link = result.content[0].text;
+  const plan = `# Comparison\n\n**Current — screenshot** ${link}`;
+  await assert.rejects(
+    f.execute("plan_mode_complete", { plan: plan.replaceAll("before.png", "after.png") }),
+    /broken visual link/,
+  );
+  const saved = await f.execute("plan_mode_complete", { plan });
+  const store = await createPlanStore(f.cwd, { kind: "repo" }, f.agentDir);
+  const [document] = await store.list();
+  assert.deepEqual(document.visualHashes, { "before.png": pixelHash });
+  const relative = /\]\(([^)]+)\)/.exec(link)?.[1];
+  assert.ok(relative);
+  const image = join(saved.details.path, "..", relative);
+  await f.command("exit");
+  let kickoff = "";
+  Object.assign(f.ctx, {
+    newSession: async (options: { withSession: (replacement: unknown) => Promise<void> }) => {
+      await options.withSession({
+        sendUserMessage: async (text: string) => {
+          kickoff = text;
+        },
+      });
+      return { cancelled: false };
+    },
+  });
+  for (const action of ["here", "fresh"] as const) {
+    f.choose(action);
+    f.onReview(async () => {
+      await writeFile(image, otherPixelPng);
+    });
+    await f.command("saved");
+    assert.match(f.notifications.at(-1)?.message ?? "", /before\.png changed/);
+    assert.equal(kickoff, "");
+    assert.equal(implementationOf(f), undefined);
+    assert.equal(f.state().kind, "ready");
+    await f.command("exit");
+    await writeFile(image, pixelPng);
+  }
+  f.onReview(undefined);
+  f.choose("fresh");
+  await f.command("saved");
+  assert.equal(f.reviews.at(-1), plan);
+  assert.ok(kickoff.includes(plan) && kickoff.includes(saved.details.path));
+  assert.ok(kickoff.includes(pixelHash));
+  assert.deepEqual(await readFile(image), pixelPng);
+  f.choose("here");
+  await f.command("saved");
+  await writeFile(image, otherPixelPng);
+  await assert.rejects(f.execute("plan_mode_implementation_complete", {}), /before\.png changed/);
+  assert.equal(implementationOf(f)?.phase, "implementing");
+});
+
+test("a same-name replacement after approval cannot start the fresh session or be silently re-pinned", async () => {
+  const f = await fixture();
+  await f.command("start");
+  await f.command("template ui");
+  const sourcePath = join(f.cwd, "screen.png");
+  await writeFile(sourcePath, pixelPng);
+  const link = (await f.execute("plan_mode_import_visual", { role: "after", sourcePath })).content[0].text;
+  const plan = `# UI\n\n${link}`;
+  await f.execute("plan_mode_complete", { plan });
+  const store = await createPlanStore(f.cwd, { kind: "repo" }, f.agentDir);
+  const [document] = await store.list();
+  assert.ok(document.artifacts);
+  const image = join(document.artifacts.workspace.directory, "visuals", "after.png");
+  const sent: string[] = [];
+  const notices: string[] = [];
+  Object.assign(f.ctx, {
+    newSession: async (options: { withSession: (replacement: unknown) => Promise<void> }) => {
+      await writeFile(image, otherPixelPng);
+      await options.withSession({
+        sendUserMessage: async (text: string) => sent.push(text),
+        ui: { notify: (text: string) => notices.push(text) },
+      });
+      return { cancelled: false };
+    },
+  });
+  f.choose("fresh");
+  await f.command("");
+  assert.deepEqual(sent, []);
+  assert.match(notices[0], /did not start.*image changed/);
+  const revision = { document, expectedHash: planHash(plan), captureNewVisuals: true };
+  await assert.rejects(store.save(plan, revision), /after\.png changed/);
+  const replacement = join(document.artifacts.workspace.directory, "visuals", "after-2.png");
+  await writeFile(replacement, otherPixelPng);
+  const updated = plan.replaceAll("after.png", "after-2.png");
+  await assert.rejects(store.save(updated, { ...revision, captureNewVisuals: false }), /No fingerprint/);
+  const revised = await store.save(updated, revision);
+  assert.deepEqual(Object.keys(revised.visualHashes ?? {}), ["after-2.png"]);
+  assert.notEqual(revised.visualHashes?.["after-2.png"], pixelHash);
+  assert.equal(await store.read(revised), updated);
+});
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function ready(f: Fixture) {

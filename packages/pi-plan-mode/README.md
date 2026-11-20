@@ -84,6 +84,18 @@ cannot be presented as successful artifacts or bypass readiness checks. See the
 [artifact package](../pi-artifacts/README.md) for persistence, cost, tool-boundary, and
 untrusted HTML details.
 
+## Compare a screenshot with a mockup
+
+Run `/plan start`, then `/plan template ui` to use pictures for **this** plan. Give the planner the URL of a running page and the view you want to change. The template does not start the app, enable browser tools, or authorize generation.
+
+For example, with [Playwright MCP](https://github.com/microsoft/playwright-mcp) running on the Pi host, configure its output directory outside the project and explicitly permit the navigation and `browser_take_screenshot` tools in `/plan tools` (plus their caller if nested). Capture the viewport as PNG and use the returned local file. After inspection, you can authorize `codex_generate_image` to send that screenshot to OpenAI as a reference and consume image quota for one mockup. Use `referencedImagePaths`, `outputFormat: "png"`, `save: "global"` and the resulting local file. Alternatively supply your own images, or agree to omit a missing one.
+
+The UI template's parent-only `plan_mode_import_visual` helper copies a finished local PNG or JPEG (up to 20 MiB and 16 megapixels) to `artifacts/<workspace-id>/visuals/` beside the plan. This is a confined exception to read-only planning, not general project write access. It does not overwrite the original or an earlier comparison. The saved Markdown links are relative to the plan; keep the adjacent artifacts directory when moving it.
+
+In fullscreen TUI review on the **same desktop**, click the **Current — screenshot** or **Proposed — mockup** filename action beneath the plan, or select it with Up/Down and Enter. It opens the default image viewer without approving the plan or closing review. `/plan saved` uses the same actions. Regular terminals support keyboard selection; RPC shows paths without launching a viewer on the server. There is no remote image transfer. On macOS the preview uses `/usr/bin/open`; on Linux it uses `xdg-open`, and on Windows the system file association.
+
+Saving a UI plan records a SHA-256 fingerprint for each linked comparison image. Preview, approval, handoff, and tracked completion check the bytes, not just the filenames. If an image changes, restore the original bytes or import the replacement under a new revision name and review the updated plan. An older plan with unpinned image links must be re-saved with the UI template before implementation.
+
 ## Commands
 
 | Command | Purpose |
@@ -171,7 +183,7 @@ Document review shows the complete plan, its name, path, and artifact references
 
 Opening review never starts implementation. Use the configured Up/Down keys to select an action and the confirmation key (normally Enter) to execute it. Page Up/Page Down and Home/End scroll the document; the mouse wheel works over the plan. Space opens search, where input and search navigation take precedence over actions; close search before choosing an action. Actions stay outside the document viewport. Small terminals compact metadata and hints first, then show a reachable action window with the selection visible. RPC shows the document page and all four actions together, alongside paging and Close. Escape leaves the plan ready. Automatic review, `/plan`, and saved-plan review use this same screen.
 
-The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan. Status/recovery reads the authoritative file from disk. Hash-based stale-read checks reject conflicting updates before overwriting newer contents; reread and reconcile before retrying. There is no immutable approved-baseline enforcement.
+The handoff uses exactly the text reviewed, not a subsequent reread of the file. Fresh sessions load their ordinary project instructions and resources. Implementation does not override the main model or thinking choices. A stable implementation prompt section keeps the plan-update/completion protocol and current durable plan reference available across turns and compaction; it does not repeatedly inject the full plan. Status/recovery reads the authoritative file from disk. Hash-based stale-read checks reject conflicting updates before overwriting newer contents; reread and reconcile before retrying. The plan text remains mutable; linked UI images are checked against their saved fingerprints.
 
 A successful handoff ends restricted planning in the source session and establishes branch-aware implementation tracking in the destination; the saved plan remains available through `/plan saved`. The destination adds implementation helpers to its own native tools. Cancelling replacement restores the source workflow. If the destination exists but its first request fails, the extension attempts to leave the complete request in its editor for retry. Cancelling review or action selection does not start implementation.
 
@@ -219,11 +231,11 @@ The optional settings file is `<getAgentDir()>/pi-plan-mode.json`:
 
 Omit `tools` for strict defaults; `[]` means planning helpers only. Naming preserves the configured storage path. There is no settings watcher: tool defaults are read for future workflows, while an active planning workflow retains its configuration unless you explicitly change its tools. Shortcut settings are loaded once per extension instance and require `/reload` or restart.
 
-See the [custom-template example](./docs/settings.md#built-in-and-custom-templates) to opt into a completion task. None of the four built-ins requests one.
+See the [custom-template example](./docs/settings.md#built-in-and-custom-templates) to opt into a completion task. None of the built-ins requests one.
 
 The complete prompts are [`prompts/plan.md`](./prompts/plan.md) and [`prompts/explain.md`](./prompts/explain.md). They are not assembled from instruction fragments. Plan mode appends the selected template body and optional user guidance unchanged after the plan prompt. The plan prompt tells the model to include every template section in order and follow its HTML comments. Only safety, tool permissions, saving, and approval remain general workflow rules:
 
-- Built-in templates live in [`templates/`](./templates/): `decision-brief` (default), `detailed-spec`, `checklist`, and `minimal`. Each has a YAML metadata header and a ready-plan Markdown skeleton with real headings. HTML comments specify section semantics and limits; the planner fills the skeleton without copying those comments or metadata into the finished plan.
+- Built-in templates live in [`templates/`](./templates/): `decision-brief` (default), `detailed-spec`, `checklist`, `minimal`, and `ui`. Each has a YAML metadata header and a ready-plan Markdown skeleton with real headings. HTML comments specify section semantics and limits; the planner fills the skeleton without copying those comments or metadata into the finished plan.
 - User-defined templates can be added or used to override built-ins as `<getAgentDir()>/pi-plan-mode-templates/<id>.md` (lowercase kebab-case `<id>`, bounded 64 KiB UTF-8 Markdown).
 - `pi-plan-mode.md` appends optional user guidance to the core planning protocol and selected template.
 

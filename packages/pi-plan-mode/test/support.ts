@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   builtinTool as baseBuiltinTool,
   extensionTool as baseExtensionTool,
@@ -10,6 +11,19 @@ export {
   createMockContext,
   driveCustomSelector,
 } from "../../../test/support.js";
+
+// A complete one-pixel PNG, not just its magic bytes.
+export const pixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQMgkDAAD4AJ3MaiF4AAAAAElFTkSuQmCC",
+  "base64",
+);
+
+export const pixelHash = createHash("sha256").update(pixelPng).digest("hex");
+// Equally sized, valid one-pixel PNG with a different color.
+export const otherPixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMIMxECAAGAAJ1q654OAAAAAElFTkSuQmCC",
+  "base64",
+);
 
 /** A document locator, not a cached copy of its Markdown. */
 export function planDocument(overrides: Partial<PlanDocument> = {}): PlanDocument {

@@ -9,7 +9,7 @@ Use `/plan settings` while the agent is idle, or edit `<getAgentDir()>/pi-plan-m
 The menu offers:
 
 - **Default planning tools** — save an explicit tool selection for future workflows.
-- **Default plan template** — choose the default template (`decision-brief`, `detailed-spec`, `checklist`, `minimal`, or a custom user template) for future workflows.
+- **Default plan template** — choose the default template (`decision-brief`, `detailed-spec`, `checklist`, `minimal`, `ui`, or a custom user template) for future workflows.
 - **Reset to strict inspection tools** — remove the override and use canonical built-in defaults.
 - **Progress model** — independently choose the observer model or reset to `openai/gpt-6-luna`.
 - **Progress reasoning** — choose a Pi thinking level or reset to `low`.
@@ -36,7 +36,7 @@ The example pins naming independently. Omit `naming.model` to follow the configu
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `tools` | Omitted | Shared exact names of explicitly trusted Plan/Explain inspection tools. Omission uses canonical inspection defaults; `[]` permits only the required helpers. |
-| `template` | `"decision-brief"` | Default plan template ID (`decision-brief`, `detailed-spec`, `checklist`, `minimal`, or a user template in `pi-plan-mode-templates/<id>.md`). |
+| `template` | `"decision-brief"` | Default plan template ID (`decision-brief`, `detailed-spec`, `checklist`, `minimal`, `ui`, or a user template in `pi-plan-mode-templates/<id>.md`). |
 | `shortcuts.togglePlan` | `"alt+m"` | Cycle Normal → Explain → Plan → Normal (compatibility key retained). A Pi key string replaces the default; `null` disables it. Requires reload. |
 | `shortcuts.selectTemplate` | `"alt+shift+m"` | Open the template picker for the active plan, or future defaults outside Plan mode. A Pi key string rebinds it; `null` disables it. Requires reload. |
 | `progress.model` | `{ "provider": "openai", "id": "gpt-6-luna" }` | Independent transcript observer chat model; never falls back. |
@@ -167,6 +167,7 @@ Built-in templates are shipped as Markdown in [`templates/`](../templates/), not
 - `decision-brief` (**default**) — concise decision brief (`## Overview`, `## Key Decisions & Architecture`, `## Non-Obvious Changes`, `## Verification`).
 - `detailed-spec` — concrete file-by-file and interface-level specification (`## Overview`, `## Affected Files & Interfaces`, `## Implementation Steps`, `## Edge Cases & Invariants`, `## Verification`).
 - `checklist` — milestone/component-grouped actionable `- [ ]` checklist (`## Overview`, `## Implementation Checklist`, `## Verification`).
+- `ui` — [compare the running UI with a proposed mockup](../README.md#compare-a-screenshot-with-a-mockup).
 - `minimal` — compact plan for small, focused changes (`## Goal & Approach`, `## Changes`, `## Verification`).
 
 To create a custom template or override a built-in one, place a UTF-8 Markdown file (up to **64 KiB**, including the header) at `<getAgentDir()>/pi-plan-mode-templates/<id>.md`. For example:

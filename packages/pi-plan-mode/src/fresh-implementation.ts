@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ExtensionCommandContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { IMPLEMENTATION_ENTRY, type ImplementationState } from "./implementation-state.js";
 import { type PlanDocument, planHash } from "./plan-store.js";
+import { checkPlanVisuals, visualGuidance } from "./visuals.js";
 
 export function implementationPrompt(plan: string, document?: PlanDocument) {
   const references = document?.artifacts?.references ?? [];
@@ -11,6 +13,7 @@ export function implementationPrompt(plan: string, document?: PlanDocument) {
       ? `Current mutable plan: ${JSON.stringify(document.path)}. Record user-requested changes in this same file before implementing them. Read the current plan after compaction; do not assume the kickoff text is still current.`
       : "",
     plan,
+    visualGuidance(document?.visualHashes),
     references.length
       ? `Live review artifacts (current files, not historical snapshots):\n${references
           .map((reference) =>
@@ -50,6 +53,18 @@ export async function startFreshImplementation(
         }
       : {}),
     withSession: async (replacement) => {
+      const doc = tracked?.document;
+      if (doc?.visualHashes) {
+        try {
+          await checkPlanVisuals(plan, dirname(doc.path), doc.artifacts, doc.visualHashes);
+        } catch {
+          replacement.ui.notify(
+            "Implementation did not start: an approved plan image changed or is missing. Restore the original or reopen plan review.",
+            "error",
+          );
+          return;
+        }
+      }
       try {
         await replacement.sendUserMessage(prompt);
       } catch {

@@ -3,6 +3,8 @@ import { safeMenuText } from "./components/rendering.js";
 export interface DocumentReviewAction {
   id: string;
   label: string;
+  /** Optional in-place TUI action: clickable, keyboard accessible, and never returned as a selection. Omitted in RPC. */
+  preview?(signal: AbortSignal): Promise<void>;
 }
 
 /** Shared validation for standalone and declarative document reviews. */

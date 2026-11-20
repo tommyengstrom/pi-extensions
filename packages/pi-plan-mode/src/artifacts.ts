@@ -68,6 +68,7 @@ export function artifactScope(
   name: string,
   input: Record<string, unknown>,
   cwd: string,
+  reserveVisuals = false,
 ): string | undefined {
   if (!ARTIFACT_TOOLS.includes(name)) return;
   if (!artifacts) return "This workflow has no artifact workspace. Exit and re-enter Plan mode.";
@@ -78,6 +79,8 @@ export function artifactScope(
       projectedCanonical(artifacts.workspace.directory),
       projectedCanonical(resolve(cwd, input.directory)),
     );
+    if (reserveVisuals && suffix.split(sep)[0] === "visuals")
+      return "The visuals directory is reserved for Plan image imports.";
     if (!suffix || isAbsolute(suffix) || suffix === ".." || suffix.startsWith(`..${sep}`))
       return "Plan artifacts must be created in a new/empty child directory of the current artifact workspace.";
   } else if (name === "artifact_update") {

@@ -5,7 +5,7 @@ import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 import planMode from "./plan-mode.js";
 import { buildPlanModePrompt } from "./prompt.js";
 import { isPlanning, isRestricted, PLAN_STATE_ENTRY, type PlanState, restorePlanState } from "./state.js";
-import { defaultPlanTools, legacyDefaultCatalogue, PLAN_HELPER_NAMES, resolvePlanTools } from "./tool-policy.js";
+import { ALL_PLAN_HELPERS, defaultPlanTools, legacyDefaultCatalogue, resolvePlanTools } from "./tool-policy.js";
 
 /** Plan-owned adapter. Herdr never imports Plan or interprets its persisted state. */
 export default async function planWithBackground(
@@ -46,7 +46,7 @@ export default async function planWithBackground(
         : undefined;
     if (identity && selected === undefined) legacyImplicit.add(identity);
   }
-  const parentOnly = [...PLAN_HELPER_NAMES, ...IMPLEMENTATION_HELPERS, ...ARTIFACT_TOOLS];
+  const parentOnly = [...ALL_PLAN_HELPERS, ...IMPLEMENTATION_HELPERS, ...ARTIFACT_TOOLS];
   function publish(force = false): void {
     if (!ctx) return;
     const selected = isPlanning(state)
@@ -54,7 +54,8 @@ export default async function planWithBackground(
       : state.kind === "explain"
         ? state.restriction.tools
         : undefined;
-    const mode = state.kind === "explain" ? "explain" : "plan";
+    const mode =
+      state.kind === "explain" ? "explain" : isPlanning(state) && state.workflow.template === "ui" ? "ui" : "plan";
     const restriction = isRestricted(state)
       ? {
           allowedTools: resolvePlanTools(catalogue(), selected, mode).allowed,

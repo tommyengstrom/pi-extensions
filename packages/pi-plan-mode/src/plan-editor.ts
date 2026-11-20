@@ -86,10 +86,11 @@ export async function editPlanDocument(
   store: PlanStore,
   document: PlanDocument,
   current: { signal?: AbortSignal; isCurrent(): boolean },
+  captureNewVisuals = false,
 ) {
   if (!ctx.hasUI || (ctx.mode !== "tui" && ctx.mode !== "rpc"))
     throw new Error("Opening a plan for editing requires TUI or RPC mode.");
-  const plan = await store.read(document);
+  const plan = await store.read(document, { allowUnverifiedVisuals: captureNewVisuals });
   if (!current.isCurrent()) return;
   const text =
     ctx.mode === "tui"
@@ -101,6 +102,7 @@ export async function editPlanDocument(
   const saved = await store.save(parsed.plan, {
     document,
     expectedHash: planHash(plan),
+    captureNewVisuals,
     ...current,
   });
   if (!current.isCurrent()) return;

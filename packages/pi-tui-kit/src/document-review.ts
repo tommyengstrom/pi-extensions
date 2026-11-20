@@ -61,7 +61,7 @@ export async function runDocumentReview<Context extends MenuContext = ExtensionC
   if (!isCurrent(options) || options.signal?.aborted) return { kind: "stale" };
   const validationError = validateOptions(options);
   if (validationError) return documentReviewError(ctx, options, validationError);
-  const screen = reviewScreen(options);
+  const screen = reviewScreen(options, ctx.mode);
   if (ctx.mode === "tui" && ctx.hasUI) return runTuiDocumentReview(ctx, options, screen);
   if (ctx.mode === "rpc" && ctx.hasUI) return runRpcDocumentReview(ctx, options, screen);
 
@@ -101,6 +101,15 @@ async function runTuiDocumentReview<Context extends MenuContext>(
         isCurrent: options.isCurrent,
         onEvent: (event) => {
           if (event.kind === "activate") {
+            const preview = options.actions?.find((action) => action.id === event.itemId)?.preview;
+            if (preview) {
+              if (!signal.aborted && isCurrent(options)) {
+                void preview(signal).catch((error: unknown) => {
+                  if (!signal.aborted && isCurrent(options)) void reportDocumentReviewError(ctx, options, error);
+                });
+              }
+              return;
+            }
             complete(options.actions ? { kind: "selected", actionId: event.itemId } : { kind: "confirmed" });
           } else complete({ kind: "cancelled", reason: event.kind });
         },
@@ -166,6 +175,7 @@ async function runRpcDocumentReview<Context extends MenuContext>(
 
 function reviewScreen<Context extends MenuContext>(
   options: RunDocumentReviewOptions<Context>,
+  mode: ExtensionMode,
 ): ReviewScreen<"confirm"> {
   return {
     kind: "review",
@@ -177,7 +187,9 @@ function reviewScreen<Context extends MenuContext>(
     enableSearch: options.enableSearch,
     copy: options.copy,
     hint: options.hint,
-    actions: options.actions?.map((action) => ({ ...action, action: "confirm" as const })),
+    actions: options.actions
+      ?.filter((item) => !item.preview || mode === "tui")
+      .map(({ id, label, preview }) => ({ id, label, clickable: !!preview, action: "confirm" as const })),
     ...(options.confirmation
       ? { confirm: { id: "confirm", label: options.confirmation.label, action: "confirm" as const } }
       : {}),

@@ -94,7 +94,7 @@ export type ReviewFormat =
   | { kind: "text" }
   | { kind: "code"; language?: string; filePath?: string }
   | { kind: "diff"; filePath?: string }
-  | { kind: "markdown"; renderLatex?: boolean; renderMermaid?: boolean };
+  | { kind: "markdown"; renderLatex?: boolean; renderMermaid?: boolean; terminalLinks?: boolean };
 
 /** An exact source snapshot, not the sanitized or rendered preview. */
 export interface DocumentCopyContext {
@@ -194,7 +194,7 @@ export interface ReviewScreen<ActionId extends string> {
   copy?: DocumentCopyAction;
   confirm?: ReviewConfirmation<ActionId>;
   /** Mutually exclusive with confirm; the first action is initially selected. */
-  actions?: readonly ReviewConfirmation<ActionId>[];
+  actions?: readonly (ReviewConfirmation<ActionId> & { clickable?: boolean })[];
   hint?: "back" | "close";
 }
 

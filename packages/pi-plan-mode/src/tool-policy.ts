@@ -2,8 +2,14 @@ import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/p
 import { verifiedSubagentTools } from "@narumitw/pi-background";
 import { IMPLEMENTATION_HELPERS } from "./implementation-state.js";
 
-export const EXPLAIN_DENIED_HELPERS: readonly string[] = ["plan_mode_complete", ...IMPLEMENTATION_HELPERS];
+export const IMPORT_VISUAL = "plan_mode_import_visual";
+export const EXPLAIN_DENIED_HELPERS: readonly string[] = [
+  "plan_mode_complete",
+  IMPORT_VISUAL,
+  ...IMPLEMENTATION_HELPERS,
+];
 export const PLAN_HELPER_NAMES = ["plan_mode_question", "plan_mode_complete", "plan_mode_edit"] as const;
+export const ALL_PLAN_HELPERS = [...PLAN_HELPER_NAMES, IMPORT_VISUAL] as const;
 /** Change only workflow-owned declarations, using Pi's live selection even during rollback. */
 export function setWorkflowHelpers(pi: ExtensionAPI, owned: readonly string[], wanted: readonly string[]) {
   const active = pi.getActiveTools();
@@ -50,15 +56,16 @@ export function defaultPlanTools(tools: readonly ToolInfo[]): string[] {
 export function resolvePlanTools(
   tools: readonly ToolInfo[],
   selected?: readonly string[],
-  mode: "plan" | "explain" = "plan",
+  mode: "plan" | "ui" | "explain" = "plan",
 ): { allowed: string[]; active: string[]; unavailable: string[] } {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  const helpers = mode === "explain" ? ["plan_mode_question"] : PLAN_HELPER_NAMES;
+  const helpers = mode === "explain" ? ["plan_mode_question"] : mode === "ui" ? ALL_PLAN_HELPERS : PLAN_HELPER_NAMES;
   const requested = new Set([...(selected ?? defaultPlanTools(tools)), ...helpers]);
   const allowed: string[] = [];
   const active: string[] = [];
   const unavailable: string[] = [];
   for (const name of requested) {
+    if (name === IMPORT_VISUAL && mode !== "ui") continue;
     if (mode === "explain" && EXPLAIN_DENIED_HELPERS.includes(name)) continue;
     const tool = byName.get(name);
     if (!tool || tool.exposure === "hidden") {

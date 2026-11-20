@@ -68,8 +68,10 @@ import {
 } from "./state.js";
 import { DEFAULT_PLAN_TEMPLATE_ID, listPlanTemplates, type PlanTemplate, resolvePlanTemplate } from "./templates.js";
 import {
+  ALL_PLAN_HELPERS,
   defaultPlanTools,
   EXPLAIN_DENIED_HELPERS,
+  IMPORT_VISUAL,
   PLAN_HELPER_NAMES,
   resolvePlanTools,
   setWorkflowHelpers,
@@ -77,6 +79,7 @@ import {
 } from "./tool-policy.js";
 
 import { turnPrompt } from "./turn-prompt.js";
+import { importVisual, visualWorkspace } from "./visuals.js";
 
 type Mode = "normal" | "explain" | "plan";
 type NextRound = { mode: Mode; tools?: string[]; detach?: boolean };
@@ -233,8 +236,9 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   }
 
   function planTools(workflow: PlanWorkflow) {
-    const resolved = resolvePlanTools(pi.getAllTools(), workflow.tools);
-    if (PLAN_HELPER_NAMES.some((name) => !resolved.active.includes(name))) {
+    const ui = workflow.template === "ui";
+    const resolved = resolvePlanTools(pi.getAllTools(), workflow.tools, ui ? "ui" : "plan");
+    if ((ui ? ALL_PLAN_HELPERS : PLAN_HELPER_NAMES).some((name) => !resolved.active.includes(name))) {
       throw new Error("The Plan helpers must be registered and available.");
     }
     return resolved;
@@ -256,8 +260,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const wanted = isRestricted(next) ? restrictionTools(next).active : [];
     setWorkflowHelpers(
       pi,
-      PLAN_HELPER_NAMES,
-      PLAN_HELPER_NAMES.filter((name) => wanted.includes(name)),
+      ALL_PLAN_HELPERS,
+      ALL_PLAN_HELPERS.filter((name) => wanted.includes(name)),
     );
   }
 
@@ -645,7 +649,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
   }
 
   pi.on("tool_call", (event, ctx) => {
-    const helper = PLAN_HELPER_NAMES.some((name) => name === event.toolName);
+    const helper = ALL_PLAN_HELPERS.some((name) => name === event.toolName);
     if (session !== ctx.sessionManager) return;
     if (state.kind === "idle") {
       if (event.toolName === PLAN_MODE_EDIT_TOOL_NAME && implementation.active(ctx)) return;
@@ -669,10 +673,18 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       };
     }
     if (state.kind === "explain") return;
-    const scopeError = artifactScope(state.workflow.artifacts, event.toolName, event.input, ctx.cwd);
+    const scopeError = artifactScope(
+      state.workflow.artifacts,
+      event.toolName,
+      event.input,
+      ctx.cwd,
+      state.workflow.template === "ui",
+    );
     if (scopeError) return { block: true, reason: scopeError };
     if (
-      (event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME || event.toolName === PLAN_MODE_EDIT_TOOL_NAME) &&
+      (event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME ||
+        event.toolName === PLAN_MODE_EDIT_TOOL_NAME ||
+        event.toolName === IMPORT_VISUAL) &&
       (event.parentToolCallId !== undefined || !standaloneToolCall(ctx, event.toolName))
     )
       return {
@@ -725,6 +737,35 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     };
   }
 
+  pi.registerTool({
+    name: IMPORT_VISUAL,
+    label: "Import UI plan image",
+    description:
+      "Copy a finished local PNG or JPEG to this UI plan's visuals directory. Call alone; use the returned relative Markdown link unchanged.",
+    defaultActive: false,
+    exposure: "model-only",
+    executionMode: "sequential",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["role", "sourcePath"],
+      properties: {
+        role: { type: "string", enum: ["before", "after"] },
+        sourcePath: { type: "string", maxLength: 4096, description: "Canonical absolute local image path" },
+      },
+    },
+    async execute(_id, params, signal, _update, ctx) {
+      const { source, isCurrent } = planningOperation(ctx, IMPORT_VISUAL, signal);
+      if (source.workflow.template !== "ui") throw new Error("Visual import requires the ui plan template.");
+      const store = await storeFor(ctx, source.workflow);
+      const workspace = visualWorkspace(store.directory, source.workflow.artifacts);
+      if (!workspace) throw new Error("No valid visual workspace for this plan.");
+      const text = await importVisual(workspace, params.role, params.sourcePath, isCurrent);
+      if (!isCurrent()) throw new Error("Visual import cancelled because the workflow changed.");
+      return { content: [{ type: "text", text }], details: undefined };
+    },
+  });
+
   async function publishPlan(
     ctx: ExtensionContext,
     operation: ReturnType<typeof planningOperation>,
@@ -747,6 +788,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!isCurrent()) throw new Error("Plan completion cancelled.");
     const document = await store.save(plan, {
       artifacts,
+      captureNewVisuals: source.workflow.template === "ui",
       name,
       document: source.workflow.document,
       expectedHash: expectedHash ?? source.workflow.hash,
@@ -822,7 +864,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       if (!document) throw new Error("No saved plan is active. Use plan_mode_complete for the initial plan.");
       const store = await storeFor(ctx, source.workflow);
       if (!operation.isCurrent()) throw new Error("Plan edit cancelled because the session changed.");
-      const plan = await store.read(document);
+      const plan = await store.read(document, { allowUnverifiedVisuals: true });
       if (source.workflow.hash && planHash(plan) !== source.workflow.hash)
         throw new Error("Plan changed on disk. Use /plan to review current contents or /plan open to edit them.");
       const edited = await applyPlanEdits(ctx, params, document, plan, operation.signal);
@@ -841,7 +883,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       throw new Error("No current saved plan. Create one with /plan <request> or choose one through /plan saved.");
     let current = lifecycle(ctx);
     const storage = store ?? (await storeFor(ctx, isPlanning(source) ? source.workflow : undefined));
-    const plan = await storage.read(selected);
+    // A missing picture must not trap the user outside review or prevent repair.
+    const plan = await storage.read(selected, { allowUnverifiedVisuals: true });
     await artifactReadiness(pi, ctx, selected.artifacts);
     if (!current.isCurrent()) return;
     if (state.kind === "idle") {
@@ -862,7 +905,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     if (!action || !current.isCurrent()) return;
     idle(ctx);
     // Never authorize contents changed while the review was open.
-    if (planHash(await storage.read(selected)) !== planHash(plan))
+    const approves = action === "here" || action === "fresh";
+    if (planHash(await storage.read(selected, { allowUnverifiedVisuals: !approves })) !== planHash(plan))
       throw new Error("Plan changed during review. Reopen review before continuing.");
     if (!current.isCurrent()) return;
     if (action === "save") {
@@ -898,6 +942,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         `Continue planning from this saved plan. Do not implement it; ask what should change if unspecified.\n\n${plan}`,
       );
     } else if (action === "fresh") {
+      const reviewedBranch = branch.signal;
       const tracked = implementation.prepare(
         ctx,
         selected,
@@ -909,7 +954,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       const previousImplementation = implementation.state;
       const manager = ctx.sessionManager;
       await leave(ctx);
-      if (session !== manager || state.kind !== "idle") return;
+      if (reviewedBranch.aborted || session !== manager || state.kind !== "idle") return;
       // Persist the end of ownership before replacement; never write through a disposed source context.
       const handoff = lifecycle(ctx);
       try {
@@ -927,7 +972,8 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
         }
         throw error;
       }
-    } else {
+    } else if (action === "here") {
+      const reviewedBranch = branch.signal;
       const tracked = implementation.prepare(
         ctx,
         selected,
@@ -940,12 +986,17 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       const manager = ctx.sessionManager;
       await leave(ctx);
       if (session !== manager || state.kind !== "idle") return;
+      const handoff = lifecycle(ctx);
       try {
+        if (selected.visualHashes) await storage.read(selected);
+        if (reviewedBranch.aborted || !handoff.isCurrent()) return;
         implementation.begin(tracked, ctx);
         pi.sendUserMessage(implementationPrompt(plan, selected));
       } catch (error) {
-        if (session === ctx.sessionManager) implementation.rollback(previousImplementation, ctx);
-        if (session === ctx.sessionManager && before.kind !== "idle") transition(before, ctx);
+        if (!reviewedBranch.aborted && handoff.isCurrent()) {
+          implementation.rollback(previousImplementation, ctx);
+          if (before.kind !== "idle") transition(before, ctx);
+        }
         throw error;
       }
     }
@@ -1041,7 +1092,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
     const document = state.kind === "ready" ? state.document : state.workflow.document;
     if (document) {
       const store = await storeFor(ctx, state.workflow);
-      const plan = await store.read(document);
+      const plan = await store.read(document, { allowUnverifiedVisuals: true });
       if (!current.isCurrent() || !isPlanning(state)) return;
       idle(ctx);
       const previous = state;
@@ -1066,16 +1117,18 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
       }
       return;
     }
-    commit({
-      ...state,
-      workflow: {
-        ...state.workflow,
-        template: selected.id,
-        templatePrompt: selected.content,
-        completionChecks: selected.completionChecks,
+    transition(
+      {
+        ...state,
+        workflow: {
+          ...state.workflow,
+          template: selected.id,
+          templatePrompt: selected.content,
+          completionChecks: selected.completionChecks,
+        },
       },
-    });
-    updateStatus(ctx);
+      ctx,
+    );
     notify(ctx, `Plan template set to ${selected.id}.`);
   }
 
@@ -1340,7 +1393,7 @@ export default async function planMode(pi: ExtensionAPI, dependencies: PlanModeD
           const current = lifecycle(ctx);
           const store = await storeFor(ctx, source.workflow);
           if (!current.isCurrent()) return;
-          const edited = await editPlanDocument(ctx, store, document, current);
+          const edited = await editPlanDocument(ctx, store, document, current, source.workflow.template === "ui");
           if (edited && current.isCurrent()) {
             commit({
               ...source,

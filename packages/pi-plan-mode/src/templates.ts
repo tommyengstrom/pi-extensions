@@ -38,7 +38,7 @@ function readBuiltinTemplate(id: string): PlanTemplate {
 export const DEFAULT_PLAN_TEMPLATE = readBuiltinTemplate(DEFAULT_PLAN_TEMPLATE_ID);
 export const BUILTIN_PLAN_TEMPLATES: readonly PlanTemplate[] = [
   DEFAULT_PLAN_TEMPLATE,
-  ...["detailed-spec", "checklist", "minimal"].map(readBuiltinTemplate),
+  ...["detailed-spec", "checklist", "minimal", "ui"].map(readBuiltinTemplate),
 ];
 
 export function planModeTemplatesDir(): string {

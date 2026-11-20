@@ -318,6 +318,8 @@ The caller owns every confirmed or selected side effect and must revalidate doma
 
 For multiple immediate actions, replace `confirmation` with `actions: [{ id: "apply", label: "Apply" }, { id: "save", label: "Save for later" }]`. The result is `{ kind: "selected", actionId: "apply" }` (or the other selected stable ID). `DocumentReviewAction` is exported from the document-review entrypoint and the Kit root. Actions must be nonempty, with unique nonblank IDs and displayable labels. Supplying both `confirmation` and `actions` is an error. The existing single-confirmation `confirmed` result is unchanged.
 
+For an in-place TUI preview, append an action with `preview: async (signal) => { ... }`. Clicking its row in fullscreen or selecting it with the confirmation key runs the callback without closing review or returning a selected ID. Check the signal after async preparation; it aborts when the review closes. Preview rows are omitted in RPC. Ordinary actions keep their existing keyboard and RPC behavior.
+
 Declarative `ReviewScreen` accepts the same `actions` with an additional `action` handler ID per entry, just like `confirm`. Dispatch passes the original stable entry ID as `itemId`, not its display label. Both RPC adapters include all actions on every document page and disambiguate labels that collide with each other or Previous/Next/Back/Close controls. Paging never dispatches an action.
 
 In multi-action TUI reviews, the first action is initially selected on each opening. Configured `tui.select.up/down` select actions without scrolling the document; `tui.select.confirm` explicitly selects the highlighted action. `tui.select.pageUp/pageDown` scroll the document, and `tui.editor.cursorLineStart/cursorLineEnd` (normally Home/End) jump to its top/bottom. Mouse wheel scrolling is limited to document rows. Actions are pinned outside the document viewport; adaptive layout compacts metadata and hints before reducing the visible action window, keeping the selected action reachable and visible at tiny sizes. Reviews without multiple actions retain their original scrolling keys.
@@ -1207,7 +1209,8 @@ Consumer fixtures continue to own domain state, persistence, generation checks, 
 - exported screen, item, action, transition, runtime option, `BrowseDetailDocument`, `DocumentCopyAction`, `DocumentCopyContext`, `MenuCloseReason`, and result types; the `/document-review` subpath also exports the copy types.
 - Focused interaction subpaths — `confirmation`, `custom-interaction`, `document-review`, `live-choice`, `multi-select`, `questionnaire`, `selectors`, and `task` export the matching runtime functions and types without requiring the package root.
 - `@narumitw/pi-tui-kit/testing` — test-only subpath for `createTuiHarness()`, `createRpcHarness()`, strict scripts, and their types; the production root does not re-export it.
-- `PI_EXTENSION_MENU_API_VERSION` — current API version (`23`).
+- `PI_EXTENSION_MENU_API_VERSION` — current API version (`24`).
+Version 24 adds in-place document review preview actions and the Markdown `terminalLinks` option.
 Version 23 adds consumer-owned inline blocked metadata to custom interactions and questionnaires; existing definitions and defaults remain valid.
 Version 22 adds opt-in in-place full-source document copy while version-21 definitions and completion results remain valid.
 Version 21 adds frame row metadata and configured-key canonicalization while version-20 definitions remain valid.

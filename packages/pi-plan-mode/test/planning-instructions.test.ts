@@ -180,12 +180,12 @@ describe("guidance Markdown", () => {
 });
 
 describe("plan templates catalog and user .md templates", () => {
-  test("built-in catalog defines decision-brief, detailed-spec, checklist, and minimal", () => {
+  test("built-in catalog includes the opt-in ui template and defaults to decision-brief", () => {
     assert.equal(DEFAULT_PLAN_TEMPLATE_ID, "decision-brief");
     assert.equal(DEFAULT_PLAN_TEMPLATE.id, "decision-brief");
     assert.deepEqual(
       BUILTIN_PLAN_TEMPLATES.map((template) => template.id),
-      ["decision-brief", "detailed-spec", "checklist", "minimal"],
+      ["decision-brief", "detailed-spec", "checklist", "minimal", "ui"],
     );
     for (const template of BUILTIN_PLAN_TEMPLATES) {
       assert.equal(template.completionChecks, undefined);
@@ -324,7 +324,7 @@ describe("plan templates catalog and user .md templates", () => {
       assert.equal(templatesDir, join(directory, "pi-plan-mode-templates"));
       assert.deepEqual(
         listPlanTemplates().map((template) => template.id),
-        ["decision-brief", "detailed-spec", "checklist", "minimal"],
+        ["decision-brief", "detailed-spec", "checklist", "minimal", "ui"],
       );
       assert.equal(resolvePlanTemplate("decision-brief").id, "decision-brief");
       assert.deepEqual(fs.readdirSync(directory), []);
@@ -351,7 +351,7 @@ describe("plan templates catalog and user .md templates", () => {
       const listed = listPlanTemplates(templatesDir);
       assert.deepEqual(
         listed.map((template) => template.id),
-        ["decision-brief", "detailed-spec", "checklist", "minimal", "adr-brief", "plain-custom"],
+        ["decision-brief", "detailed-spec", "checklist", "minimal", "ui", "adr-brief", "plain-custom"],
       );
 
       const overridden = resolvePlanTemplate("decision-brief", templatesDir);

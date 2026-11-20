@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the opt-in `ui` plan template and desktop comparison previews. Record SHA-256 fingerprints for linked screenshots and mockups so a same-name replacement cannot silently pass preview or approval. Requires TUI Kit 0.70.0.
+
 ### Tool permissions
 
 - Switch modes and select `/plan tools` while the agent is working. The current batch finishes under its original rules; changes apply to the next model call without forcing a continuation.

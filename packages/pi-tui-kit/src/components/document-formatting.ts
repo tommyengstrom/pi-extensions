@@ -27,6 +27,7 @@ export function createDocumentLineCache(theme: DocumentTheme, includeSearchMetad
         filePath: string | undefined;
         renderLatex: boolean | undefined;
         renderMermaid: boolean | undefined;
+        terminalLinks: boolean | undefined;
         richMarkdown: boolean;
         width: number;
         presentation: DocumentPresentation;
@@ -41,6 +42,7 @@ export function createDocumentLineCache(theme: DocumentTheme, includeSearchMetad
       cached.filePath === identity.filePath &&
       cached.renderLatex === identity.renderLatex &&
       cached.renderMermaid === identity.renderMermaid &&
+      cached.terminalLinks === identity.terminalLinks &&
       cached.richMarkdown === identity.richMarkdown &&
       cached.width === width
     ) {
@@ -54,6 +56,7 @@ export function createDocumentLineCache(theme: DocumentTheme, includeSearchMetad
       filePath: identity.filePath,
       renderLatex: identity.renderLatex,
       renderMermaid: identity.renderMermaid,
+      terminalLinks: identity.terminalLinks,
       richMarkdown: identity.richMarkdown,
       width,
       presentation: next,
@@ -637,7 +640,12 @@ function renderMarkdownDocument(
     { color: (text) => theme.fg("text", text) },
     { renderLatex: format.renderLatex ?? true },
   );
-  return component.render(Math.max(1, width));
+  const lines = component.render(Math.max(1, width));
+  // The Markdown renderer itself emits OSC 8 *after* source sanitization. In an
+  // untrusted review keep the styling, but leave dispatch to explicit actions.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: OSC 8 hyperlink delimiters are terminal controls.
+  const hyperlinkSequence = /\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+  return format.terminalLinks === false ? lines.map((line) => line.replaceAll(hyperlinkSequence, "")) : lines;
 }
 
 function markdownTheme(theme: DocumentTheme): MarkdownTheme {
@@ -674,6 +682,7 @@ function documentFormatIdentity(format: ReviewFormat | undefined) {
   const shared = {
     renderLatex: undefined,
     renderMermaid: undefined,
+    terminalLinks: undefined,
     richMarkdown: supportsRichMarkdown(),
   };
   if (format?.kind === "code") {
@@ -690,6 +699,7 @@ function documentFormatIdentity(format: ReviewFormat | undefined) {
       filePath: undefined,
       renderLatex: format.renderLatex ?? true,
       renderMermaid: format.renderMermaid ?? true,
+      terminalLinks: format.terminalLinks,
     };
   }
   return { ...shared, kind: "text" as const, language: undefined, filePath: undefined };

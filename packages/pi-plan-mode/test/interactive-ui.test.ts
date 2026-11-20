@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
 import { createRpcHarness, createTuiHarness } from "@narumitw/pi-tui-kit/testing";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { type MenuLifecycle, reviewPlan, selectPlanTools, selectSavedPlan } from "../src/interactive-ui.js";
 import type { PlanDocument } from "../src/plan-store.js";
-import { builtinTool, createMockContext, extensionTool } from "./support.js";
+import * as visualFiles from "../src/visuals.js";
+import { builtinTool, createMockContext, extensionTool, otherPixelPng, pixelHash, pixelPng } from "./support.js";
 
 function owner() {
   const controller = new AbortController();
@@ -89,6 +94,86 @@ test("review shows Markdown, metadata and all actions immediately; fresh is alwa
     if (attempt === 0) tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     assert.equal(await running, attempt === 0 ? "here" : "fresh");
+  }
+});
+
+test("UI review previews the exact local image on click or Enter, never approves, and stays usable on failures", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "visual-review-")));
+  const capabilities = getCapabilities();
+  setCapabilities({ ...capabilities, hyperlinks: true });
+  try {
+    const id = randomUUID();
+    const directory = join(root, "artifacts", id);
+    const visuals = join(directory, "visuals");
+    await mkdir(visuals, { recursive: true });
+    for (const name of ["before", "after"]) await writeFile(join(visuals, `${name}.png`), pixelPng);
+    const doc = {
+      ...document,
+      path: join(root, "alpha.md"),
+      visualHashes: { "before.png": pixelHash, "after.png": pixelHash },
+      artifacts: { version: 1 as const, workspace: { id, directory }, references: [] },
+    };
+    const plan = ["before", "after"].map((name) => `[${name}.png](artifacts/${id}/visuals/${name}.png)`).join("\n");
+    const tui = createTuiHarness({ rows: 32 });
+    const ctx = createMockContext({ mode: "tui", custom: tui.custom });
+    const opened: string[] = [];
+    const open = async (path: string) => {
+      opened.push(path);
+      if (path.endsWith("after.png")) throw new Error("No viewer");
+    };
+    const running = reviewPlan(ctx.ctx, plan, doc, owner().lifecycle, open);
+    await tui.waitForOpen();
+    const row = frame(tui)
+      .split("\n")
+      .findIndex((line) => line.includes("Current — screenshot: before.png"));
+    assert.ok(row >= 0);
+    assert.ok(
+      !tui.render().join("\n").includes("\u001b]8;"),
+      "document links must not bypass validated preview actions",
+    );
+    tui.mouse({ type: "press", x: 8, y: row });
+    tui.mouse({ type: "click", x: 8, y: row });
+    await vi.waitFor(() => assert.deepEqual(opened, [join(visuals, "before.png")]));
+    tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(ctx.notifications.at(-1)?.message ?? "", /Could not open .*after.png/));
+    assert.deepEqual(opened, [join(visuals, "before.png"), join(visuals, "after.png")]);
+    await writeFile(join(visuals, "before.png"), otherPixelPng);
+    tui.press("tui.select.up");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(ctx.notifications.at(-1)?.message ?? "", /Could not open .*before.png/));
+    assert.equal(opened.length, 2, "a different valid PNG is not dispatched");
+    await rm(join(visuals, "after.png"));
+    tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(ctx.notifications.at(-1)?.message ?? "", /Could not open .*after.png/));
+    assert.equal(tui.openCount, 1);
+    // Dismiss while validation is pending, then explicitly deliver its late result.
+    const late = Promise.withResolvers<string>();
+    const validation = vi.spyOn(visualFiles, "resolveVisual").mockReturnValueOnce(late.promise);
+    try {
+      tui.press("tui.select.confirm");
+      assert.equal(validation.mock.calls.length, 1);
+      tui.press("tui.select.cancel");
+      assert.equal(await running, undefined);
+      late.resolve(join(visuals, "after.png"));
+      await late.promise;
+    } finally {
+      validation.mockRestore();
+    }
+    const rpc = createRpcHarness([
+      {
+        kind: "select",
+        options: ["Implement in fresh session", "Implement here", "Save for later", "Continue planning", "Close"],
+        response: undefined,
+      },
+    ]);
+    assert.equal(await reviewPlan(rpcContext(rpc), plan, doc, owner().lifecycle, open), undefined);
+    assert.ok(rpc.dialogs[0]?.title.includes(join(visuals, "before.png")));
+    assert.equal(opened.length, 2);
+  } finally {
+    setCapabilities(capabilities);
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -1,5 +1,9 @@
 # @narumitw/pi-tui-kit
 
+## 0.70.0
+
+- Document review supports in-place TUI preview actions and disabling terminal hyperlinks in rendered Markdown. Preview actions do not approve a plan and are omitted in RPC.
+
 ## 0.69.0
 
 ### Minor Changes
