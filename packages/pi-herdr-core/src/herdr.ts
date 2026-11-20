@@ -15,6 +15,7 @@ import {
   SUBAGENT_TOOL_NAMES,
   type WorkerOverrides,
 } from "@narumitw/pi-background";
+import { registerBtw } from "./btw.js";
 import { canonical, captureCapabilities, delegable } from "./capabilities.js";
 import { parseTask, prepareWorker } from "./launch.js";
 import { terminalText } from "./terminal-text.js";
@@ -162,6 +163,7 @@ export default function herdr(pi: ExtensionAPI): void {
   const offDelegate = pi.events.on(DELEGATION_EVENT_V2, (respond) => {
     if (typeof respond === "function") respond(delegate);
   });
+  registerBtw(pi, background);
   registerSubagentTools(pi, perform);
   pi.registerCommand("subagent", {
     description: "Delegate a task: /subagent [--agent PROFILE] TASK",

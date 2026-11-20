@@ -6,7 +6,7 @@ A personal workspace for developing [pi-plan-mode](packages/pi-plan-mode/README.
 
 - [`packages/pi-plan-mode`](packages/pi-plan-mode): restricted `/explain` conversation and `/plan` approval workflows; **Alt+M** cycles Normal → Explain → Plan → Normal.
 - [`packages/pi-artifacts`](packages/pi-artifacts): background text artifact agents with confined native writes and persistent feedback conversations.
-- [`packages/pi-herdr-core`](packages/pi-herdr-core): One-shot Pi CLI workers in Core terminals, with optional named profiles and inherited tool restrictions.
+- [`packages/pi-herdr-core`](packages/pi-herdr-core): One-shot Pi CLI workers in Core terminals, plus `/btw` side chats that can continue in a focused Herdr desktop tab.
 - [`packages/pi-background`](packages/pi-background): internal shared workflow-context and completion-notification library (not an extension).
 - [`packages/pi-activity-digest`](packages/pi-activity-digest): `/digest` opens a separate, locally summarized view of branch activity without changing the transcript.
 - [`packages/pi-tool-summary`](packages/pi-tool-summary): inline tool-call labels with click-to-inspect arguments. Live labels can send the entire tool input, including credentials and file contents, to Luna in a separate, potentially billable request; see the [privacy details](packages/pi-tool-summary/README.md#background-requests).

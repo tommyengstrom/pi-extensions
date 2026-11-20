@@ -9,6 +9,14 @@ Delegate a question to a fresh, one-shot **Pi CLI** in a local Herdr Core termin
 - The process-compose `dev` job already starts inside Core. Alternatively, from the repo root in `nix develop`, stop that job, then `hc run --bg --name pi-extensions --cwd "$PWD" -- "$(command -v nix)" develop -c bun run dev` and `hc attach pi-extensions`.
 - Requires local `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`; no autostart, remote routing or process fallback. Targets stock Core 0.1.18 (also accepts 0.1.21) and the Node Pi CLI 1.5.1. Uses the installed CLI, not a `pi` found on PATH.
 
+### `/btw [prompt]`: ask on the side
+
+In interactive Pi, try `/btw why did we choose that approach?`. A focused overlay answers using a snapshot of the current branch and the selected model. Type follow-ups in the overlay, or start with bare `/btw` to open the editor without sending a request. Replies use the configured provider (normal usage charges apply), without tools or edits. Close the overlay with the displayed cancel key to discard it; nothing is appended to the main chat.
+
+After a completed answer, submit `/herdr` **inside the overlay** to save the thread as a separate Pi session and select it in a new Herdr desktop tab. It resumes after the last answer without resending the question. This is a normal interactive Pi CLI with its own configuration, not a one-shot worker; it stays open when the original chat ends. The selected model/provider must also be configured for that CLI. Handoff is unavailable under Plan/Explain restrictions or a review hold.
+
+Inline chat needs no Herdr installation. Handoff needs `herdr-app` on PATH and an open desktop app supporting `ls` and `do tab.new`. Use one local space, or invoke `/btw` from the intended space's terminal. Remote spaces and legacy `herdr` TUI windows aren't targets. Focus selects the tab inside Herdr; it does not raise the OS window. If launch is unconfirmed, check Herdr before reopening the saved session.
+
 ### Named profiles
 
 Optional, user-controlled files in `<getAgentDir()>/pi-herdr-core/profiles/`. For example `reviewer.json`:
